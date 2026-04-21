@@ -9,6 +9,9 @@ cg/*/tests/test_*
 !cg/*/tests/test_*.nim
 cg/*/examples/example_*
 !cg/*/examples/example_*.nim
+src/pty/test_*
+!src/pty/test_*.nim
+src/pty/posix_backend
 *.o
 .claude/reports/
 .claude/settings.local.json

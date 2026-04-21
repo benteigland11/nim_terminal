@@ -15,6 +15,7 @@
 ## a widget and the terminal can install it from the widget library.
 
 import std/posix
+import std/os
 import ../../cg/backend_pty_host_nim/src/pty_host_lib
 
 # POSIX PTY allocation primitives that std/posix does not expose.
