@@ -1,0 +1,13 @@
+nimcache/
+nimblecache/
+*.exe
+tests/test_*
+!tests/test_*.nim
+examples/example_*
+!examples/example_*.nim
+cg/*/tests/test_*
+!cg/*/tests/test_*.nim
+cg/*/examples/example_*
+!cg/*/examples/example_*.nim
+*.o
+.claude/reports/
