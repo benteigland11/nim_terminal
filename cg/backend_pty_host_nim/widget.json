@@ -2,7 +2,7 @@
   "meta": {
     "id": "backend-pty-host-nim",
     "name": "PTY Host",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "domain": "backend",
     "tags": [
       "pty",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 1,
-    "validated_at": "2026-04-21T03:58:31.237989+00:00",
+    "validated_at": "2026-04-21T04:42:25.719394+00:00",
     "runtime": "nim 2.2.8"
   }
 }

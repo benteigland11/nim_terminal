@@ -97,9 +97,7 @@ proc spawn*[B](
   ## backend is expected to prepend `program` itself.
   let (h, slaveId) = backend.ptyOpen()
   backend.ptySetSize(h, rows, cols)
-  var argv = newSeqOfCap[string](args.len)
-  for a in args: argv.add a
-  let pid = backend.ptyForkExec(slaveId, program, argv, cwd)
+  let pid = backend.ptyForkExec(slaveId, program, args, cwd)
   PtyHost[B](
     backend: backend,
     handle: h,
