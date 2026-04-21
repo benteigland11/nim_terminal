@@ -11,3 +11,4 @@ cg/*/examples/example_*
 !cg/*/examples/example_*.nim
 *.o
 .claude/reports/
+.claude/settings.local.json
