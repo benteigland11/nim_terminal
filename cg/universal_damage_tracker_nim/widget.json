@@ -1,18 +1,18 @@
 {
   "meta": {
-    "id": "universal-utf8-decoder-nim",
-    "name": "UTF-8 Decoder",
+    "id": "universal-damage-tracker-nim",
+    "name": "Damage Tracker",
     "version": "1.0.0",
     "domain": "universal",
     "tags": [
-      "utf8",
-      "unicode",
-      "streaming",
-      "east-asian-width",
-      "decoder"
+      "damage",
+      "dirty",
+      "render",
+      "invalidation",
+      "incremental"
     ]
   },
-  "description": "Streaming UTF-8 decoder that handles split buffers, invalid sequences, overlong encodings, and surrogate codepoints per the W3C/WHATWG replacement policy. Emits (rune, width) pairs through a callback, where width is 0 for combining/zero-width codepoints, 1 for narrow, and 2 for east-asian-wide or emoji \u2014 suitable for terminal grid layout. Pure, no I/O, no dependencies.",
+  "description": "Mark-and-sweep damage tracker over an indexed linear range (rows, lines, cells, scanlines \u2014 anything addressable by integer index). A caller marks indices dirty as mutations happen, a consumer queries which indices need repainting, paints them, and clears. Includes a fullRepaint flag set by markAll and resize for events whose blast radius is the whole range. Domain-agnostic: the widget never sees the underlying data, only indices, so it works equally well for terminal grids, UI surfaces, scanline renderers, or any collection that supports partial-repaint optimization. Pure stateless logic, no I/O, no platform dependencies.",
   "tech_stack": {
     "language": "nim",
     "dependencies": []
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 1,
-    "validated_at": "2026-04-21T05:26:44.672108+00:00",
+    "validated_at": "2026-04-21T05:30:06.839970+00:00",
     "runtime": "nim 2.2.8"
   }
 }

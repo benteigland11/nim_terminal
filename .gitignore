@@ -12,6 +12,10 @@ cg/*/examples/example_*
 src/pty/test_*
 !src/pty/test_*.nim
 src/pty/posix_backend
+src/test_*
+!src/test_*.nim
+src/terminal
+!src/terminal.nim
 *.o
 .claude/reports/
 .claude/settings.local.json
