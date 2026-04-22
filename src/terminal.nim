@@ -19,10 +19,11 @@ import ../cg/data_vt_commands_nim/src/vt_commands_lib
 import ../cg/data_screen_buffer_nim/src/screen_buffer_lib
 import ../cg/data_keyboard_vt_input_nim/src/keyboard_vt_input_lib
 import ../cg/universal_damage_tracker_nim/src/damage_tracker_lib
+import ../cg/universal_selection_region_nim/src/selection_region_lib
 import pty/posix_backend
 
 export pty_host_lib, screen_buffer_lib, posix_backend, keyboard_vt_input_lib,
-       damage_tracker_lib
+       damage_tracker_lib, selection_region_lib
 
 type
   Terminal* = ref object
@@ -34,6 +35,7 @@ type
     screen*: Screen
     keyboardMode*: KeyboardMode
     damage*: Damage
+    selection*: Selection
 
 proc newTerminal*(
     program: string,
@@ -56,6 +58,7 @@ proc newTerminal*(
     screen: newScreen(cols, rows, scrollback),
     keyboardMode: newKeyboardMode(),
     damage: newDamage(rows),
+    selection: newSelection(),
   )
 
 # ---------------------------------------------------------------------------
@@ -303,6 +306,42 @@ proc resize*(t: Terminal, cols, rows: int) =
   t.host.resize(cols, rows)
   t.screen.resize(cols, rows)
   t.damage.resize(rows)
+
+# ---------------------------------------------------------------------------
+# Selection
+# ---------------------------------------------------------------------------
+
+func appendRuneUtf8(buf: var string, rune: uint32) =
+  if rune < 0x80'u32:
+    buf.add char(rune)
+  elif rune < 0x800'u32:
+    buf.add char(0xC0'u32 or (rune shr 6))
+    buf.add char(0x80'u32 or (rune and 0x3F'u32))
+  elif rune < 0x10000'u32:
+    buf.add char(0xE0'u32 or (rune shr 12))
+    buf.add char(0x80'u32 or ((rune shr 6) and 0x3F'u32))
+    buf.add char(0x80'u32 or (rune and 0x3F'u32))
+  else:
+    buf.add char(0xF0'u32 or (rune shr 18))
+    buf.add char(0x80'u32 or ((rune shr 12) and 0x3F'u32))
+    buf.add char(0x80'u32 or ((rune shr 6) and 0x3F'u32))
+    buf.add char(0x80'u32 or (rune and 0x3F'u32))
+
+proc selectionText*(t: Terminal): string =
+  ## Walk the current selection's spans against the screen grid and
+  ## return the covered text. Row boundaries inject '\n'. Continuation
+  ## cells (right half of a wide char) are skipped so we emit one rune
+  ## per glyph, not one per cell.
+  if not t.selection.isActive or t.selection.isEmpty: return
+  let spans = t.selection.spans(t.screen.cols)
+  var lastRow = -1
+  for sp in spans:
+    if lastRow >= 0: result.add '\n'
+    for col in sp.startCol ..< sp.endCol:
+      let cell = t.screen.cellAt(sp.row, col)
+      if cell.width == 0: continue   # right half of double-wide
+      appendRuneUtf8(result, cell.rune)
+    lastRow = sp.row
 
 proc kill*(t: Terminal, signum: int = int(SIGTERM)) =
   t.host.kill(signum)

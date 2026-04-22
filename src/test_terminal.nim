@@ -165,3 +165,70 @@ suite "damage tracking":
     t.close()
     check t.damage.size == 8
     check t.damage.fullRepaint
+
+suite "selection text extraction":
+
+  test "stream selection pulls partial row":
+    let t = newTerminal(
+      "/bin/sh", ["-c", "printf 'hello world'"], rows = 3, cols = 20)
+    discard t.drain()
+    discard t.waitExit()
+    t.close()
+    t.selection.start(point(0, 6))
+    t.selection.update(point(0, 10))
+    check t.selectionText == "world"
+
+  test "stream selection across two rows joins with newline":
+    let t = newTerminal(
+      "/bin/sh", ["-c", "printf 'abc\\ndef'"], rows = 3, cols = 10)
+    discard t.drain()
+    discard t.waitExit()
+    t.close()
+    # Drag from 'b' on row 0 through 'e' on row 1.
+    t.selection.start(point(0, 1))
+    t.selection.update(point(1, 1))
+    # Row 0 tail: "bc" + trailing spaces up to col 9 → then '\n' → row 1 head "de".
+    let text = t.selectionText
+    check text.startsWith("bc")
+    check '\n' in text
+    check text.endsWith("de")
+
+  test "line selection grabs whole row":
+    let t = newTerminal(
+      "/bin/sh", ["-c", "printf 'hello'"], rows = 2, cols = 10)
+    discard t.drain()
+    discard t.waitExit()
+    t.close()
+    t.selection.start(point(0, 0), smLine)
+    let text = t.selectionText
+    check text.startsWith("hello")
+    check text.len == 10  # whole row, padded with spaces
+
+  test "inactive selection returns empty string":
+    let t = newTerminal(
+      "/bin/sh", ["-c", "printf 'x'"], rows = 2, cols = 10)
+    discard t.drain()
+    discard t.waitExit()
+    t.close()
+    check t.selectionText == ""
+
+  test "block selection pulls rectangle":
+    let t = newTerminal(
+      "/bin/sh", ["-c", "printf 'abcdefg\\nhijklmn'"], rows = 3, cols = 10)
+    discard t.drain()
+    discard t.waitExit()
+    t.close()
+    t.selection.start(point(0, 2), smBlock)
+    t.selection.update(point(1, 4))
+    # cols 2..4 on rows 0..1 → "cde" and "jkl"
+    check t.selectionText == "cde\njkl"
+
+  test "utf-8 rune preserved through selection":
+    let t = newTerminal(
+      "/bin/sh", ["-c", "printf '\\xc3\\xa9X'"], rows = 2, cols = 10)
+    discard t.drain()
+    discard t.waitExit()
+    t.close()
+    t.selection.start(point(0, 0))
+    t.selection.update(point(0, 1))
+    check t.selectionText == "éX"
