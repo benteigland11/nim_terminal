@@ -18,12 +18,6 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Install MinGW (Windows)
-      if: runner.os == 'Windows'
-      uses: egor-tensin/setup-mingw@v2
-      with:
-        platform: x64
-
     - name: Setup Nim
       uses: jiro4989/setup-nim-action@v2
       with:
