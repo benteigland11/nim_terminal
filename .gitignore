@@ -20,3 +20,5 @@ src/terminal
 .claude/reports/
 .claude/settings.local.json
 nim_terminal
+nim.cfg
+*.exe
