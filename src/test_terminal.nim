@@ -3,8 +3,32 @@
 ## These tests verify that VT sequences result in the correct
 ## screen buffer state and damage tracking.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, options]
 import terminal
+
+# ---------------------------------------------------------------------------
+# Mock Backend for Logic Tests
+# ---------------------------------------------------------------------------
+
+type MockBackend = ref object
+  data: seq[byte]
+
+proc ptyOpen(b: MockBackend): tuple[handle: int, slaveId: string] = (1, "mock")
+proc ptyRead(b: MockBackend, h: int, buf: var openArray[byte]): int =
+  if b.data.len == 0: return 0
+  let n = min(buf.len, b.data.len)
+  for i in 0 ..< n: buf[i] = b.data[i]
+  if n > 0:
+    for i in 0 ..< b.data.len - n: b.data[i] = b.data[i + n]
+    b.data.setLen(b.data.len - n)
+  n
+proc ptyWrite(b: MockBackend, h: int, data: openArray[byte]): int = data.len
+proc ptyResize(b: MockBackend, h, r, c: int) = discard
+proc ptySignal(b: MockBackend, p, s: int) = discard
+proc ptyWait(b: MockBackend, p: int): int = 0
+proc ptyClose(b: MockBackend, h: int) = discard
+proc ptySetSize(b: MockBackend, h, r, c: int) = discard
+proc ptyForkExec(b: MockBackend, s, p: string, a: openArray[string], c: string): int = 123
 
 # ---------------------------------------------------------------------------
 # Mock Terminal Initialization
@@ -22,6 +46,7 @@ proc newMockTerminal*(rows, cols: int): Terminal =
     viewport: newViewport(rows),
     drag: newDragController(rows),
     shortcuts: newShortcutMap(),
+    history: newSemanticHistory(),
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
@@ -122,3 +147,27 @@ suite "theming and dynamic colors":
     t.feed("\e]11;rgb:ff/00/ff\e\\")
     check t.screen.theme.background.r == 255
     check t.screen.theme.background.b == 255
+
+suite "semantic history":
+
+  test "OSC 133 sequences populate semantic history":
+    let t = newMockTerminal(10, 80)
+    # Start prompt
+    t.feed("\e]133;A\e\\")
+    t.feed("$ ")
+    # Command start
+    t.feed("\e]133;B\e\\")
+    t.feed("echo hello\r\n")
+    # Command executed
+    t.feed("\e]133;C\e\\")
+    t.feed("hello\r\n")
+    # Command finished (exit 0)
+    t.feed("\e]133;D;0\e\\")
+    
+    check t.history.blocks.len == 1
+    let b = t.history.blocks[0]
+    check b.promptStartRow == 0
+    check b.commandStartRow == 0
+    check b.outputStartRow == 1
+    check b.outputEndRow == 2
+    check b.exitCode.get() == 0

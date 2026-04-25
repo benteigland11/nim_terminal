@@ -168,6 +168,14 @@ suite "OSC":
   test "OSC with no numeric prefix → unknown":
     check translateOsc(bytesOf("bogus")).kind == cmdUnknown
 
+  test "OSC 133 Shell Integration":
+    check translateOsc(bytesOf("133;A")).kind == cmdShellPromptStart
+    check translateOsc(bytesOf("133;B")).kind == cmdShellCommandStart
+    check translateOsc(bytesOf("133;C")).kind == cmdShellCommandExecuted
+    let d = translateOsc(bytesOf("133;D;12"))
+    check d.kind == cmdShellCommandFinished
+    check d.exitCode == 12
+
 suite "Print":
   test "translatePrint carries rune + width":
     let c = translatePrint(0x4E2D'u32, 2)

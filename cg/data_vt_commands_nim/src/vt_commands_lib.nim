@@ -100,6 +100,10 @@ type
     cmdClipboardRequest   ## OSC 52
     cmdSetPaletteColor    ## OSC 4
     cmdSetThemeColor      ## OSC 10 (fg), 11 (bg), 12 (cursor)
+    cmdShellPromptStart   ## OSC 133 ; A
+    cmdShellCommandStart  ## OSC 133 ; B
+    cmdShellCommandExecuted ## OSC 133 ; C
+    cmdShellCommandFinished ## OSC 133 ; D
     cmdReset              ## RIS (ESC c)
     cmdIgnored            ## known-good sequence the translator chose to drop
     cmdUnknown            ## not recognized — raw bytes exposed for tracing
@@ -155,6 +159,8 @@ type
     of cmdSetThemeColor:
       themeColorItem*: int # 10, 11, 12
       themeColorSpec*: string
+    of cmdShellCommandFinished:
+      exitCode*: int
     else:
       discard
 
@@ -383,5 +389,20 @@ proc translateOsc*(data: openArray[byte]): VtCommand =
     # OSC 10/11/12 ; spec
     return VtCommand(kind: cmdSetThemeColor, themeColorItem: code,
                      themeColorSpec: asciiString(data, body, data.len))
+  of 133:
+    # OSC 133 ; [A|B|C|D] [; args]
+    let sep = findChar(data, ';', body)
+    let letterEnd = if sep < 0: data.len else: sep
+    let letterStr = asciiString(data, body, letterEnd)
+    if letterStr == "A": return VtCommand(kind: cmdShellPromptStart)
+    elif letterStr == "B": return VtCommand(kind: cmdShellCommandStart)
+    elif letterStr == "C": return VtCommand(kind: cmdShellCommandExecuted)
+    elif letterStr == "D":
+      var exitCode = 0
+      if sep >= 0:
+        try: exitCode = parseInt(asciiString(data, sep + 1, data.len))
+        except: discard
+      return VtCommand(kind: cmdShellCommandFinished, exitCode: exitCode)
+    else: return VtCommand(kind: cmdIgnored)
   else:
     return VtCommand(kind: cmdIgnored)

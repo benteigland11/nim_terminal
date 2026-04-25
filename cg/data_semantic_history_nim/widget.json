@@ -1,18 +1,18 @@
 {
   "meta": {
-    "id": "data-vt-commands-nim",
-    "name": "VT Commands",
-    "version": "1.5.0",
+    "id": "data-semantic-history-nim",
+    "name": "Semantic History",
+    "version": "1.0.0",
     "domain": "data",
     "tags": [
-      "terminal",
-      "vt",
-      "ansi",
-      "commands",
-      "translator"
+      "shell",
+      "integration",
+      "history",
+      "command",
+      "osc133"
     ]
   },
-  "description": "Parser-agnostic translator that turns raw CSI / ESC / OSC / C0 dispatches from a terminal escape-sequence parser into a typed VtCommand variant (CursorUp, CursorTo, SetSgr, EraseInLine, SetScrollRegion, SetTitle, Hyperlink, etc.). Separates semantic interpretation from both the parser and the screen-buffer callers. Covers the xterm-common subset used by vim/tmux/htop. Unknown sequences surface as cmdUnknown rather than being silently dropped.",
+  "description": "State machine for tracking shell integration sequences (OSC 133) to build command history.",
   "tech_stack": {
     "language": "nim",
     "dependencies": []
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T21:33:23.791043+00:00",
+    "validated_at": "2026-04-25T21:34:36.021549+00:00",
     "runtime": "nim 2.2.8"
   }
 }

@@ -18,6 +18,7 @@ import ../cg/universal_viewport_nim/src/viewport_lib
 import ../cg/backend_pty_async_nim/src/pty_async_lib
 import ../cg/universal_drag_controller_nim/src/drag_controller_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
+import ../cg/data_semantic_history_nim/src/semantic_history_lib
 
 # OS-Specific Backend Selection
 when defined(posix):
@@ -33,7 +34,8 @@ else:
 export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
-       drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib
+       drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib,
+       semantic_history_lib
 
 type
   Terminal* = ref object
@@ -50,6 +52,7 @@ type
     viewport*: Viewport
     drag*: DragController
     shortcuts*: ShortcutMap
+    history*: SemanticHistory
     # DCS accumulation
     dcsActive: bool
     dcsParams: seq[VtParam]
@@ -95,6 +98,7 @@ proc newTerminal*(
     viewport: newViewport(rows),
     drag: newDragController(rows),
     shortcuts: sMap,
+    history: newSemanticHistory(),
     dcsActive: false,
   )
 
@@ -242,6 +246,10 @@ proc apply*(t: Terminal, cmd: VtCommand) =
       of 12: t.screen.theme.cursor = c
       else: discard
       t.damage.markAll()
+  of cmdShellPromptStart: t.history.markPromptStart(t.screen.totalRows - t.screen.rows + t.screen.cursor.row)
+  of cmdShellCommandStart: t.history.markCommandStart(t.screen.totalRows - t.screen.rows + t.screen.cursor.row)
+  of cmdShellCommandExecuted: t.history.markCommandExecuted(t.screen.totalRows - t.screen.rows + t.screen.cursor.row)
+  of cmdShellCommandFinished: t.history.markCommandFinished(t.screen.totalRows - t.screen.rows + t.screen.cursor.row, cmd.exitCode)
   of cmdDcsPassthrough: (if t.onDcsPassthrough != nil: t.onDcsPassthrough(cmd))
   of cmdReset: (t.screen.reset(); t.damage.markAll())
   of cmdIgnored, cmdUnknown: discard
