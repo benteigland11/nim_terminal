@@ -169,21 +169,34 @@ func cellAt*(s: Screen, row, col: int): Cell =
   if row < 0 or row >= s.rows or col < 0 or col >= s.cols: return emptyCell()
   (if s.usingAlt: s.altGrid else: s.grid)[row][col]
 
-func totalRows*(s: Screen): int = s.scrollback.len + s.rows
+func totalRows*(s: Screen): int =
+  if s.usingAlt: s.rows else: s.scrollback.len + s.rows
 
 func absoluteRowAt*(s: Screen, absRow: int): seq[Cell] =
   if absRow < 0: return @[]
+  if s.usingAlt:
+    if absRow >= s.rows: return @[]
+    return s.altGrid[absRow]
   if absRow < s.scrollback.len: return s.scrollback[absRow]
   let gr = absRow - s.scrollback.len
   if gr >= s.rows: return @[]
-  (if s.usingAlt: s.altGrid else: s.grid)[gr]
+  s.grid[gr]
 
 func absoluteCellAt*(s: Screen, absRow, col: int): Cell =
   if col < 0 or col >= s.cols or absRow < 0: return emptyCell()
-  if absRow < s.scrollback.len: return s.scrollback[absRow][col]
+  if s.usingAlt:
+    if absRow >= s.rows: return emptyCell()
+    let row = s.altGrid[absRow]
+    if col >= row.len: return emptyCell()
+    return row[col]
+  if absRow < s.scrollback.len:
+    if col >= s.scrollback[absRow].len: return emptyCell()
+    return s.scrollback[absRow][col]
   let gr = absRow - s.scrollback.len
   if gr >= s.rows: return emptyCell()
-  (if s.usingAlt: s.altGrid else: s.grid)[gr][col]
+  let row = s.grid[gr]
+  if col >= row.len: return emptyCell()
+  row[col]
 
 func lineText*(s: Screen, row: int): string =
   if row < 0 or row >= s.rows: return ""
@@ -193,17 +206,42 @@ func lineText*(s: Screen, row: int): string =
     if c.isContinuation: continue
     result.add Rune(c.rune)
 
+func absoluteLineText*(s: Screen, absRow: int): string =
+  let cells = s.absoluteRowAt(absRow)
+  result = newStringOfCap(cells.len)
+  for c in cells:
+    if c.isContinuation: continue
+    result.add Rune(c.rune)
+
+func colOfByteIndex*(s: Screen, absRow: int, byteIdx: int): int =
+  ## Maps a byte index from the UTF-8 string back to a grid column.
+  let cells = s.absoluteRowAt(absRow)
+  var currentByte = 0
+  for col, c in cells:
+    if c.isContinuation: continue
+    if byteIdx <= currentByte: return col
+    let r = Rune(c.rune)
+    currentByte += ($r).len
+    if byteIdx <= currentByte: return col + max(1, int(c.width))
+  cells.len
+
 # ---------------------------------------------------------------------------
 # Mutations
 # ---------------------------------------------------------------------------
 
 proc setCell(s: Screen, row, col: int, cell: Cell) =
   if row < 0 or row >= s.rows or col < 0 or col >= s.cols: return
-  if s.usingAlt: s.altGrid[row][col] = cell
-  else: s.grid[row][col] = cell
+  if s.usingAlt:
+    if col < s.altGrid[row].len: s.altGrid[row][col] = cell
+  else:
+    if col < s.grid[row].len: s.grid[row][col] = cell
 
 proc clearRow(s: Screen, row: int, startCol, endCol: int, attrs: Attrs) =
-  for c in startCol .. endCol: s.setCell(row, c, emptyCell(attrs))
+  if row < 0 or row >= s.rows or s.cols <= 0: return
+  let first = max(0, startCol)
+  let last = min(s.cols - 1, endCol)
+  if first > last: return
+  for c in first .. last: s.setCell(row, c, emptyCell(attrs))
 
 proc clearGrid(grid: var seq[seq[Cell]], startRow, endRow: int, cols: int, attrs: Attrs) =
   for r in startRow .. endRow:
@@ -241,15 +279,25 @@ proc reset*(s: Screen) =
   for r in 0 ..< s.rows: (s.grid[r] = makeRow(s.cols, attrs); s.altGrid[r] = makeRow(s.cols, attrs))
 
 proc resize*(s: Screen, cols, rows: int) =
+  if cols <= 0 or rows <= 0: return
   if cols == s.cols and rows == s.rows: return
   let oldRows = s.rows; let oldCols = s.cols; let attrs = defaultAttrs()
   if rows < oldRows and not s.usingAlt:
     let diff = oldRows - rows
     for i in 0 ..< diff:
-      s.scrollback.add s.grid[i]
+      var row = s.grid[i]
+      row.setLen(cols)
+      for c in oldCols ..< cols: row[c] = emptyCell(attrs)
+      s.scrollback.add row
       if s.scrollback.len > s.scrollbackCap: s.scrollback.delete(0)
     for i in 0 ..< rows: s.grid[i] = s.grid[i + diff]
     s.grid.setLen(rows); s.altGrid.setLen(rows)
+    for r in 0 ..< rows:
+      s.grid[r].setLen(cols)
+      s.altGrid[r].setLen(cols)
+      for c in oldCols ..< cols:
+        s.grid[r][c] = emptyCell(attrs)
+        s.altGrid[r][c] = emptyCell(attrs)
   else:
     s.grid.setLen(rows); s.altGrid.setLen(rows)
     for r in 0 ..< rows:

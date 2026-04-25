@@ -144,6 +144,7 @@ type
       regionTop*, regionBottom*: int
     of cmdSetMode, cmdResetMode:
       modeCode*: int
+      modeCodes*: seq[int]
       privateMode*: bool
     of cmdSetTitle, cmdSetIconName:
       text*: string
@@ -180,6 +181,12 @@ func eraseModeFrom(params: openArray[DispatchParam]): EraseMode =
 
 func countFrom(params: openArray[DispatchParam]): int =
   max(1, paramOr(params, 0, 1))
+
+func modeCodesFrom(params: openArray[DispatchParam]): seq[int] =
+  if params.len == 0: return @[0]
+  result = newSeqOfCap[int](params.len)
+  for p in params:
+    result.add p.value
 
 # ---------------------------------------------------------------------------
 # Print / Execute
@@ -256,10 +263,12 @@ proc translateCsi*(
   of 'h':
     return VtCommand(kind: cmdSetMode,
                      modeCode: paramOr(params, 0, 0),
+                     modeCodes: modeCodesFrom(params),
                      privateMode: isPrivate)
   of 'l':
     return VtCommand(kind: cmdResetMode,
                      modeCode: paramOr(params, 0, 0),
+                     modeCodes: modeCodesFrom(params),
                      privateMode: isPrivate)
   of 's':
     return cmd(cmdSaveCursor)

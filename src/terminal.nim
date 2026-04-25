@@ -19,6 +19,8 @@ import ../cg/backend_pty_async_nim/src/pty_async_lib
 import ../cg/universal_drag_controller_nim/src/drag_controller_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/data_semantic_history_nim/src/semantic_history_lib
+import ../cg/universal_link_detector_nim/src/link_detector_lib
+import ../cg/data_terminal_output_footprint_nim/src/terminal_output_footprint_lib
 
 # OS-Specific Backend Selection
 when defined(posix):
@@ -35,9 +37,15 @@ export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
        drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib,
-       semantic_history_lib
+       semantic_history_lib, link_detector_lib, terminal_output_footprint_lib
 
 type
+  ActiveLink* = object
+    link*: DetectedLink
+    row*: int
+    startCol*: int
+    endCol*: int
+
   Terminal* = ref object
     ## A live child process attached to an in-memory screen grid.
     backend*: CurrentBackend
@@ -53,6 +61,8 @@ type
     drag*: DragController
     shortcuts*: ShortcutMap
     history*: SemanticHistory
+    activeLink*: Option[ActiveLink]
+    outputFootprint*: OutputFootprint
     # DCS accumulation
     dcsActive: bool
     dcsParams: seq[VtParam]
@@ -99,6 +109,8 @@ proc newTerminal*(
     drag: newDragController(rows),
     shortcuts: sMap,
     history: newSemanticHistory(),
+    activeLink: none(ActiveLink),
+    outputFootprint: newOutputFootprint(),
     dcsActive: false,
   )
 
@@ -123,6 +135,35 @@ func toScreenErase(m: vt_commands_lib.EraseMode): screen_buffer_lib.EraseMode =
 func toPaletteColor(c: color_parser_lib.RgbColor): screen_buffer_lib.PaletteColor =
   screen_buffer_lib.PaletteColor(r: c.r, g: c.g, b: c.b)
 
+func absoluteCursorRow(t: Terminal): int =
+  t.screen.totalRows - t.screen.rows + t.screen.cursor.row
+
+proc trackOutputFootprint(t: Terminal, row: int) =
+  t.outputFootprint.recordRow(row, activeAlternate = t.screen.usingAlt)
+
+proc trackOutputFootprint(t: Terminal, firstRow, lastRow: int) =
+  t.outputFootprint.recordRows(firstRow, lastRow, activeAlternate = t.screen.usingAlt)
+
+proc finishOutputFootprint(t: Terminal, force = false) =
+  let action = t.outputFootprint.consumeResume(
+    cursorRow = t.screen.cursor.row,
+    screenRows = t.screen.rows,
+    activeAlternate = t.screen.usingAlt,
+    force = force,
+  )
+  if not action.shouldMove: return
+  t.screen.carriageReturn()
+  if action.scrollCount > 0:
+    t.screen.scrollUp(action.scrollCount)
+  t.screen.cursorTo(action.targetRow, 0)
+  t.damage.markAll()
+
+proc armOutputFootprintIfRestored(t: Terminal) =
+  t.outputFootprint.armAfterCursorRestore(
+    cursorRow = t.screen.cursor.row,
+    activeAlternate = t.screen.usingAlt,
+  )
+
 # ---------------------------------------------------------------------------
 # Command application
 # ---------------------------------------------------------------------------
@@ -133,16 +174,35 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
     of 1:    t.inputMode.cursorApp = set
     of 7:    (if set: t.screen.modes.incl smAutoWrap else: t.screen.modes.excl smAutoWrap)
     of 9:    t.inputMode.mouseMode = if set: mmX11 else: mmNone
-    of 47, 1047: (t.screen.useAlternateScreen(set); t.damage.markAll())
+    of 47, 1047:
+      t.screen.useAlternateScreen(set)
+      if set:
+        t.screen.cursorTo(0, 0)
+        t.screen.eraseInDisplay(screen_buffer_lib.emAll)
+      t.viewport.updateBufferHeight(t.screen.totalRows, true)
+      t.damage.markAll()
     of 66:   t.inputMode.keypadApp = set
     of 1000: t.inputMode.mouseMode = if set: mmX11 else: mmNone
     of 1003: t.inputMode.mouseMode = if set: mmX11 else: mmNone
     of 1006: t.inputMode.mouseMode = if set: mmSgr else: mmNone
     of 1004: t.inputMode.focusReporting = set
-    of 1048: (if set: t.screen.saveCursor() else: t.screen.restoreCursor())
+    of 1048:
+      if set:
+        t.screen.saveCursor()
+      else:
+        t.screen.restoreCursor()
+        t.armOutputFootprintIfRestored()
     of 1049:
-      if set: (t.screen.saveCursor(); t.screen.useAlternateScreen(true))
-      else: (t.screen.useAlternateScreen(false); t.screen.restoreCursor())
+      if set:
+        t.screen.saveCursor()
+        t.screen.useAlternateScreen(true)
+        t.outputFootprint.reset()
+        t.screen.cursorTo(0, 0)
+        t.screen.eraseInDisplay(screen_buffer_lib.emAll)
+      else:
+        t.screen.useAlternateScreen(false)
+        t.screen.restoreCursor()
+      t.viewport.updateBufferHeight(t.screen.totalRows, true)
       t.damage.markAll()
     of 2004: t.inputMode.bracketedPaste = set
     else: discard
@@ -155,9 +215,12 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   let rowBefore = t.screen.cursor.row
   case cmd.kind
   of cmdPrint:
+    if t.outputFootprint.isArmed:
+      t.finishOutputFootprint()
     if t.screen.cursor.pendingWrap or t.screen.cursor.col + cmd.width > t.screen.cols:
       if t.screen.cursor.row == t.screen.scrollBottom: t.damage.markAll()
     t.screen.writeRune(cmd.rune, cmd.width)
+    t.trackOutputFootprint(rowBefore, t.screen.cursor.row)
     t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row)
   of cmdExecute:
     case char(cmd.rawByte)
@@ -191,24 +254,37 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdCursorTo:       (t.screen.cursorTo(cmd.row, cmd.col); t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row))
   of cmdCursorToColumn: (t.screen.cursorTo(t.screen.cursor.row, cmd.absCol); t.damage.markRow(t.screen.cursor.row))
   of cmdCursorToRow:    (t.screen.cursorTo(cmd.absRow, t.screen.cursor.col); t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row))
-  of cmdEraseInLine:    (t.screen.eraseInLine(toScreenErase(cmd.eraseMode)); t.damage.markRow(rowBefore))
-  of cmdEraseInDisplay: (t.screen.eraseInDisplay(toScreenErase(cmd.eraseMode)); t.damage.markAll())
+  of cmdEraseInLine:    (t.screen.eraseInLine(toScreenErase(cmd.eraseMode)); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
+  of cmdEraseInDisplay:
+    t.screen.eraseInDisplay(toScreenErase(cmd.eraseMode))
+    t.damage.markAll()
   of cmdEraseChars:
     let saved = t.screen.cursor; let k = min(cmd.count, t.screen.cols - saved.col)
     for i in 0 ..< k: (t.screen.cursorTo(saved.row, saved.col + i); t.screen.writeRune(uint32(' '), 1))
     t.screen.cursor = saved; t.damage.markRow(saved.row)
-  of cmdInsertLines: (t.screen.insertLines(cmd.count); t.damage.markAll())
-  of cmdDeleteLines: (t.screen.deleteLines(cmd.count); t.damage.markAll())
-  of cmdInsertChars: (t.screen.insertChars(cmd.count); t.damage.markRow(rowBefore))
-  of cmdDeleteChars: (t.screen.deleteChars(cmd.count); t.damage.markRow(rowBefore))
-  of cmdScrollUp:    (t.screen.scrollUp(cmd.count); t.damage.markAll())
-  of cmdScrollDown:  (t.screen.scrollDown(cmd.count); t.damage.markAll())
+    t.trackOutputFootprint(saved.row)
+  of cmdInsertLines: (t.screen.insertLines(cmd.count); t.trackOutputFootprint(rowBefore, t.screen.scrollBottom); t.damage.markAll())
+  of cmdDeleteLines: (t.screen.deleteLines(cmd.count); t.trackOutputFootprint(rowBefore, t.screen.scrollBottom); t.damage.markAll())
+  of cmdInsertChars: (t.screen.insertChars(cmd.count); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
+  of cmdDeleteChars: (t.screen.deleteChars(cmd.count); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
+  of cmdScrollUp:    (t.screen.scrollUp(cmd.count); t.trackOutputFootprint(t.screen.scrollTop, t.screen.scrollBottom); t.damage.markAll())
+  of cmdScrollDown:  (t.screen.scrollDown(cmd.count); t.trackOutputFootprint(t.screen.scrollTop, t.screen.scrollBottom); t.damage.markAll())
   of cmdSaveCursor:     t.screen.saveCursor()
-  of cmdRestoreCursor:  t.screen.restoreCursor()
+  of cmdRestoreCursor:  t.screen.restoreCursor(); t.armOutputFootprintIfRestored()
   of cmdSetSgr:         t.screen.applySgr(toSgrParams(cmd.sgrParams))
   of cmdSetScrollRegion: (let bot = if cmd.regionBottom == DefaultScrollRegionBottom: t.screen.rows - 1 else: cmd.regionBottom; t.screen.setScrollRegion(cmd.regionTop, bot))
-  of cmdSetMode:        t.applyMode(cmd.modeCode, cmd.privateMode, true)
-  of cmdResetMode:      t.applyMode(cmd.modeCode, cmd.privateMode, false)
+  of cmdSetMode:
+    if cmd.modeCodes.len == 0:
+      t.applyMode(cmd.modeCode, cmd.privateMode, true)
+    else:
+      for code in cmd.modeCodes:
+        t.applyMode(code, cmd.privateMode, true)
+  of cmdResetMode:
+    if cmd.modeCodes.len == 0:
+      t.applyMode(cmd.modeCode, cmd.privateMode, false)
+    else:
+      for code in cmd.modeCodes:
+        t.applyMode(code, cmd.privateMode, false)
   of cmdSetTabStop:     t.screen.setTabStop()
   of cmdClearTabStop:   t.screen.clearTabStop()
   of cmdClearAllTabStops: t.screen.clearAllTabStops()
@@ -246,10 +322,17 @@ proc apply*(t: Terminal, cmd: VtCommand) =
       of 12: t.screen.theme.cursor = c
       else: discard
       t.damage.markAll()
-  of cmdShellPromptStart: t.history.markPromptStart(t.screen.totalRows - t.screen.rows + t.screen.cursor.row)
-  of cmdShellCommandStart: t.history.markCommandStart(t.screen.totalRows - t.screen.rows + t.screen.cursor.row)
-  of cmdShellCommandExecuted: t.history.markCommandExecuted(t.screen.totalRows - t.screen.rows + t.screen.cursor.row)
-  of cmdShellCommandFinished: t.history.markCommandFinished(t.screen.totalRows - t.screen.rows + t.screen.cursor.row, cmd.exitCode)
+  of cmdShellPromptStart:
+    t.finishOutputFootprint(force = t.history.phase == sphOutput)
+    t.history.markPromptStart(t.absoluteCursorRow())
+  of cmdShellCommandStart:
+    t.history.markCommandStart(t.absoluteCursorRow())
+  of cmdShellCommandExecuted:
+    t.outputFootprint.reset()
+    t.history.markCommandExecuted(t.absoluteCursorRow())
+  of cmdShellCommandFinished:
+    t.finishOutputFootprint(force = t.history.phase == sphOutput)
+    t.history.markCommandFinished(t.absoluteCursorRow(), cmd.exitCode)
   of cmdDcsPassthrough: (if t.onDcsPassthrough != nil: t.onDcsPassthrough(cmd))
   of cmdReset: (t.screen.reset(); t.damage.markAll())
   of cmdIgnored, cmdUnknown: discard

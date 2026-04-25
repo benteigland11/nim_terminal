@@ -36,3 +36,16 @@ suite "input vt encoding":
     mode.cursorApp = true
     let bytes = encodeKeyEvent(key(kArrowUp), mode)
     check cast[string](bytes) == "\eOA"
+
+  test "control character encoding":
+    let ctrlC = encodeKeyEvent(keyChar(uint32('c'), {modCtrl}))
+    let ctrlUnderscore = encodeKeyEvent(keyChar(uint32('_'), {modCtrl}))
+    let ctrlBackslash = encodeKeyEvent(keyChar(uint32('\\'), {modCtrl}))
+    let ctrlLeftBracket = encodeKeyEvent(keyChar(uint32('['), {modCtrl}))
+    let ctrlQuestion = encodeKeyEvent(keyChar(uint32('?'), {modCtrl}))
+
+    check ctrlC == @[3'u8]
+    check ctrlUnderscore == @[31'u8]
+    check ctrlBackslash == @[28'u8]
+    check ctrlLeftBracket == @[27'u8]
+    check ctrlQuestion == @[127'u8]

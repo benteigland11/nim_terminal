@@ -174,6 +174,23 @@ suite "Alternate screen":
     s.useAlternateScreen(false)
     check s.trimmedLine(0) == "main"
 
+  test "alt buffer absolute rows ignore primary scrollback":
+    let s = newScreen(4, 2, scrollback = 10)
+    s.writeString("one"); s.carriageReturn(); s.linefeed()
+    s.writeString("two"); s.carriageReturn(); s.linefeed()
+    check s.scrollbackLen == 1
+    check s.totalRows == 3
+
+    s.useAlternateScreen(true)
+    s.cursorTo(0, 0)
+    s.writeString("alt")
+    check s.totalRows == 2
+    check s.absoluteLineText(0).strip() == "alt"
+    check s.absoluteRowAt(2).len == 0
+
+    s.useAlternateScreen(false)
+    check s.totalRows == 3
+
 suite "Save / restore cursor":
   test "save/restore round-trips position and attrs":
     let s = newScreen(10, 3)
@@ -251,6 +268,28 @@ suite "Resize":
     s.writeString("ccc")
     s.resize(4, 2)
     check s.scrollbackLen >= 1
+
+  test "shrinking rows while growing columns resizes preserved rows":
+    let s = newScreen(4, 3, scrollback = 10)
+    s.writeString("aaa"); s.linefeed(); s.carriageReturn()
+    s.writeString("bbb"); s.linefeed(); s.carriageReturn()
+    s.writeString("ccc")
+    s.resize(6, 2)
+    check s.cols == 6
+    check s.rows == 2
+    s.cursorTo(0, 5)
+    s.eraseInLine(emToEnd)
+    check s.cellAt(0, 5).rune == uint32(' ')
+
+  test "shrinking rows while growing columns resizes scrollback rows":
+    let s = newScreen(4, 3, scrollback = 10)
+    s.writeString("aaa"); s.linefeed(); s.carriageReturn()
+    s.writeString("bbb"); s.linefeed(); s.carriageReturn()
+    s.writeString("ccc")
+    s.resize(6, 2)
+    check s.scrollbackLen >= 1
+    check s.scrollbackLine(0).len == 6
+    check s.absoluteCellAt(0, 5).rune == uint32(' ')
 
 suite "Wide characters":
   test "wide char occupies two cells and advances by 2":

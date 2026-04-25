@@ -47,6 +47,8 @@ proc newMockTerminal*(rows, cols: int): Terminal =
     drag: newDragController(rows),
     shortcuts: newShortcutMap(),
     history: newSemanticHistory(),
+    activeLink: none(ActiveLink),
+    outputFootprint: newOutputFootprint(),
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
@@ -91,6 +93,69 @@ suite "terminal pipeline":
     t.feed("\xC3\xA9X") 
     check t.screen.cellAt(0, 0).rune == 0x00E9'u32
     check t.screen.cellAt(0, 1).rune == uint32('X')
+
+  test "utf-8 box drawing survives VT parser C1 range":
+    let t = newMockTerminal(2, 10)
+    t.feed("┌─┐")
+    check t.screen.cellAt(0, 0).rune == 0x250C'u32
+    check t.screen.cellAt(0, 1).rune == 0x2500'u32
+    check t.screen.cellAt(0, 2).rune == 0x2510'u32
+
+  test "alternate screen exit restores primary without stale app rows":
+    let t = newMockTerminal(4, 10)
+    t.feed("shell\r\n")
+    t.feed("\e[?1049h┌─┐\e[?1049l")
+    check not t.screen.usingAlt
+    check t.screen.lineText(0).strip() == "shell"
+    check t.screen.lineText(1).strip() == ""
+    check t.screen.lineText(2).strip() == ""
+
+  test "alternate screen mode works inside combined DECSET list":
+    let t = newMockTerminal(4, 10)
+    t.feed("shell\r\n")
+    t.feed("\e[?1;1049;2004happ\e[?1;1049;2004l")
+    check not t.screen.usingAlt
+    check not t.inputMode.cursorApp
+    check not t.inputMode.bracketedPaste
+    check t.screen.lineText(0).strip() == "shell"
+    check t.screen.lineText(1).strip() == ""
+
+  test "inline command prompt resumes below output footprint":
+    let t = newMockTerminal(6, 20)
+    t.feed("sh$ claude\r\n")
+    t.feed("\e]133;C\e\\")
+    t.feed("\e[3;1HClaude UI")
+    t.feed("\e[2;1Hprompt")
+    t.feed("\e]133;D;0\e\\")
+    t.feed("sh$ ")
+    check t.screen.lineText(1).strip() == "prompt"
+    check t.screen.lineText(2).strip() == "Claude UI"
+    check t.screen.lineText(3).strip() == "sh$"
+
+  test "cursor restore before prompt resumes below drawn footprint":
+    let t = newMockTerminal(6, 20)
+    t.feed("sh$ claude\r\n")
+    t.feed("\e7")
+    t.feed("\e[2J")
+    t.feed("\e[3;1HClaude UI")
+    t.feed("\e[5;1HStatus")
+    t.feed("\e8")
+    t.feed("sh$ ")
+    check t.screen.lineText(2).strip() == "Claude UI"
+    check t.screen.lineText(4).strip() == "Status"
+    check t.screen.lineText(5).strip() == "sh$"
+
+  test "full display erase alone does not push prompt to bottom":
+    let t = newMockTerminal(6, 20)
+    t.feed("sh$ claude\r\n")
+    t.feed("\e7")
+    t.feed("\e[2J")
+    t.feed("\e[3;1HClaude UI")
+    t.feed("\e8")
+    t.feed("sh$ ")
+    check t.screen.lineText(2).strip() == "Claude UI"
+    check t.screen.lineText(3).strip() == "sh$"
+    check t.screen.lineText(5).strip() == ""
 
 suite "damage tracking":
 

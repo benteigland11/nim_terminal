@@ -16,6 +16,7 @@ when defined(windows):
   proc CreatePseudoConsole*(size: COORD, hInput, hOutput: Handle, flags: DWORD, phPC: ptr HPCON): HRESULT {.stdcall, importc: "CreatePseudoConsole", dynlib: "kernel32.dll".}
   proc ResizePseudoConsole*(hPC: HPCON, size: COORD): HRESULT {.stdcall, importc: "ResizePseudoConsole", dynlib: "kernel32.dll".}
   proc ClosePseudoConsole*(hPC: HPCON) {.stdcall, importc: "ClosePseudoConsole", dynlib: "kernel32.dll".}
+  proc PeekNamedPipe*(hNamedPipe: Handle, lpBuffer: pointer, nBufferSize: DWORD, lpBytesRead: ptr DWORD, lpTotalBytesAvail: ptr DWORD, lpBytesLeftThisMessage: ptr DWORD): WINBOOL {.stdcall, importc: "PeekNamedPipe", dynlib: "kernel32.dll".}
 
   # For Process Creation
   type
@@ -68,13 +69,21 @@ when defined(windows):
     b.hPC = hPC
     b.ptyIn = inWrite
     b.ptyOut = outRead
-    
+
     inRead.close()
     outWrite.close()
 
     (1, "conpty")
 
   proc ptyRead*(b: WindowsBackend, h: int, buf: var openArray[byte]): int =
+    var avail: DWORD
+    if PeekNamedPipe(Handle(b.ptyOut.value), nil, 0, nil, addr avail, nil) == 0:
+      let err = osLastError().int64
+      if err == 109: return -1 # ERROR_BROKEN_PIPE
+      return -1
+
+    if avail == 0: return 0
+
     var bytesRead: int32
     if readFile(Handle(b.ptyOut.value), addr buf[0], int32(buf.len), addr bytesRead, nil) == 0:
       let err = osLastError().int64
@@ -124,7 +133,7 @@ when defined(windows):
     var attrList = alloc0(size)
     if InitializeProcThreadAttributeList(attrList, 1, 0, addr size) == 0:
       raiseWinError(osLastError().int64, "InitializeProcThreadAttributeList")
-    
+
     var hPC = b.hPC
     if UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, addr hPC, cast[SIZE_T](sizeof(HPCON)), nil, nil) == 0:
       raiseWinError(osLastError().int64, "UpdateProcThreadAttribute")
@@ -134,7 +143,7 @@ when defined(windows):
     si.lpAttributeList = attrList
 
     var pi: PROCESS_INFORMATION
-    
+
     var cmdLine = p
     for arg in a:
       cmdLine &= " " & arg
@@ -144,7 +153,7 @@ when defined(windows):
     if c.len > 0: pCwd = newWideCString(c)
 
     let flags = EXTENDED_STARTUPINFO_PRESENT
-    
+
     if createProcessW(nil, wCmdLine, nil, nil, 0, int32(flags), nil, pCwd, si.StartupInfo, pi) == 0:
       raiseWinError(osLastError().int64, "CreateProcessW")
 

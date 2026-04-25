@@ -2,7 +2,7 @@
   "meta": {
     "id": "data-vt-commands-nim",
     "name": "VT Commands",
-    "version": "1.5.0",
+    "version": "1.5.1",
     "domain": "data",
     "tags": [
       "terminal",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T21:33:23.791043+00:00",
+    "validated_at": "2026-04-25T23:02:54.594048+00:00",
     "runtime": "nim 2.2.8"
   }
 }

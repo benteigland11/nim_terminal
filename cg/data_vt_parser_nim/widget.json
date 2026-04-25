@@ -2,7 +2,7 @@
   "meta": {
     "id": "data-vt-parser-nim",
     "name": "VT Parser",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "domain": "data",
     "tags": [
       "terminal",
@@ -24,8 +24,8 @@
     "domain": "Transformation logic must be pure and stateless - same input always produces same output, no side effects. Accept the broadest practical input type (bytes, str, file-like, path) and let the caller choose. Expose encoding, delimiter, schema, and other format details as parameters. Raise descriptive errors on malformed input rather than silently coercing or dropping data."
   },
   "validation": {
-    "engine_version": 1,
-    "validated_at": "2026-04-21T05:26:40.918240+00:00",
+    "engine_version": 2,
+    "validated_at": "2026-04-25T22:54:50.868204+00:00",
     "runtime": "nim 2.2.8"
   }
 }

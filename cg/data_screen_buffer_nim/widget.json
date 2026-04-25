@@ -2,7 +2,7 @@
   "meta": {
     "id": "data-screen-buffer-nim",
     "name": "Screen Buffer",
-    "version": "1.6.0",
+    "version": "1.6.3",
     "domain": "data",
     "tags": [
       "terminal",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T19:23:55.279521+00:00",
+    "validated_at": "2026-04-25T22:59:30.939112+00:00",
     "runtime": "nim 2.2.8"
   }
 }

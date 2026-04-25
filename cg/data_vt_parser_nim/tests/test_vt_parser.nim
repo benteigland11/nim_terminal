@@ -14,8 +14,8 @@ proc collector(log: EventLog): VtEmit =
   result = proc (ev: VtEvent) =
     log.events.add ev
 
-proc run(data: string): seq[VtEvent] =
-  var p = newVtParser()
+proc run(data: string; utf8Mode = true): seq[VtEvent] =
+  var p = newVtParser(utf8Mode = utf8Mode)
   let log = newLog()
   p.feed(data, collector(log))
   log.events
@@ -165,10 +165,24 @@ suite "OSC sequences":
     check s == "2;title"
 
   test "OSC terminated by 8-bit ST (0x9C)":
-    let evs = run("\x1B]8;;https://example\x9C")
+    let evs = run("\x1B]8;;https://example\x9C", utf8Mode = false)
     check evs.len == 1
     check evs[0].kind == veOscDispatch
     check evs[0].oscData.len > 0
+
+suite "Legacy 8-bit C1 controls":
+  test "8-bit CSI works when UTF-8 mode is disabled":
+    let evs = run("\x9B31m", utf8Mode = false)
+    check evs.len == 1
+    check evs[0].kind == veCsiDispatch
+    check evs[0].params.len == 1
+    check evs[0].params[0].value == 31
+    check evs[0].final == byte('m')
+
+  test "8-bit CSI bytes print in default UTF-8 mode":
+    let evs = run("\x9B31m")
+    check evs.len == 4
+    check evs[0].kind == vePrint and bv(evs[0]) == 0x9B
 
 suite "DCS sequences":
   test "DCS hook + put + unhook":
@@ -248,3 +262,11 @@ suite "UTF-8 passthrough":
     check evs.len == 2
     check evs[0].kind == vePrint and bv(evs[0]) == 0xC3
     check evs[1].kind == vePrint and bv(evs[1]) == 0xA9
+
+  test "box drawing bytes are not mistaken for C1 controls":
+    # U+2500 BOX DRAWINGS LIGHT HORIZONTAL: E2 94 80.
+    let evs = run("─")
+    check evs.len == 3
+    check evs[0].kind == vePrint and bv(evs[0]) == 0xE2
+    check evs[1].kind == vePrint and bv(evs[1]) == 0x94
+    check evs[2].kind == vePrint and bv(evs[2]) == 0x80

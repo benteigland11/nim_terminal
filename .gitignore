@@ -1,4 +1,5 @@
 nimcache/
+.nimcache*/
 nimblecache/
 *.exe
 tests/test_*
@@ -16,6 +17,7 @@ src/test_*
 !src/test_*.nim
 src/terminal
 !src/terminal.nim
+benchmarks/terminal_benchmarks
 *.o
 .claude/reports/
 .claude/settings.local.json

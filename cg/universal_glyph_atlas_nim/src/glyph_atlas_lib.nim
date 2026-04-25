@@ -74,6 +74,26 @@ proc getGlyph*(a: GlyphAtlas, rune: uint32): Glyph =
     
   a.cache[rune]
 
+proc setFallbackTypefaces*(a: GlyphAtlas, fallbacks: openArray[Typeface]) =
+  ## Replace the atlas font's fallback chain.
+  ##
+  ## Pixie resolves glyph paths through the primary typeface and then this
+  ## fallback list, so callers can keep one monospace cell metric while
+  ## filling symbol/emoji/private-use gaps from other typefaces.
+  a.font.typeface.fallbacks.setLen(0)
+  for fallback in fallbacks:
+    if fallback != nil:
+      a.font.typeface.fallbacks.add fallback
+  a.cache.clear()
+  a.nextX = 0
+  a.nextY = 0
+  a.atlasImage.fill(color(0, 0, 0, 0))
+  a.isDirty = true
+
+func hasGlyphOrFallback*(a: GlyphAtlas, rune: uint32): bool =
+  ## True when the primary typeface or any configured fallback has a glyph.
+  a.font.typeface.fallbackTypeface(Rune(rune)) != nil
+
 proc clear*(a: GlyphAtlas) =
   a.cache.clear()
   a.nextX = 0

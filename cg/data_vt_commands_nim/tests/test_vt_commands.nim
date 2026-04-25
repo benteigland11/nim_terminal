@@ -96,12 +96,21 @@ suite "CSI modes":
     check c.kind == cmdSetMode
     check c.privateMode
     check c.modeCode == 25
+    check c.modeCodes == @[25]
+
+  test "CSI ? mode lists preserve every code":
+    let c = translateCsi(@[p(1), p(1049), p(2004)], @[byte('?')], byte('h'))
+    check c.kind == cmdSetMode
+    check c.privateMode
+    check c.modeCode == 1
+    check c.modeCodes == @[1, 1049, 2004]
 
   test "CSI 4 l is reset IRM (non-private)":
     let c = translateCsi(@[p(4)], @[], byte('l'))
     check c.kind == cmdResetMode
     check not c.privateMode
     check c.modeCode == 4
+    check c.modeCodes == @[4]
 
   test "CSI g clears current tab stop; CSI 3 g clears all":
     check translateCsi(@[], @[], byte('g')).kind == cmdClearTabStop

@@ -74,6 +74,7 @@ type
 
   VtParser* = object
     state: State
+    utf8Mode: bool         ## true keeps 0x80..0x9F available for UTF-8 continuation bytes
     intermediates: seq[byte]
     params: seq[VtParam]
     oscBuf: seq[byte]
@@ -82,9 +83,15 @@ type
     pendingStringEnd: bool ## we saw ESC while in a string state; waiting for '\\'
     preStringState: State  ## the string state we left to handle ST
 
-func newVtParser*(): VtParser =
+func newVtParser*(utf8Mode = true): VtParser =
   ## Create a fresh parser in GROUND state.
-  VtParser(state: sGround)
+  ##
+  ## Modern terminal streams are normally UTF-8. In UTF-8 mode the parser
+  ## treats bytes 0x80..0x9F as printable stream bytes so the caller's UTF-8
+  ## decoder can reassemble characters such as box drawing and powerline
+  ## symbols. Set `utf8Mode = false` for legacy streams that use raw 8-bit C1
+  ## controls such as CSI 0x9B or ST 0x9C.
+  VtParser(state: sGround, utf8Mode: utf8Mode)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -233,18 +240,22 @@ proc anywhere(p: var VtParser, b: byte, emit: VtEmit): bool =
     p.enterEscape()
     return true
   of 0x80..0x8F, 0x91..0x97, 0x99, 0x9A:
+    if p.utf8Mode: return false
     # Executable C1 controls (except the ones below that enter string states).
     emit VtEvent(kind: veExecute, byteVal: b)
     p.resetSeq()
     p.state = sGround
     return true
   of 0x98, 0x9E, 0x9F:
+    if p.utf8Mode: return false
     # SOS, PM, APC (8-bit).
     p.enterSosPmApc()
     return true
   of 0x9B:
+    if p.utf8Mode: return false
     p.enterCsi(); return true
   of 0x9C:
+    if p.utf8Mode: return false
     # ST (8-bit) — terminates strings.
     case p.state
     of sOscString:
@@ -259,8 +270,10 @@ proc anywhere(p: var VtParser, b: byte, emit: VtEmit): bool =
     p.state = sGround
     return true
   of 0x9D:
+    if p.utf8Mode: return false
     p.enterOsc(); return true
   of 0x90:
+    if p.utf8Mode: return false
     p.enterDcs(); return true
   else:
     return false
