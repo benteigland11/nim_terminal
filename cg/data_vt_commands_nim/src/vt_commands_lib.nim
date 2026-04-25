@@ -17,6 +17,8 @@
 const
   DefaultScrollRegionBottom* = -1   ## sentinel meaning "end of screen"
 
+import std/strutils
+
 # ---------------------------------------------------------------------------
 # Input shape
 # ---------------------------------------------------------------------------
@@ -88,9 +90,16 @@ type
     cmdSetTabStop
     cmdClearTabStop
     cmdClearAllTabStops
+    cmdRequestStatusReport    ## DSR (CSI 6 n, etc)
+    cmdRequestDeviceAttributes ## DA / DA2
+    cmdRequestWindowReport     ## CSI t
     cmdSetTitle           ## OSC 0 / 2
     cmdSetIconName        ## OSC 1
     cmdHyperlink          ## OSC 8
+    cmdDcsPassthrough     ## DCS hook + put + unhook accumulated
+    cmdClipboardRequest   ## OSC 52
+    cmdSetPaletteColor    ## OSC 4
+    cmdSetThemeColor      ## OSC 10 (fg), 11 (bg), 12 (cursor)
     cmdReset              ## RIS (ESC c)
     cmdIgnored            ## known-good sequence the translator chose to drop
     cmdUnknown            ## not recognized — raw bytes exposed for tracing
@@ -103,6 +112,14 @@ type
     of cmdExecute, cmdUnknown:
       rawByte*: byte         ## original C0/C1 byte or CSI/ESC final
       rawFinal*: byte        ## duplicated for symmetry with CSI unknowns
+    of cmdRequestStatusReport, cmdRequestDeviceAttributes, cmdRequestWindowReport:
+      requestArgs*: seq[DispatchParam]
+      requestPrivate*: bool
+    of cmdDcsPassthrough:
+      dcsParams*: seq[DispatchParam]
+      dcsIntermediates*: seq[byte]
+      dcsFinal*: byte
+      dcsData*: seq[byte]
     of cmdCursorUp, cmdCursorDown, cmdCursorForward, cmdCursorBackward,
        cmdCursorNextLine, cmdCursorPrevLine,
        cmdInsertLines, cmdDeleteLines,
@@ -129,6 +146,15 @@ type
     of cmdHyperlink:
       uri*: string
       hyperlinkParams*: string
+    of cmdClipboardRequest:
+      clipboardSelector*: string
+      base64Data*: string
+    of cmdSetPaletteColor:
+      paletteIndex*: int
+      paletteColorSpec*: string
+    of cmdSetThemeColor:
+      themeColorItem*: int # 10, 11, 12
+      themeColorSpec*: string
     else:
       discard
 
@@ -233,12 +259,43 @@ proc translateCsi*(
     return cmd(cmdSaveCursor)
   of 'u':
     return cmd(cmdRestoreCursor)
+  of 'n':
+    var copy: seq[DispatchParam] = @[]
+    for p in params: copy.add p
+    return VtCommand(kind: cmdRequestStatusReport, requestArgs: copy, requestPrivate: isPrivate)
+  of 'c':
+    var copy: seq[DispatchParam] = @[]
+    for p in params: copy.add p
+    return VtCommand(kind: cmdRequestDeviceAttributes, requestArgs: copy, requestPrivate: isPrivate)
+  of 't':
+    var copy: seq[DispatchParam] = @[]
+    for p in params: copy.add p
+    return VtCommand(kind: cmdRequestWindowReport, requestArgs: copy, requestPrivate: isPrivate)
   of 'g':
     case paramOr(params, 0, 0)
     of 3: return cmd(cmdClearAllTabStops)
     else: return cmd(cmdClearTabStop)
   else:
     return VtCommand(kind: cmdUnknown, rawByte: final, rawFinal: final)
+
+proc translateDcs*(
+    params: openArray[DispatchParam],
+    intermediates: openArray[byte],
+    final: byte,
+    data: seq[byte],
+): VtCommand =
+  ## Translate a completed and accumulated DCS sequence.
+  var pseq: seq[DispatchParam] = @[]
+  for p in params: pseq.add p
+  var iseq: seq[byte] = @[]
+  for i in intermediates: iseq.add i
+  VtCommand(
+    kind: cmdDcsPassthrough,
+    dcsParams: pseq,
+    dcsIntermediates: iseq,
+    dcsFinal: final,
+    dcsData: data
+  )
 
 # ---------------------------------------------------------------------------
 # ESC (Fp/Fe/Fs, no CSI introducer)
@@ -304,5 +361,27 @@ proc translateOsc*(data: openArray[byte]): VtCommand =
     return VtCommand(kind: cmdHyperlink,
                      hyperlinkParams: asciiString(data, body, sep),
                      uri: asciiString(data, sep + 1, data.len))
+  of 52:
+    # OSC 52 ; pc ; data
+    let sep = findChar(data, ';', body)
+    if sep < 0:
+      return VtCommand(kind: cmdClipboardRequest, clipboardSelector: "",
+                       base64Data: asciiString(data, body, data.len))
+    return VtCommand(kind: cmdClipboardRequest,
+                     clipboardSelector: asciiString(data, body, sep),
+                     base64Data: asciiString(data, sep + 1, data.len))
+  of 4:
+    # OSC 4 ; index ; spec
+    let sep = findChar(data, ';', body)
+    if sep < 0: return VtCommand(kind: cmdIgnored)
+    try:
+      let idx = parseInt(asciiString(data, body, sep))
+      return VtCommand(kind: cmdSetPaletteColor, paletteIndex: idx,
+                       paletteColorSpec: asciiString(data, sep + 1, data.len))
+    except: return VtCommand(kind: cmdIgnored)
+  of 10, 11, 12:
+    # OSC 10/11/12 ; spec
+    return VtCommand(kind: cmdSetThemeColor, themeColorItem: code,
+                     themeColorSpec: asciiString(data, body, data.len))
   else:
     return VtCommand(kind: cmdIgnored)

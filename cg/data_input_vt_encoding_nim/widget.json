@@ -1,18 +1,19 @@
 {
   "meta": {
-    "id": "data-vt-commands-nim",
-    "name": "VT Commands",
-    "version": "1.4.0",
+    "id": "data-input-vt-encoding-nim",
+    "name": "Input Vt Encoding",
+    "version": "1.1.0",
     "domain": "data",
     "tags": [
       "terminal",
-      "vt",
-      "ansi",
-      "commands",
-      "translator"
+      "input",
+      "keyboard",
+      "mouse",
+      "encoding",
+      "xterm"
     ]
   },
-  "description": "Parser-agnostic translator that turns raw CSI / ESC / OSC / C0 dispatches from a terminal escape-sequence parser into a typed VtCommand variant (CursorUp, CursorTo, SetSgr, EraseInLine, SetScrollRegion, SetTitle, Hyperlink, etc.). Separates semantic interpretation from both the parser and the screen-buffer callers. Covers the xterm-common subset used by vim/tmux/htop. Unknown sequences surface as cmdUnknown rather than being silently dropped.",
+  "description": "Translates high-level input events (keyboard, mouse) into terminal escape sequences.",
   "tech_stack": {
     "language": "nim",
     "dependencies": []
@@ -25,7 +26,7 @@
   },
   "validation": {
     "engine_version": 1,
-    "validated_at": "2026-04-25T17:36:27.417922+00:00",
+    "validated_at": "2026-04-25T17:20:41.570004+00:00",
     "runtime": "nim 2.2.8"
   }
 }

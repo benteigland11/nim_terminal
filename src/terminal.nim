@@ -11,19 +11,24 @@
 ## This file is not a widget — it is project-specific wiring between
 ## five independent widgets plus the project-level POSIX driver.
 
-import std/posix
+import std/[posix, options]
 import ../cg/backend_pty_host_nim/src/pty_host_lib
 import ../cg/universal_utf8_decoder_nim/src/utf8_decoder_lib
 import ../cg/data_vt_parser_nim/src/vt_parser_lib
 import ../cg/data_vt_commands_nim/src/vt_commands_lib
 import ../cg/data_screen_buffer_nim/src/screen_buffer_lib
-import ../cg/data_keyboard_vt_input_nim/src/keyboard_vt_input_lib
+import ../cg/data_input_vt_encoding_nim/src/input_vt_encoding_lib
 import ../cg/universal_damage_tracker_nim/src/damage_tracker_lib
 import ../cg/universal_selection_region_nim/src/selection_region_lib
+import ../cg/data_vt_reports_nim/src/vt_reports_lib
+import ../cg/universal_fifo_buffer_nim/src/fifo_buffer_lib
+import ../cg/universal_base64_nim/src/base64_codec
+import ../cg/universal_color_parser_nim/src/color_parser_lib
 import pty/posix_backend
 
-export pty_host_lib, screen_buffer_lib, posix_backend, keyboard_vt_input_lib,
-       damage_tracker_lib, selection_region_lib
+export pty_host_lib, screen_buffer_lib, posix_backend, input_vt_encoding_lib,
+       damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
+       fifo_buffer_lib, base64_codec, color_parser_lib
 
 type
   Terminal* = ref object
@@ -33,9 +38,23 @@ type
     decoder: Utf8Decoder
     parser: VtParser
     screen*: Screen
-    keyboardMode*: KeyboardMode
+    inputMode*: InputMode
     damage*: Damage
     selection*: Selection
+    # Output queue
+    responseQueue*: FifoBuffer
+    # DCS accumulation
+    dcsActive: bool
+    dcsParams: seq[VtParam]
+    dcsIntermediates: seq[byte]
+    dcsFinal: byte
+    dcsData: seq[byte]
+    # Callbacks
+    onBell*: proc()
+    onTitleChanged*: proc(title: string)
+    onIconNameChanged*: proc(name: string)
+    onDcsPassthrough*: proc(cmd: VtCommand)
+    onClipboardRequest*: proc(selector, text: string)
 
 proc newTerminal*(
     program: string,
@@ -56,14 +75,18 @@ proc newTerminal*(
     decoder: newUtf8Decoder(),
     parser: newVtParser(),
     screen: newScreen(cols, rows, scrollback),
-    keyboardMode: newKeyboardMode(),
+    inputMode: newInputMode(),
     damage: newDamage(rows),
     selection: newSelection(),
+    responseQueue: newFifoBuffer(4096),
+    dcsActive: false,
   )
 
 # ---------------------------------------------------------------------------
 # Cross-widget type shims
 # ---------------------------------------------------------------------------
+
+func csi(body: string): string = "\e[" & body
 
 func toDispatchParams(src: seq[VtParam]): seq[DispatchParam] =
   result = newSeqOfCap[DispatchParam](src.len)
@@ -81,6 +104,9 @@ func toScreenErase(m: vt_commands_lib.EraseMode): screen_buffer_lib.EraseMode =
   of vt_commands_lib.emToStart: screen_buffer_lib.emToStart
   of vt_commands_lib.emAll:     screen_buffer_lib.emAll
 
+func toPaletteColor(c: color_parser_lib.RgbColor): screen_buffer_lib.PaletteColor =
+  screen_buffer_lib.PaletteColor(r: c.r, g: c.g, b: c.b)
+
 # ---------------------------------------------------------------------------
 # Command application
 # ---------------------------------------------------------------------------
@@ -90,16 +116,31 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
     case code
     of 1:
       # DECCKM — application cursor keys.
-      t.keyboardMode.cursorApp = set
+      t.inputMode.cursorApp = set
     of 7:
       if set: t.screen.modes.incl smAutoWrap
       else:   t.screen.modes.excl smAutoWrap
+    of 9:
+      # X10 Mouse tracking
+      t.inputMode.mouseMode = if set: mmX11 else: mmNone
     of 47, 1047:
       t.screen.useAlternateScreen(set)
       t.damage.markAll
     of 66:
       # DECNKM (private-mode form of DECKPAM/DECKPNM).
-      t.keyboardMode.keypadApp = set
+      t.inputMode.keypadApp = set
+    of 1000:
+      # Basic mouse tracking (press/release)
+      t.inputMode.mouseMode = if set: mmX11 else: mmNone
+    of 1003:
+      # Any-event mouse tracking (not fully implemented in encoder yet, but we track the mode)
+      t.inputMode.mouseMode = if set: mmX11 else: mmNone
+    of 1006:
+      # SGR mouse tracking
+      t.inputMode.mouseMode = if set: mmSgr else: mmNone
+    of 1004:
+      # Focus reporting mode
+      t.inputMode.focusReporting = set
     of 1048:
       if set: t.screen.saveCursor() else: t.screen.restoreCursor()
     of 1049:
@@ -110,6 +151,9 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
         t.screen.useAlternateScreen(false)
         t.screen.restoreCursor()
       t.damage.markAll
+    of 2004:
+      # Bracketed paste mode
+      t.inputMode.bracketedPaste = set
     else: discard
   else:
     case code
@@ -150,7 +194,8 @@ proc apply(t: Terminal, cmd: VtCommand) =
   of cmdCarriageReturn: t.screen.carriageReturn()
   of cmdBackspace:      t.screen.backspace()
   of cmdHorizontalTab:  t.screen.tab()
-  of cmdBell:           discard
+  of cmdBell:
+    if t.onBell != nil: t.onBell()
   of cmdCursorUp:       t.screen.cursorUp(cmd.count)
   of cmdCursorDown:     t.screen.cursorDown(cmd.count)
   of cmdCursorForward:  t.screen.cursorForward(cmd.count)
@@ -211,8 +256,66 @@ proc apply(t: Terminal, cmd: VtCommand) =
   of cmdSetTabStop:     t.screen.setTabStop()
   of cmdClearTabStop:   t.screen.clearTabStop()
   of cmdClearAllTabStops: t.screen.clearAllTabStops()
-  of cmdSetTitle, cmdSetIconName, cmdHyperlink:
-    discard  # no title/icon/hyperlink state yet; caller can subscribe later
+  of cmdRequestStatusReport:
+    let code = cmd.requestArgs.paramOr(0, 0)
+    if not cmd.requestPrivate:
+      case code
+      of 5: # Status report
+        discard t.responseQueue.writeString(csi("0n"))
+      of 6: # Cursor position report
+        discard t.responseQueue.writeString(reportCursorPosition(t.screen.cursor.row, t.screen.cursor.col))
+      else: discard
+  of cmdRequestDeviceAttributes:
+    if not cmd.requestPrivate:
+      # Primary DA
+      discard t.responseQueue.writeString(reportPrimaryDeviceAttributes({
+        tfAnsiColor, tf256Color, tfTrueColor, tfMouse1000, tfMouse1006
+      }))
+    else:
+      # Secondary DA (CSI > c)
+      discard t.responseQueue.writeString(reportSecondaryDeviceAttributes(1)) # version 1
+  of cmdRequestWindowReport:
+    let code = cmd.requestArgs.paramOr(0, 0)
+    case code
+    of 18: discard t.responseQueue.writeString(reportWindowSize(t.screen.rows, t.screen.cols))
+    of 19: discard t.responseQueue.writeString(reportScreenSize(t.screen.rows, t.screen.cols))
+    of 21: discard t.responseQueue.writeString(reportWindowTitle(t.screen.title))
+    else: discard
+  of cmdSetTitle:
+    t.screen.title = cmd.text
+    if t.onTitleChanged != nil: t.onTitleChanged(cmd.text)
+  of cmdSetIconName:
+    t.screen.iconName = cmd.text
+    if t.onIconNameChanged != nil: t.onIconNameChanged(cmd.text)
+  of cmdHyperlink:      discard
+  of cmdClipboardRequest:
+    if t.onClipboardRequest != nil:
+      try:
+        let decoded = decode(cmd.base64Data)
+        t.onClipboardRequest(cmd.clipboardSelector, decoded)
+      except:
+        discard # invalid base64
+  of cmdSetPaletteColor:
+    let color = parseColor(cmd.paletteColorSpec)
+    if color.isSome:
+      let idx = cmd.paletteIndex
+      if idx >= 0 and idx <= 15:
+        t.screen.theme.ansi[idx] = toPaletteColor(color.get)
+        t.damage.markAll
+      elif idx == 16: # Special case or just ignore for now if not supporting full 256 override
+        discard
+  of cmdSetThemeColor:
+    let color = parseColor(cmd.themeColorSpec)
+    if color.isSome:
+      let c = toPaletteColor(color.get)
+      case cmd.themeColorItem
+      of 10: t.screen.theme.foreground = c
+      of 11: t.screen.theme.background = c
+      of 12: t.screen.theme.cursor = c
+      else: discard
+      t.damage.markAll
+  of cmdDcsPassthrough:
+    if t.onDcsPassthrough != nil: t.onDcsPassthrough(cmd)
   of cmdReset:
     t.screen.reset()
     t.damage.markAll
@@ -240,8 +343,8 @@ proc feedBytes*(t: Terminal, data: openArray[byte]) =
       # intercept their raw ESC forms here before falling through.
       if ev.escIntermediates.len == 0:
         case char(ev.escFinal)
-        of '=': t.keyboardMode.keypadApp = true;  return
-        of '>': t.keyboardMode.keypadApp = false; return
+        of '=': t.inputMode.keypadApp = true;  return
+        of '>': t.inputMode.keypadApp = false; return
         else: discard
       t.apply(translateEsc(ev.escIntermediates, ev.escFinal))
     of veCsiDispatch:
@@ -250,14 +353,36 @@ proc feedBytes*(t: Terminal, data: openArray[byte]) =
         toDispatchParams(ev.params), ev.intermediates, ev.final))
     of veOscDispatch:
       t.apply(translateOsc(ev.oscData))
-    of veDcsHook, veDcsPut, veDcsUnhook:
-      discard  # DCS passthrough not wired into the screen model
+    of veDcsHook:
+      t.dcsActive = true
+      t.dcsParams = ev.params
+      t.dcsIntermediates = ev.intermediates
+      t.dcsFinal = ev.final
+      t.dcsData = @[]
+    of veDcsPut:
+      if t.dcsActive:
+        t.dcsData.add ev.byteVal
+    of veDcsUnhook:
+      if t.dcsActive:
+        t.apply(translateDcs(
+          toDispatchParams(t.dcsParams), t.dcsIntermediates, t.dcsFinal, t.dcsData))
+        t.dcsActive = false
+        t.dcsData = @[]
 
   t.parser.feed(data, vtEmit)
 
 # ---------------------------------------------------------------------------
 # Main loop primitives
 # ---------------------------------------------------------------------------
+
+proc flush*(t: Terminal): int =
+  ## Write any pending terminal reports to the child. Returns the
+  ## number of bytes written.
+  if t.responseQueue.isEmpty: return 0
+  var buf = newSeq[byte](t.responseQueue.len)
+  let n = t.responseQueue.read(buf)
+  if n <= 0: return 0
+  t.host.write(buf.toOpenArray(0, n - 1))
 
 proc step*(t: Terminal, bufSize: int = 4096): int =
   ## Perform one read→feed cycle. Returns the number of bytes applied.
@@ -266,8 +391,11 @@ proc step*(t: Terminal, bufSize: int = 4096): int =
   if t.host.closed: return 0
   var buf = newSeq[byte](bufSize)
   let n = t.host.read(buf)
-  if n <= 0: return n
-  t.feedBytes(buf.toOpenArray(0, n - 1))
+  if n > 0:
+    t.feedBytes(buf.toOpenArray(0, n - 1))
+  
+  # Always attempt to flush outgoing reports after processing input.
+  discard t.flush()
   n
 
 proc drain*(t: Terminal, maxBytes: int = 1_000_000): int =
@@ -280,6 +408,9 @@ proc drain*(t: Terminal, maxBytes: int = 1_000_000): int =
     if n == 0: break
     if n < 0: continue
     total += n
+  
+  # Final flush after drain.
+  discard t.flush()
   total
 
 proc write*(t: Terminal, data: openArray[byte]): int =
@@ -290,16 +421,35 @@ proc writeString*(t: Terminal, s: string): int =
   t.host.writeString(s)
 
 proc sendKey*(t: Terminal, ev: KeyEvent): int =
-  ## Encode a keystroke through the keyboard widget (respecting the
+  ## Encode a keystroke through the input encoder (respecting the
   ## current DECCKM / DECKPAM mode bits) and send it to the child.
-  let bytes = encode(ev, t.keyboardMode)
+  let bytes = encodeKeyEvent(ev, t.inputMode)
+  if bytes.len == 0: return 0
+  t.host.write(bytes)
+
+proc sendMouse*(t: Terminal, ev: MouseEvent): int =
+  ## Encode a mouse event through the active mouse protocol (X11, SGR)
+  ## and send it to the child.
+  let bytes = encodeMouseEvent(ev, t.inputMode)
   if bytes.len == 0: return 0
   t.host.write(bytes)
 
 proc sendPaste*(t: Terminal, text: string): int =
-  ## Write a string to the child as if pasted — no per-character
-  ## modifier handling.
-  t.writeString(text)
+  ## Write a string to the child, wrapping in bracketed-paste sequences
+  ## if enabled.
+  let bytes = encodePaste(text, t.inputMode)
+  if bytes.len == 0: return 0
+  t.host.write(bytes)
+
+proc sendFocus*(t: Terminal, gained: bool): int =
+  ## Send a Focus In/Out report if enabled.
+  if not t.inputMode.focusReporting: return 0
+  discard t.host.writeString(reportFocus(gained))
+
+proc sendClipboardResponse*(t: Terminal, selector, text: string): int =
+  ## Send a clipboard response (OSC 52) back to the child.
+  let encoded = encode(text)
+  discard t.host.writeString(reportClipboard(selector, encoded))
 
 proc resize*(t: Terminal, cols, rows: int) =
   ## Resize both the pty (so the child gets SIGWINCH) and the screen grid.

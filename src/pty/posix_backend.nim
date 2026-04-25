@@ -44,7 +44,7 @@ proc raisePtyErrno(op: string) =
   raise newException(PtyError, op & " failed: " & $strerror(errno))
 
 proc ptyOpen*(b: PosixBackend): tuple[handle: int, slaveId: string] =
-  let m = posix_openpt(O_RDWR or O_NOCTTY)
+  let m = posix_openpt(O_RDWR or O_NOCTTY or O_NONBLOCK)
   if m == -1: raisePtyErrno("posix_openpt")
   if grantpt(m) == -1: raisePtyErrno("grantpt")
   if unlockpt(m) == -1: raisePtyErrno("unlockpt")

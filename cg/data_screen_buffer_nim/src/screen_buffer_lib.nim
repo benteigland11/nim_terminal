@@ -20,6 +20,37 @@ const
   DefaultScrollback* = 1000
 
 # ---------------------------------------------------------------------------
+# Theming
+# ---------------------------------------------------------------------------
+
+type
+  PaletteColor* = object
+    r*, g*, b*: uint8
+
+  TerminalTheme* = ref object
+    background*: PaletteColor
+    foreground*: PaletteColor
+    cursor*: PaletteColor
+    selection*: PaletteColor
+    ansi*: array[16, PaletteColor]
+
+func paletteRgb*(r, g, b: uint8): PaletteColor = PaletteColor(r: r, g: g, b: b)
+
+func defaultTheme*(): TerminalTheme =
+  TerminalTheme(
+    background: paletteRgb(0, 0, 0),
+    foreground: paletteRgb(229, 229, 229),
+    cursor:     paletteRgb(255, 255, 255),
+    selection:  paletteRgb(173, 214, 255),
+    ansi: [
+      paletteRgb(0, 0, 0), paletteRgb(205, 0, 0), paletteRgb(0, 205, 0), paletteRgb(205, 205, 0),
+      paletteRgb(0, 0, 238), paletteRgb(205, 0, 205), paletteRgb(0, 205, 205), paletteRgb(229, 229, 229),
+      paletteRgb(127, 127, 127), paletteRgb(255, 0, 0), paletteRgb(0, 255, 0), paletteRgb(255, 255, 0),
+      paletteRgb(92, 92, 255), paletteRgb(255, 0, 255), paletteRgb(0, 255, 255), paletteRgb(255, 255, 255)
+    ]
+  )
+
+# ---------------------------------------------------------------------------
 # Attributes and colors
 # ---------------------------------------------------------------------------
 
@@ -118,6 +149,9 @@ type
     scrollback: seq[seq[Cell]]
     scrollbackCap*: int
     usingAlt*: bool
+    title*: string
+    iconName*: string
+    theme*: TerminalTheme
 
 # ---------------------------------------------------------------------------
 # Construction
@@ -154,6 +188,9 @@ proc newScreen*(cols, rows: int, scrollback = DefaultScrollback): Screen =
     scrollback: @[],
     scrollbackCap: scrollback,
     usingAlt: false,
+    title: "",
+    iconName: "",
+    theme: defaultTheme(),
   )
 
 # ---------------------------------------------------------------------------
@@ -511,6 +548,9 @@ proc reset*(s: Screen) =
   s.modes = {smAutoWrap}
   s.usingAlt = false
   s.scrollback.setLen(0)
+  s.title = ""
+  s.iconName = ""
+  s.theme = defaultTheme()
   let attrs = defaultAttrs()
   for r in 0 ..< s.rows:
     s.grid[r] = makeRow(s.cols, attrs)
