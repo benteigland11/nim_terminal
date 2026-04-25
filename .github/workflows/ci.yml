@@ -34,11 +34,11 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install glfw
 
-    - name: Install Dependencies
+    - name: Install Nimble Packages
       run: nimble install -y
 
     - name: Build Terminal
-      run: nimble build -y
+      run: nim c -o:nim_terminal src/nim_terminal.nim
 
     - name: Run Tests
-      run: nim c -r src/test_terminal.nim
+      run: nim c -r --path:. src/test_terminal.nim
