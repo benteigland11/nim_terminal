@@ -19,3 +19,4 @@ src/terminal
 *.o
 .claude/reports/
 .claude/settings.local.json
+nim_terminal

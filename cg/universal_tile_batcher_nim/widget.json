@@ -1,22 +1,22 @@
 {
   "meta": {
-    "id": "universal-glyph-atlas-nim",
-    "name": "Glyph Atlas",
-    "version": "1.1.0",
+    "id": "universal-tile-batcher-nim",
+    "name": "Tile Batcher",
+    "version": "1.2.0",
     "domain": "universal",
     "tags": [
-      "glyph",
-      "font",
-      "atlas",
+      "opengl",
       "rendering",
-      "text"
+      "tile",
+      "batching",
+      "terminal"
     ]
   },
-  "description": "Pre-renders font glyphs into a cacheable atlas for high-performance text rendering.",
+  "description": "Efficiently draws many small quads (tiles) using OpenGL in a single pass.",
   "tech_stack": {
     "language": "nim",
     "dependencies": [
-      "pixie >= 5.0.0"
+      "opengl >= 1.2.0"
     ]
   },
   "custom_notes": "",
@@ -27,7 +27,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T18:23:33.369349+00:00",
+    "validated_at": "2026-04-25T18:42:02.477843+00:00",
     "runtime": "nim 2.2.8"
   }
 }

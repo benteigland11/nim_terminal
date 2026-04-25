@@ -11,51 +11,71 @@ import std/[tables, unicode]
 
 type
   Glyph* = object
-    image*: Image
-    width*: int
-    height*: int
+    uvMin*, uvMax*: Vec2    ## UV coordinates in the atlas texture (0.0 to 1.0)
+    width*, height*: int   ## Pixel dimensions
 
   GlyphAtlas* = ref object
     font*: Font
     fontSize*: float
-    cellWidth*: int
-    cellHeight*: int
+    cellWidth*, cellHeight*: int
+    atlasImage*: Image     ## The single big image containing all rendered glyphs
     cache: Table[uint32, Glyph]
+    nextX, nextY: int      ## Current packing position in the atlas
+    isDirty*: bool         ## True if the atlas image changed since last sync
 
-func newGlyphAtlas*(font: Font, fontSize: float): GlyphAtlas =
-  ## Create a new atlas for the given font and size.
-  ## Calculates cell dimensions based on the 'M' character.
+func newGlyphAtlas*(font: Font, fontSize: float, atlasSize: int = 1024): GlyphAtlas =
+  ## Create a new atlas. atlasSize determines the texture dimensions (e.g. 1024x1024).
   let arr = font.typeset("M")
   let cellWidth = if arr.selectionRects.len > 0: int(arr.selectionRects[0].w) else: 0
-  let cellHeight = int(font.size * 1.2) # rough estimate for line height
+  let cellHeight = int(font.size * 1.2)
   
   GlyphAtlas(
     font: font,
     fontSize: fontSize,
     cellWidth: cellWidth,
     cellHeight: cellHeight,
-    cache: initTable[uint32, Glyph]()
+    atlasImage: newImage(atlasSize, atlasSize),
+    cache: initTable[uint32, Glyph](),
+    nextX: 0,
+    nextY: 0,
+    isDirty: true
   )
 
-proc renderGlyph(a: GlyphAtlas, rune: uint32): Glyph =
-  ## Rasterize a single rune into a Glyph object.
-  let text = $rune.Rune
-  let img = newImage(a.cellWidth, a.cellHeight)
-  # Draw text centered or aligned as needed for terminals
-  img.fillText(a.font, text)
-  Glyph(image: img, width: a.cellWidth, height: a.cellHeight)
-
 proc getGlyph*(a: GlyphAtlas, rune: uint32): Glyph =
-  ## Retrieve a glyph from the cache, rendering it if missing.
+  ## Retrieve a glyph's UVs. Renders to the atlas if missing.
   if not a.cache.hasKey(rune):
-    a.cache[rune] = a.renderGlyph(rune)
+    # ... packing logic ...
+    if a.nextX + a.cellWidth > a.atlasImage.width:
+      a.nextX = 0
+      a.nextY += a.cellHeight
+    
+    if a.nextY + a.cellHeight > a.atlasImage.height:
+      return Glyph()
+
+    # Draw the rune into the atlas at (nextX, nextY)
+    let text = $rune.Rune
+    a.atlasImage.fillText(a.font, text, translate(vec2(float(a.nextX), float(a.nextY))))
+    a.isDirty = true # MARK DIRTY
+
+    # ... UV calc ...
+    let invW = 1.0 / float(a.atlasImage.width)
+    let invH = 1.0 / float(a.atlasImage.height)
+    
+    let glyph = Glyph(
+      uvMin: vec2(float(a.nextX) * invW, float(a.nextY) * invH),
+      uvMax: vec2(float(a.nextX + a.cellWidth) * invW, float(a.nextY + a.cellHeight) * invH),
+      width: a.cellWidth,
+      height: a.cellHeight
+    )
+    
+    a.cache[rune] = glyph
+    a.nextX += a.cellWidth
+    
   a.cache[rune]
 
-proc drawGlyph*(a: GlyphAtlas, target: Image, rune: uint32, x, y: int) =
-  ## Draw a glyph onto the target image at the given cell coordinates.
-  let glyph = a.getGlyph(rune)
-  target.draw(glyph.image, translate(vec2(float(x), float(y))))
-
 proc clear*(a: GlyphAtlas) =
-  ## Clear the glyph cache.
   a.cache.clear()
+  a.nextX = 0
+  a.nextY = 0
+  a.atlasImage.fill(color(0, 0, 0, 0))
+  a.isDirty = true

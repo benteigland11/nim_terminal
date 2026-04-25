@@ -1,7 +1,7 @@
 # nim_terminal
 
 A Nim terminal emulator built from the ground up as reusable
-[Cartograph](https://cartograph.dev) widgets. Every generalizable piece
+[Cartograph](https://github.com/benteigland11/Cartograph) widgets. Every generalizable piece
 — VT parser, screen buffer, UTF-8 decoder, typed VT commands, PTY host
 — is a pure-Nim widget that can be lifted out and used in other Nim
 projects.

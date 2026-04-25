@@ -146,7 +146,7 @@ type
     scrollTop*, scrollBottom*: int
     tabStops: seq[bool]
     modes*: set[ScreenMode]
-    scrollback: seq[seq[Cell]]
+    scrollback*: seq[seq[Cell]]
     scrollbackCap*: int
     usingAlt*: bool
     title*: string
@@ -201,6 +201,23 @@ func cellAt*(s: Screen, row, col: int): Cell =
   if row < 0 or row >= s.rows or col < 0 or col >= s.cols:
     return emptyCell()
   (if s.usingAlt: s.altGrid else: s.grid)[row][col]
+
+func totalRows*(s: Screen): int =
+  ## Total number of rows including scrollback and active grid.
+  s.scrollback.len + s.rows
+
+func absoluteCellAt*(s: Screen, absRow, col: int): Cell =
+  ## Query a cell by its absolute buffer index (0 = oldest history row).
+  if col < 0 or col >= s.cols: return emptyCell()
+  if absRow < 0: return emptyCell()
+  
+  if absRow < s.scrollback.len:
+    return s.scrollback[absRow][col]
+  
+  let gridRow = absRow - s.scrollback.len
+  if gridRow >= s.rows: return emptyCell()
+  
+  (if s.usingAlt: s.altGrid else: s.grid)[gridRow][col]
 
 func lineText*(s: Screen, row: int): string =
   ## Render one visible row as text (continuation halves skipped).

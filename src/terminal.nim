@@ -24,11 +24,12 @@ import ../cg/data_vt_reports_nim/src/vt_reports_lib
 import ../cg/universal_fifo_buffer_nim/src/fifo_buffer_lib
 import ../cg/universal_base64_nim/src/base64_codec
 import ../cg/universal_color_parser_nim/src/color_parser_lib
+import ../cg/universal_viewport_nim/src/viewport_lib
 import pty/posix_backend
 
 export pty_host_lib, screen_buffer_lib, posix_backend, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
-       fifo_buffer_lib, base64_codec, color_parser_lib
+       fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib
 
 type
   Terminal* = ref object
@@ -41,6 +42,7 @@ type
     inputMode*: InputMode
     damage*: Damage
     selection*: Selection
+    viewport*: Viewport
     # Output queue
     responseQueue*: FifoBuffer
     # DCS accumulation
@@ -78,6 +80,7 @@ proc newTerminal*(
     inputMode: newInputMode(),
     damage: newDamage(rows),
     selection: newSelection(),
+    viewport: newViewport(rows),
     responseQueue: newFifoBuffer(4096),
     dcsActive: false,
   )
@@ -376,13 +379,23 @@ proc feedBytes*(t: Terminal, data: openArray[byte]) =
 # ---------------------------------------------------------------------------
 
 proc flush*(t: Terminal): int =
-  ## Write any pending terminal reports to the child. Returns the
-  ## number of bytes written.
+  ## Write any pending terminal reports or user input to the child.
+  ## Returns the number of bytes written.
   if t.responseQueue.isEmpty: return 0
-  var buf = newSeq[byte](t.responseQueue.len)
-  let n = t.responseQueue.read(buf)
-  if n <= 0: return 0
-  t.host.write(buf.toOpenArray(0, n - 1))
+  
+  # Peek at available data
+  let qLen = t.responseQueue.len
+  var buf = newSeq[byte](qLen)
+  for i in 0 ..< qLen:
+    buf[i] = t.responseQueue.peekByte(i).get()
+    
+  let n = t.host.write(buf)
+  if n > 0:
+    # Actually consume from queue now that it's sent
+    var discardBuf = newSeq[byte](n)
+    discard t.responseQueue.read(discardBuf)
+    return n
+  return 0
 
 proc step*(t: Terminal, bufSize: int = 4096): int =
   ## Perform one read→feed cycle. Returns the number of bytes applied.
@@ -421,25 +434,22 @@ proc writeString*(t: Terminal, s: string): int =
   t.host.writeString(s)
 
 proc sendKey*(t: Terminal, ev: KeyEvent): int =
-  ## Encode a keystroke through the input encoder (respecting the
-  ## current DECCKM / DECKPAM mode bits) and send it to the child.
+  ## Encode a keystroke and queue it for the child.
   let bytes = encodeKeyEvent(ev, t.inputMode)
   if bytes.len == 0: return 0
-  t.host.write(bytes)
+  t.responseQueue.write(bytes)
 
 proc sendMouse*(t: Terminal, ev: MouseEvent): int =
-  ## Encode a mouse event through the active mouse protocol (X11, SGR)
-  ## and send it to the child.
+  ## Encode a mouse event and queue it for the child.
   let bytes = encodeMouseEvent(ev, t.inputMode)
   if bytes.len == 0: return 0
-  t.host.write(bytes)
+  t.responseQueue.write(bytes)
 
 proc sendPaste*(t: Terminal, text: string): int =
-  ## Write a string to the child, wrapping in bracketed-paste sequences
-  ## if enabled.
+  ## Encode a paste and queue it for the child.
   let bytes = encodePaste(text, t.inputMode)
   if bytes.len == 0: return 0
-  t.host.write(bytes)
+  t.responseQueue.write(bytes)
 
 proc sendFocus*(t: Terminal, gained: bool): int =
   ## Send a Focus In/Out report if enabled.
@@ -451,11 +461,17 @@ proc sendClipboardResponse*(t: Terminal, selector, text: string): int =
   let encoded = encode(text)
   discard t.host.writeString(reportClipboard(selector, encoded))
 
+proc refreshViewport*(t: Terminal, stickToBottom: bool = true) =
+  ## Sync viewport with current buffer size.
+  t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
+
 proc resize*(t: Terminal, cols, rows: int) =
   ## Resize both the pty (so the child gets SIGWINCH) and the screen grid.
   t.host.resize(cols, rows)
   t.screen.resize(cols, rows)
   t.damage.resize(rows)
+  t.viewport.height = rows
+  t.refreshViewport()
 
 # ---------------------------------------------------------------------------
 # Selection

@@ -93,8 +93,9 @@ proc ptyRead*(b: PosixBackend, handle: int, buf: var openArray[byte]): int =
 proc ptyWrite*(b: PosixBackend, handle: int, data: openArray[byte]): int =
   if data.len == 0: return 0
   let n = posix.write(cint(handle), unsafeAddr data[0], data.len)
-  if n < 0: raisePtyErrno("write")
-  n
+  if n >= 0: return n
+  if errno == EAGAIN or errno == EWOULDBLOCK: return -1
+  raisePtyErrno("write")
 
 proc ptySignal*(b: PosixBackend, pid, signum: int) =
   discard posix.kill(Pid(pid), cint(signum))

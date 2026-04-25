@@ -1,23 +1,21 @@
 {
   "meta": {
-    "id": "universal-glyph-atlas-nim",
-    "name": "Glyph Atlas",
-    "version": "1.1.0",
+    "id": "universal-viewport-nim",
+    "name": "Viewport",
+    "version": "1.0.0",
     "domain": "universal",
     "tags": [
-      "glyph",
-      "font",
-      "atlas",
-      "rendering",
-      "text"
+      "viewport",
+      "scrolling",
+      "terminal",
+      "buffer",
+      "mapping"
     ]
   },
-  "description": "Pre-renders font glyphs into a cacheable atlas for high-performance text rendering.",
+  "description": "Coordinate-mapping viewport manager for buffers with history/scrollback.",
   "tech_stack": {
     "language": "nim",
-    "dependencies": [
-      "pixie >= 5.0.0"
-    ]
+    "dependencies": []
   },
   "custom_notes": "",
   "library_notes": {
@@ -27,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T18:23:33.369349+00:00",
+    "validated_at": "2026-04-25T18:12:41.672154+00:00",
     "runtime": "nim 2.2.8"
   }
 }

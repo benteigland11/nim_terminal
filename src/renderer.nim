@@ -44,6 +44,7 @@ proc draw*(r: TerminalRenderer, t: Terminal) =
       continue
     
     let y = row * ch
+    let absRow = t.viewport.viewportToBuffer(row)
     
     # 1. Clear the row background if not fullRepaint (which already filled)
     if not t.damage.fullRepaint:
@@ -52,7 +53,7 @@ proc draw*(r: TerminalRenderer, t: Terminal) =
 
     # 2. Draw row cells
     for col in 0 ..< s.cols:
-      let cell = s.cellAt(row, col)
+      let cell = s.absoluteCellAt(absRow, col)
       if cell.width == 0: continue # Skip continuation cells
       
       let x = col * cw
@@ -69,13 +70,13 @@ proc draw*(r: TerminalRenderer, t: Terminal) =
       
       # Draw glyph
       if cell.rune != 0 and cell.rune != uint32(' '):
-        # Determine foreground color (Simple for now, atlas draws with font's color)
         r.atlas.drawGlyph(r.surface, cell.rune, x, y)
 
-  # 3. Draw cursor (Redraw it every time something changed to ensure it's not buried)
-  if not s.cursor.pendingWrap:
+  # 3. Draw cursor (Only if it's currently in view)
+  let cursorViewportRow = t.viewport.bufferToViewport(s.scrollback.len + s.cursor.row)
+  if cursorViewportRow != -1 and not s.cursor.pendingWrap:
     let cx = s.cursor.col * cw
-    let cy = s.cursor.row * ch
+    let cy = cursorViewportRow * ch
     ctx.fillStyle = toPixieColor(theme.cursor)
     ctx.fillRect(rect(vec2(float(cx), float(cy)), vec2(float(cw), float(ch))))
     

@@ -6,8 +6,9 @@
 import staticglfw
 import opengl
 import pixie
+import os
 import terminal
-import renderer
+import gpu_renderer
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
 from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toModifiers
 
@@ -18,9 +19,10 @@ const
 
 var 
   term: Terminal
-  rend: TerminalRenderer
+  rend: GpuTerminalRenderer
   window: Window
-  texId: uint32
+  winWidth = 1280
+  winHeight = 720
 
 # ---------------------------------------------------------------------------
 # GLFW Callbacks
@@ -37,39 +39,20 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
       discard term.sendKey(key(k, m))
 
 proc onResize(win: Window, width, height: cint) {.cdecl.} =
-  let cols = int(width) div rend.atlas.cellWidth
-  let rows = int(height) div rend.atlas.cellHeight
+  winWidth = int(width)
+  winHeight = int(height)
+  let cols = winWidth div rend.atlas.cellWidth
+  let rows = winHeight div rend.atlas.cellHeight
   if cols > 0 and rows > 0:
     term.resize(cols, rows)
-    rend.surface = newImage(int(width), int(height))
     glViewport(0, 0, width, height)
 
-# ---------------------------------------------------------------------------
-# Initialization
-# ---------------------------------------------------------------------------
-
-proc initGL() =
-  loadExtensions()
-  glClearColor(0, 0, 0, 1)
-  glEnable(GL_TEXTURE_2D)
-  glGenTextures(1, addr texId)
-  glBindTexture(GL_TEXTURE_2D, texId)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-
-proc updateTexture(img: Image) =
-  glBindTexture(GL_TEXTURE_2D, texId)
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8.cint, cint(img.width), cint(img.height),
-               0, GL_RGBA, GL_UNSIGNED_BYTE, addr img.data[0])
-
-proc drawScreen() =
-  glClear(GL_COLOR_BUFFER_BIT)
-  glBegin(GL_QUADS)
-  glTexCoord2f(0, 0); glVertex2f(-1,  1)
-  glTexCoord2f(1, 0); glVertex2f( 1,  1)
-  glTexCoord2f(1, 1); glVertex2f( 1, -1)
-  glTexCoord2f(0, 1); glVertex2f(-1, -1)
-  glEnd()
+proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
+  if yoffset > 0:
+    term.viewport.scrollUp(3)
+  elif yoffset < 0:
+    term.viewport.scrollDown(3)
+  term.damage.markAll()
 
 # ---------------------------------------------------------------------------
 # Main
@@ -81,40 +64,47 @@ if init() == 0:
 windowHint(CONTEXT_VERSION_MAJOR, 2)
 windowHint(CONTEXT_VERSION_MINOR, 1)
 
-window = createWindow(1280, 720, WindowTitle, nil, nil)
+window = createWindow(cint(winWidth), cint(winHeight), WindowTitle, nil, nil)
 if window == nil:
   quit("Failed to create window")
 
 makeContextCurrent(window)
-initGL()
+loadExtensions()
 
 # Setup Terminal logic
 let font = readFont(FontPath)
 font.paint.color = color(1, 1, 1, 1) # White text
 let atlas = newGlyphAtlas(font, DefaultFontSize)
 term = newTerminal("/bin/sh", ["-i"])
-rend = newTerminalRenderer(atlas, 1280, 720)
-
-# Initial resize
-onResize(window, 1280, 720)
+rend = newGpuTerminalRenderer(atlas)
 
 # Set callbacks
 discard window.setCharCallback(onChar)
 discard window.setKeyCallback(onKey)
 discard window.setFramebufferSizeCallback(onResize)
+discard window.setScrollCallback(onScroll)
+
+# Initial resize
+onResize(window, cint(winWidth), cint(winHeight))
 
 while windowShouldClose(window) == 0:
   # 1. Process PTY data
-  discard term.step()
+  let n = term.step()
+  if n > 0:
+    term.refreshViewport(stickToBottom = true)
   
-  if term.damage.anyDirty:
-    # 2. Render to Pixie image
-    rend.draw(term)
-    
-    # 3. Blit to OpenGL
-    updateTexture(rend.surface)
-    drawScreen()
+  # 2. Update atlas if needed (new glyphs rendered)
+  let atlasChanged = atlas.isDirty
+  if atlasChanged:
+    rend.updateAtlasTexture()
+
+  # 3. Render ONLY if something changed
+  if n > 0 or atlasChanged or term.damage.anyDirty:
+    rend.draw(term, winWidth, winHeight)
     swapBuffers(window)
+  else:
+    # Idle - don't burn CPU
+    os.sleep(1)
   
   pollEvents()
 
