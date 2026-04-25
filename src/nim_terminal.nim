@@ -17,7 +17,7 @@ import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 
 const
   WindowTitle = "Nim Terminal"
-  FontPath = "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf"
+  FontPath = "resources/Inconsolata-Regular.ttf"
 
 var 
   term: Terminal
