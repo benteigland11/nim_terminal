@@ -9,7 +9,7 @@ when defined(windows):
       x*, y*: int16
     HRESULT* = int32
 
-  proc CreatePseudoConsole*(size: COORD, hInput, hOutput: Handle, flags: dword, phPC: ptr HPCON): HRESULT {.stdcall, importc: "CreatePseudoConsole", dynlib: "kernel32.dll".}
+  proc CreatePseudoConsole*(size: COORD, hInput, hOutput: Handle, flags: DWORD, phPC: ptr HPCON): HRESULT {.stdcall, importc: "CreatePseudoConsole", dynlib: "kernel32.dll".}
   proc ResizePseudoConsole*(hPC: HPCON, size: COORD): HRESULT {.stdcall, importc: "ResizePseudoConsole", dynlib: "kernel32.dll".}
   proc ClosePseudoConsole*(hPC: HPCON) {.stdcall, importc: "ClosePseudoConsole", dynlib: "kernel32.dll".}
 
