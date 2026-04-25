@@ -19,9 +19,11 @@ jobs:
         submodules: recursive
 
     - name: Setup Nim
-      uses: iffy/install-nim@v5
+      uses: nim-lang/setup-nim@v1
       with:
-        version: 'binary:stable'
+        nim-version: 'stable'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install Dependencies (Linux)
       if: runner.os == 'Linux'
