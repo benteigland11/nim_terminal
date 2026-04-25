@@ -227,3 +227,15 @@ proc encodePaste*(s: string, mode: InputMode = newInputMode()): seq[byte] =
   for ch in s: result.add byte(ch)
   if mode.bracketedPaste:
     result.add Esc; result.add byte('['); result.add byte('2'); result.add byte('0'); result.add byte('1'); result.add byte('~')
+
+func shouldIntercept*(mode: InputMode, mods: set[Modifier] = {}): bool =
+  ## Decide if a mouse click should be handled by the terminal UI (True)
+  ## or sent to the child process (False).
+  ##
+  ## Logic:
+  ##   * If Shift is held, ALWAYS intercept (user override).
+  ##   * If mouse tracking is disabled, intercept.
+  ##   * Otherwise, pass to child.
+  if modShift in mods: return true
+  if mode.mouseMode == mmNone: return true
+  false

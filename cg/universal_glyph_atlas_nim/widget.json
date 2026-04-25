@@ -2,7 +2,7 @@
   "meta": {
     "id": "universal-glyph-atlas-nim",
     "name": "Glyph Atlas",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "domain": "universal",
     "tags": [
       "glyph",
@@ -27,7 +27,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T18:23:33.369349+00:00",
+    "validated_at": "2026-04-25T19:38:43.531210+00:00",
     "runtime": "nim 2.2.8"
   }
 }

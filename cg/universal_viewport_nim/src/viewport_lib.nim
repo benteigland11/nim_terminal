@@ -20,20 +20,20 @@ func maxScroll*(v: Viewport): int =
   ## Maximum valid scrollOffset.
   max(0, v.totalRows - v.height)
 
-proc scrollUp*(v: var Viewport, count: int = 1) =
+func scrollUp*(v: var Viewport, count: int = 1) =
   ## Scroll up (towards history).
   v.scrollOffset = min(v.maxScroll, v.scrollOffset + count)
 
-proc scrollDown*(v: var Viewport, count: int = 1) =
+func scrollDown*(v: var Viewport, count: int = 1) =
   ## Scroll down (towards active grid).
   v.scrollOffset = max(0, v.scrollOffset - count)
 
-proc scrollToBottom*(v: var Viewport) =
+func scrollToBottom*(v: var Viewport) =
   v.scrollOffset = 0
 
 func isAtBottom*(v: Viewport): bool = v.scrollOffset == 0
 
-proc updateBufferHeight*(v: var Viewport, totalRows: int, stickToBottom: bool = true) =
+func updateBufferHeight*(v: var Viewport, totalRows: int, stickToBottom: bool = true) =
   ## Update total buffer size. If `stickToBottom` is true and we were
   ## at the bottom, stay at the bottom.
   let wasAtBottom = v.isAtBottom

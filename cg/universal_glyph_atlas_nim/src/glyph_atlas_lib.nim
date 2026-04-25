@@ -44,20 +44,21 @@ func newGlyphAtlas*(font: Font, fontSize: float, atlasSize: int = 1024): GlyphAt
 proc getGlyph*(a: GlyphAtlas, rune: uint32): Glyph =
   ## Retrieve a glyph's UVs. Renders to the atlas if missing.
   if not a.cache.hasKey(rune):
-    # ... packing logic ...
+    # Simple row-based packing
     if a.nextX + a.cellWidth > a.atlasImage.width:
       a.nextX = 0
       a.nextY += a.cellHeight
     
     if a.nextY + a.cellHeight > a.atlasImage.height:
+      # Atlas full!
       return Glyph()
 
     # Draw the rune into the atlas at (nextX, nextY)
     let text = $rune.Rune
     a.atlasImage.fillText(a.font, text, translate(vec2(float(a.nextX), float(a.nextY))))
-    a.isDirty = true # MARK DIRTY
-
-    # ... UV calc ...
+    a.isDirty = true
+    
+    # Calculate UVs
     let invW = 1.0 / float(a.atlasImage.width)
     let invH = 1.0 / float(a.atlasImage.height)
     

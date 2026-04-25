@@ -1,23 +1,21 @@
 {
   "meta": {
-    "id": "universal-tile-batcher-nim",
-    "name": "Tile Batcher",
-    "version": "1.4.0",
+    "id": "universal-perf-monitor-nim",
+    "name": "Perf Monitor",
+    "version": "1.0.0",
     "domain": "universal",
     "tags": [
-      "opengl",
-      "rendering",
-      "tile",
-      "batching",
-      "terminal"
+      "performance",
+      "stats",
+      "latency",
+      "fps",
+      "benchmark"
     ]
   },
-  "description": "Efficiently draws many small quads (tiles) using OpenGL in a single pass.",
+  "description": "High-resolution performance monitor for tracking FPS and average frame latency.",
   "tech_stack": {
     "language": "nim",
-    "dependencies": [
-      "opengl >= 1.2.0"
-    ]
+    "dependencies": []
   },
   "custom_notes": "",
   "library_notes": {
@@ -27,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T18:54:36.679409+00:00",
+    "validated_at": "2026-04-25T19:25:14.956296+00:00",
     "runtime": "nim 2.2.8"
   }
 }

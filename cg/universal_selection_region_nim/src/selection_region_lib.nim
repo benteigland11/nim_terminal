@@ -165,3 +165,37 @@ func rowRange*(s: Selection): (int, int) =
   ## inactive/empty — callers can cheaply test `hi < lo` for "no rows."
   if not s.live or s.isEmpty: return (0, -1)
   minMax(s.anchor.row, s.focus.row)
+
+type
+  CellData* = object
+    rune*: uint32
+    width*: int
+
+  RowAccessCallback* = proc(row: int): seq[CellData] {.closure.}
+
+import std/unicode
+
+proc extractText*(s: Selection, cols: int, getRow: RowAccessCallback): string =
+  ## Extract text from the selection using a row-access callback.
+  ## Corrects for newlines between rows.
+  if not s.live or s.isEmpty: return ""
+  
+  let allSpans = s.spans(cols)
+  if allSpans.len == 0: return ""
+  
+  result = ""
+  var lastRow = allSpans[0].row
+  
+  for sp in allSpans:
+    if sp.row > lastRow:
+      result.add "\n"
+    
+    let cells = getRow(sp.row)
+    if cells.len == 0: continue
+    
+    for c in sp.startCol ..< min(sp.endCol, cells.len):
+      let cell = cells[c]
+      if cell.width > 0: # Skip continuation cells
+        result.add Rune(cell.rune)
+    lastRow = sp.row
+
