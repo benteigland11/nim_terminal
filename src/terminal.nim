@@ -33,7 +33,7 @@ else:
 export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
-       drag_controller_lib, shortcut_map_lib
+       drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib
 
 type
   Terminal* = ref object
@@ -41,8 +41,8 @@ type
     backend*: CurrentBackend
     host*: PtyHost[CurrentBackend]
     async*: AsyncPty[CurrentBackend]
-    decoder: Utf8Decoder
-    parser: VtParser
+    decoder*: Utf8Decoder
+    parser*: VtParser
     screen*: Screen
     inputMode*: InputMode
     damage*: Damage
