@@ -8,7 +8,7 @@
 ## the underlying geometry or context changed.
 
 type
-  Damage* = object
+  Damage* = ref object
     dirty: seq[bool]
     full: bool
     extent: int
@@ -27,13 +27,13 @@ func fullRepaint*(d: Damage): bool = d.full
   ## True when the whole range should be repainted regardless of
   ## individual index state. Cleared by `clear`.
 
-func markRow*(d: var Damage, index: int) =
+func markRow*(d: Damage, index: int) =
   ## Mark a single index dirty. Out-of-range indices are ignored so
   ## callers don't need to bounds-check every upstream mutation.
   if index < 0 or index >= d.extent: return
   d.dirty[index] = true
 
-func markRows*(d: var Damage, first, last: int) =
+func markRows*(d: Damage, first, last: int) =
   ## Mark an inclusive range `[first, last]` dirty. The range is
   ## clamped to `[0, size-1]`; if it's wholly outside the range or
   ## inverted after clamping, nothing is marked.
@@ -44,17 +44,13 @@ func markRows*(d: var Damage, first, last: int) =
   for i in lo .. hi:
     d.dirty[i] = true
 
-func markAll*(d: var Damage) =
-  ## Mark every index dirty and set `fullRepaint`. Use for events whose
-  ## blast radius is the entire range (scroll, mode switch, clear).
-  ## No-op on a zero-size tracker — with nothing to paint, there's
-  ## nothing to flag.
+func markAll*(d: Damage) =
   if d.extent == 0: return
   for i in 0 ..< d.extent:
     d.dirty[i] = true
   d.full = true
 
-func resize*(d: var Damage, size: int) =
+func resize*(d: Damage, size: int) =
   ## Resize the tracked range. After resize the entire new range is
   ## considered dirty (`fullRepaint = true`) because index meaning may
   ## have changed (old row 5 is not new row 5 after a terminal reflow).
@@ -65,7 +61,7 @@ func resize*(d: var Damage, size: int) =
   d.extent = n
   d.full = true
 
-func clear*(d: var Damage) =
+func clear*(d: Damage) =
   ## Reset all dirty state. Call after the renderer has painted.
   for i in 0 ..< d.extent:
     d.dirty[i] = false
