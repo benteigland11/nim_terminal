@@ -31,7 +31,6 @@ proc ptySetSize(b: MockBackend, h, r, c: int) = discard
 proc ptyForkExec(b: MockBackend, s, p: string, a: openArray[string], c: string): int = 123
 
 proc newMockTerminal*(rows, cols: int): Terminal =
-  ## Create a terminal with a mock backend we can manually feed.
   let b = MockBackend(data: @[])
   result = Terminal(
     backend: cast[terminal.CurrentBackend](b),
@@ -85,7 +84,6 @@ suite "terminal pipeline":
 
   test "utf-8 multibyte produces one rune":
     let t = newMockTerminal(2, 10)
-    # é = C3 A9 in UTF-8
     t.feed("\xC3\xA9X") 
     check t.screen.cellAt(0, 0).rune == 0x00E9'u32
     check t.screen.cellAt(0, 1).rune == uint32('X')
@@ -101,7 +99,7 @@ suite "damage tracking":
 
   test "multi-line print marks each written row":
     let t = newMockTerminal(5, 10)
-    t.feed("a\nb\nc")
+    t.feed("a\r\nb\r\nc")
     check t.damage.isDirty(0)
     check t.damage.isDirty(1)
     check t.damage.isDirty(2)
@@ -114,7 +112,7 @@ suite "damage tracking":
 
   test "scroll-triggering linefeed damages all rows":
     let t = newMockTerminal(3, 10)
-    t.feed("a\nb\nc\nd")
+    t.feed("a\r\nb\r\nc\r\nd")
     check t.damage.fullRepaint
 
 suite "selection text extraction":
@@ -128,7 +126,7 @@ suite "selection text extraction":
 
   test "block selection pulls rectangle":
     let t = newMockTerminal(3, 10)
-    t.feed("abcdefg\nhijklmn")
+    t.feed("abcdefg\r\nhijklmn")
     t.selection.start(point(0, 2), smBlock)
     t.selection.update(point(1, 4))
     check t.selectionText == "cde\njkl"
