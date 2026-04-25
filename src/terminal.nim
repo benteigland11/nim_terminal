@@ -1,7 +1,7 @@
 ## Project glue: assemble PTY host, UTF-8 decoder, VT parser, VT command
 ## translator, and screen buffer into a single `Terminal` pipeline.
 
-import std/[posix, options]
+import std/[options, os]
 import ../cg/backend_pty_host_nim/src/pty_host_lib
 import ../cg/universal_utf8_decoder_nim/src/utf8_decoder_lib
 import ../cg/data_vt_parser_nim/src/vt_parser_lib
@@ -18,9 +18,18 @@ import ../cg/universal_viewport_nim/src/viewport_lib
 import ../cg/backend_pty_async_nim/src/pty_async_lib
 import ../cg/universal_drag_controller_nim/src/drag_controller_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
-import pty/posix_backend
 
-export pty_host_lib, screen_buffer_lib, posix_backend, input_vt_encoding_lib,
+# OS-Specific Backend Selection
+when defined(posix):
+  import pty/posix_backend
+  type CurrentBackend* = PosixBackend
+elif defined(windows):
+  import pty/windows_backend
+  type CurrentBackend* = WindowsBackend
+else:
+  type CurrentBackend* = object
+
+export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
        drag_controller_lib, shortcut_map_lib
@@ -28,9 +37,9 @@ export pty_host_lib, screen_buffer_lib, posix_backend, input_vt_encoding_lib,
 type
   Terminal* = ref object
     ## A live child process attached to an in-memory screen grid.
-    backend*: PosixBackend
-    host*: PtyHost[PosixBackend]
-    async*: AsyncPty[PosixBackend]
+    backend*: CurrentBackend
+    host*: PtyHost[CurrentBackend]
+    async*: AsyncPty[CurrentBackend]
     decoder: Utf8Decoder
     parser: VtParser
     screen*: Screen
@@ -61,7 +70,13 @@ proc newTerminal*(
     rows: int = 24,
     scrollback: int = DefaultScrollback
 ): Terminal =
-  let backend = newPosixBackend()
+  when defined(posix):
+    let backend = newPosixBackend()
+  elif defined(windows):
+    let backend = newWindowsBackend()
+  else:
+    let backend = CurrentBackend()
+
   let host = spawn(backend, program, args, cwd, rows, cols)
   let sMap = newShortcutMap()
   sMap.addStandardTerminalShortcuts()
@@ -88,13 +103,11 @@ proc newTerminal*(
 
 func toDispatchParams(src: seq[VtParam]): seq[DispatchParam] =
   result = newSeqOfCap[DispatchParam](src.len)
-  for p in src:
-    result.add DispatchParam(value: p.value, subParams: p.subParams)
+  for p in src: result.add DispatchParam(value: p.value, subParams: p.subParams)
 
 func toSgrParams(src: seq[DispatchParam]): seq[SgrParam] =
   result = newSeqOfCap[SgrParam](src.len)
-  for p in src:
-    result.add SgrParam(value: p.value, subParams: p.subParams)
+  for p in src: result.add SgrParam(value: p.value, subParams: p.subParams)
 
 func toScreenErase(m: vt_commands_lib.EraseMode): screen_buffer_lib.EraseMode =
   case m
@@ -260,6 +273,12 @@ proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusRepor
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.async.send(cast[seq[byte]](reportClipboard(selector, encoded))))
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())
-proc kill*(t: Terminal, signum: int = int(SIGTERM)) = t.host.kill(signum)
+when defined(posix):
+  import std/posix
+  const DefaultKillSignal* = int(SIGTERM)
+else:
+  const DefaultKillSignal* = 15 # Standard SIGTERM value
+
+proc kill*(t: Terminal, signum: int = DefaultKillSignal) = t.host.kill(signum)
 proc waitExit*(t: Terminal): int = t.host.waitExit()
 proc close*(t: Terminal) = t.host.close()

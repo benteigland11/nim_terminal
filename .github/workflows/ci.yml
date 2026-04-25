@@ -1,0 +1,43 @@
+name: Terminal CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup Nim
+      uses: jscissions/setup-nim@v1
+      with:
+        nim-version: '2.0.x'
+
+    - name: Install Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxxf86vm-dev libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+
+    - name: Install Dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: brew install glfw
+
+    - name: Install Nimble Packages
+      run: nimble install -y pixie staticglfw opengl
+
+    - name: Build Terminal
+      run: nim c -o:nim_terminal src/nim_terminal.nim
+
+    - name: Run Logic Tests
+      run: nim c -r src/test_terminal.nim
