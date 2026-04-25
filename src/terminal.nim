@@ -24,14 +24,11 @@ when defined(posix):
   import pty/posix_backend
   type CurrentBackend* = PosixBackend
   import std/posix
-  const DefaultKillSignal* = int(SIGTERM)
 elif defined(windows):
   import pty/windows_backend
   type CurrentBackend* = WindowsBackend
-  const DefaultKillSignal* = 15
 else:
   type CurrentBackend* = object
-  const DefaultKillSignal* = 15
 
 export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
@@ -295,6 +292,14 @@ proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusRepor
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.async.send(cast[seq[byte]](reportClipboard(selector, encoded))))
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())
-proc kill*(t: Terminal, signum: int = DefaultKillSignal) = t.host.kill(signum)
+
+proc termSignal*(): int =
+  when defined(posix): int(SIGTERM)
+  else: 15
+
+proc kill*(t: Terminal, signum: int = -1) = 
+  let s = if signum == -1: termSignal() else: signum
+  t.host.kill(s)
+
 proc waitExit*(t: Terminal): int = t.host.waitExit()
 proc close*(t: Terminal) = t.host.close()
