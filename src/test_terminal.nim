@@ -64,7 +64,7 @@ suite "terminal pipeline":
   test "utf-8 multibyte produces one rune":
     # 'é' = C3 A9. One glyph, one cell, narrow width.
     let t = newTerminal(
-      "/bin/sh", ["-c", "printf '\\xc3\\xa9X'"], rows = 2, cols = 10)
+      "/bin/sh", ["-c", "printf '\\303\\251X'"], rows = 2, cols = 10)
     discard t.drain()
     discard t.waitExit()
     t.close()
@@ -225,7 +225,7 @@ suite "selection text extraction":
 
   test "utf-8 rune preserved through selection":
     let t = newTerminal(
-      "/bin/sh", ["-c", "printf '\\xc3\\xa9X'"], rows = 2, cols = 10)
+      "/bin/sh", ["-c", "printf '\\303\\251X'"], rows = 2, cols = 10)
     discard t.drain()
     discard t.waitExit()
     t.close()
