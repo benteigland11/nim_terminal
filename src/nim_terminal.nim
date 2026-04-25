@@ -151,7 +151,10 @@ makeContextCurrent(window); loadExtensions()
 
 font = readFont(FontPath); font.size = fontSize; font.paint.color = color(1, 1, 1, 1)
 let atlas = newGlyphAtlas(font, fontSize)
-term = newTerminal("/bin/sh", ["-i"]); rend = newGpuTerminalRenderer(atlas)
+let shellCmd = when defined(windows): "cmd.exe" else: "/bin/sh"
+let shellArgs = when defined(windows): [""] else: ["-i"]
+term = newTerminal(shellCmd, shellArgs)
+rend = newGpuTerminalRenderer(atlas)
 
 discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
 discard window.setMouseButtonCallback(onMouseButton); discard window.setCursorPosCallback(onCursorPos)
