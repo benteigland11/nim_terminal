@@ -1,4 +1,4 @@
-name: Terminal CI
+name: Terminal CI v2
 
 on:
   push:
@@ -38,7 +38,8 @@ jobs:
       run: nimble install -y
 
     - name: Build Terminal
-      run: nim c -o:nim_terminal src/nim_terminal.nim
+      run: nim c -d:release -o:nim_terminal src/nim_terminal.nim
 
     - name: Run Tests
-      run: nim c -r --path:. src/test_terminal.nim
+      run: nim c -r -d:release --path:. src/test_terminal.nim
+
