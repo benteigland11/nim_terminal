@@ -18,12 +18,17 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Install MinGW (Windows)
+      if: runner.os == 'Windows'
+      uses: egor-tensin/setup-mingw@v2
+      with:
+        platform: x64
+
     - name: Setup Nim
-      uses: nim-lang/setup-nim@v1
+      uses: jiro4989/setup-nim-action@v2
       with:
         nim-version: 'stable'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install Dependencies (Linux)
       if: runner.os == 'Linux'
@@ -43,4 +48,3 @@ jobs:
 
     - name: Run Tests
       run: nim c -r -d:release --path:. src/test_terminal.nim
-
