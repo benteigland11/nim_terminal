@@ -99,7 +99,15 @@ proc spawnTerminal*(binary: string; cfg: string = ""; extraEnv: seq[(string, str
       childPid = found.get
       break
   if childPid < 0:
-    childPid = p.processID  # degraded mode: sample the wrapper
+    try:
+      if p.running: p.terminate()
+      discard p.waitForExit()
+      p.close()
+    except CatchableError:
+      discard
+    raise newException(IOError,
+      "memory harness could not resolve terminal child process under xvfb-run; " &
+      "refusing to sample wrapper process pid " & $p.processID)
   RunHandle(process: p, pid: childPid, spawnedAt: epochTime())
 
 proc shutdown*(h: var RunHandle; graceMs: int = 500) =

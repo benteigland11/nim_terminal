@@ -57,11 +57,13 @@ LOG="$REPORT_DIR/valgrind-$SCENARIO-$TS.log"
 echo "[run_valgrind] scenario=$SCENARIO duration=${DURATION_S}s log=$LOG"
 
 # We bound the process with `timeout` because nim_terminal does not exit on
-# its own. SIGTERM gives the runtime a chance to run shutdown hooks; if the
-# app ignores it, SIGKILL after 3s ensures valgrind still emits its summary.
+# its own. SIGTERM gives the runtime a chance to run shutdown hooks; the
+# kill-after grace window lets *valgrind* flush its leak summary even when
+# the wrapped program is unresponsive — under heavy scenarios valgrind needs
+# 10-20s to walk the heap and write the report. 3s is not enough; 30s is.
 set +e
 xvfb-run -a --server-args="-screen 0 1280x800x24" \
-  timeout --signal=TERM --kill-after=3 "${DURATION_S}s" \
+  timeout --signal=TERM --kill-after=30 "${DURATION_S}s" \
   valgrind \
     --tool=memcheck \
     --leak-check=full \

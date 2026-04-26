@@ -60,11 +60,25 @@ suite "valgrind smoke":
         check logPath.len > 0
         if logPath.len > 0 and fileExists(logPath):
           let summary = parseValgrindLog(logPath)
-          echo render(summary)
-          check summary.parsed
-          # Contract: zero bytes definitely lost from our code. Suppressions
-          # absorb known third-party noise; new leaks here are ours.
-          check summary.definiteLostBytes == 0
-          check summary.indirectLostBytes == 0
+          if not summary.parsed:
+            # HARNESS failure (not a leak): valgrind never wrote a LEAK
+            # SUMMARY block. Almost always means valgrind was SIGKILLed
+            # before it could flush — increase --kill-after in the runner
+            # or shorten the scenario duration. We loudly distinguish this
+            # from a real leak so it's not silently filed under "leak".
+            echo "[HARNESS FAIL] valgrind log has no LEAK SUMMARY: " & logPath
+            echo "  log size: " & $getFileSize(logPath) & " bytes"
+            echo "  hint: valgrind likely SIGKILLed before flushing — bump --kill-after"
+            check summary.parsed   # fails the test, but with the diagnostic above
+          else:
+            echo render(summary)
+            # Contract: no unsuppressed definite, indirect, or possible
+            # leaks. Suppressions absorb known third-party noise; new
+            # unsuppressed leaks here are treated as ours until proven
+            # otherwise.
+            check summary.definiteLostBytes == 0
+            check summary.indirectLostBytes == 0
+            check summary.possibleLostBytes == 0
+            check summary.errorCount == 0
       else:
         echo output

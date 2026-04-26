@@ -9,7 +9,7 @@ captured in [`reports/MEMORY.md`](reports/MEMORY.md).
 | 1 — idle baseline | Render-loop leaks | ~15s | every PR | **shipped** |
 | 2 — workload soak | Allocation growth under load | 5 min × 5 scenarios nightly | nightly | **harness shipped, soak runs nightly** |
 | 3 — Valgrind | CPU-side definite/indirect leaks | ~12s smoke / ~30min full | weekly + on-demand | **shipped** (smoke; full sweep nightly) |
-| 4 — GPU tracking | Texture / VBO orphans | in-process | every PR (when wired) | deferred (blocked on `gpu_renderer.nim`) |
+| 4 — GPU ledger | Texture / VBO orphans | ~5s | every PR | **shipped** |
 
 ## Running locally
 
@@ -92,11 +92,65 @@ Suppressions are pinned by library (`obj:*/lib<thing>.so*`) so we never
 silence leaks originating in our own code. See
 [`valgrind/README.md`](valgrind/README.md) for the suppression policy.
 
+### Tier 4 — GPU resource ledger
+
+```bash
+nim c -r tests/memory/test_gpu_resources.nim
+```
+
+Spawns Waymark under `xvfb-run` with `WAYMARK_GPU_SNAPSHOT_PATH` set,
+then asserts that renderer-owned textures and the tile-batcher buffer are
+reported with nonzero live bytes and zero ledger anomalies. This is not a
+vendor VRAM profiler; it proves our OpenGL lifecycle instrumentation can
+account for resources that RSS and Valgrind do not directly see.
+
 ## Reports
 
 `reports/MEMORY.md` is the rolling public summary — current baselines,
-soak slopes, last Valgrind run. CI rewrites it on each successful run.
-That file is the artifact the Nim community will look at.
+soak slopes, last Valgrind run. That file is the artifact the Nim
+community will look at.
+
+Each invocation of `run_overnight.sh` also writes a fresh dated directory
+under `reports/overnight-<TS>/` containing:
+
+| File | Purpose |
+|---|---|
+| `SUMMARY.md` | Public-facing per-tier verdict tables. **The thing you link to.** |
+| `results.json` | Machine-readable receipt for CI / future comparison. |
+| `PHASES.md` | Audit trail — pass/fail per phase with timings. |
+| `tier{1,2,3,4}_*.log` | Raw test output per phase. |
+| `build_*.log` | Compile output for the release + valgrind-debug binaries. |
+
+## Running the suites
+
+### Overnight — the full sweep (~30 min)
+
+```bash
+./tests/memory/run_overnight.sh                           # full nightly
+SOAK_DURATION_MS=10000 VG_DURATION=8 \
+  ./tests/memory/run_overnight.sh                         # ~5 min smoke
+```
+
+Phases in order:
+1. **Self-tests** (sampler unit, parser unit, scenarios, child PID)
+2. **Tier 1** idle baseline
+3. **Tier 2** soak — all 5 scenarios at `SOAK_DURATION_MS` each (default 5 min)
+4. **Tier 3** valgrind — all 5 scenarios at `VG_DURATION`s each (default 20s)
+5. **Tier 4** GPU resource ledger — live texture/buffer accounting
+
+The runner never aborts on a single phase failure — it collects every
+result, then exits nonzero if anything failed. Logs and a public
+`SUMMARY.md` are written to `tests/memory/reports/overnight-<TS>/`.
+
+### Pre-push — fast checks only (~30s)
+
+```bash
+ln -sf ../../tests/memory/pre_push.sh .git/hooks/pre-push
+```
+
+Once installed, every `git push` runs the self-tests + Tier 1 idle baseline
+and blocks the push if any fail. Tier 2/3 are intentionally skipped — those
+belong in `run_overnight.sh`. Bypass with `git push --no-verify` (sparingly).
 
 ## Known limitations
 
@@ -105,9 +159,9 @@ That file is the artifact the Nim community will look at.
   harness deliberately defers cross-OS support until the suite has
   proven its value on Linux.
 - **Software OpenGL only** — `LIBGL_ALWAYS_SOFTWARE=1` is set so the
-  GPU driver doesn't pollute results with its own allocation patterns.
-  GPU-side memory is not visible to this suite (Tier 4 will close
-  that gap).
+  GPU driver doesn't pollute RSS/Valgrind results with its own allocation
+  patterns. Tier 4 tracks Waymark-owned OpenGL resources internally, not
+  total vendor-reported VRAM.
 - **xvfb-run dependency** — tests require `xorg-x11-server-Xvfb`
   installed locally and on CI runners.
 - **PTY-driven only** — the soak scenarios drive the terminal through
