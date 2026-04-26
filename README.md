@@ -34,11 +34,26 @@ The terminal is the showcase. The widgets are the point.
 
     git clone https://github.com/benteigland11/nim_terminal
     cd nim_terminal
-    nim c -d:release -o:nim_terminal src/nim_terminal.nim
+
+Linux:
+
+    ./scripts/build-linux.sh
     ./nim_terminal
 
-Requires Nim 2.2+, GLFW, and a working GL stack. No Cartograph install
-needed to build or run, only to lift widgets out into your own project.
+Windows:
+
+    scripts\build-windows.bat
+    nim_terminal.exe
+
+Manual build:
+
+    nimble install -y --depsOnly
+    nim c -d:release -o:nim_terminal src/nim_terminal.nim
+
+Requires Nim 2.2+, a C compiler toolchain, GLFW/staticglfw dependencies,
+and a working OpenGL stack. On Windows, Visual Studio Build Tools or a
+MinGW toolchain must be available to Nim. No Cartograph install is needed
+to build or run, only to lift widgets out into your own project.
 
 ## Widgets
 

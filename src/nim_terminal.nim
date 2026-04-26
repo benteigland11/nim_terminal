@@ -31,6 +31,10 @@ const
   DefaultFontSize = 20.0
   DefaultTitleBarHeight = 30
   DefaultTabBarHeight = 28
+  DefaultWindowWidth = 1280
+  DefaultWindowHeight = 720
+  MinWindowWidth = 640
+  MinWindowHeight = 360
   DefaultScrollback = 10000
   DefaultMaxPanes = 8
   DefaultDiagnosticsCapacity = 256
@@ -100,8 +104,8 @@ var
   workspaces: seq[TerminalWorkspace] = @[]
   rend: GpuTerminalRenderer
   window: Window
-  winWidth = 1280
-  winHeight = 720
+  winWidth = DefaultWindowWidth
+  winHeight = DefaultWindowHeight
   fontSize = DefaultFontSize
   font: Font
   chromeFont: Font
@@ -270,6 +274,20 @@ proc updateChromeHeights() =
   titleBarHeight = config.titleBarHeight
   tabBarHeight = config.tabBarHeight
   headerHeight = titleBarHeight + tabBarHeight
+
+proc chooseInitialWindowSize() =
+  winWidth = DefaultWindowWidth
+  winHeight = DefaultWindowHeight
+  let monitor = getPrimaryMonitor()
+  if monitor == nil:
+    return
+  let mode = getVideoMode(monitor)
+  if mode == nil:
+    return
+  let maxWidth = max(MinWindowWidth, int(float(mode.width) * 0.92))
+  let maxHeight = max(MinWindowHeight, int(float(mode.height) * 0.86))
+  winWidth = min(DefaultWindowWidth, maxWidth)
+  winHeight = min(DefaultWindowHeight, maxHeight)
 
 proc refreshTabCwdLabels(): bool =
   when defined(windows):
@@ -889,8 +907,10 @@ inputDebug = getEnv("WAYMARK_INPUT_DEBUG", "0") == "1"
 
 if init() == 0: quit("Failed to init GLFW")
 windowHint(CONTEXT_VERSION_MAJOR, 2); windowHint(CONTEXT_VERSION_MINOR, 1)
+chooseInitialWindowSize()
 window = createWindow(cint(winWidth), cint(winHeight), cstring(config.title), nil, nil)
 if window == nil: quit("Failed to create window")
+setWindowSizeLimits(window, cint(MinWindowWidth), cint(MinWindowHeight), DONT_CARE, DONT_CARE)
 makeContextCurrent(window); loadExtensions()
 var fbWidth, fbHeight: cint
 getFramebufferSize(window, addr fbWidth, addr fbHeight)
