@@ -7,7 +7,7 @@ import staticglfw
 import opengl
 import pixie
 import os
-import std/[options, parsecfg, strutils]
+import std/[json, options, parsecfg, strutils]
 import terminal
 import gpu_renderer
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
@@ -20,6 +20,7 @@ import ../cg/universal_process_cwd_nim/src/process_cwd_lib
 import ../cg/universal_path_candidates_nim/src/path_candidates_lib
 import ../cg/universal_split_pane_tree_nim/src/split_pane_tree_lib as pane_tree
 import ../cg/universal_resource_budget_nim/src/resource_budget_lib
+import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
 
 const
   DefaultWindowTitle = "Waymark - Built with Nim"
@@ -114,6 +115,7 @@ var
   dragStartWinX: cint = 0
   dragStartWinY: cint = 0
   fallbackTypefaces: seq[Typeface] = @[]
+  gpuSnapshotPath = getEnv("WAYMARK_GPU_SNAPSHOT_PATH", "")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -489,10 +491,57 @@ proc rebuildAtlas() =
   let anchors = captureResizeAnchors()
   let atlas = makeAtlas(fontSize, font)
   let chromeAtlas = makeAtlas(config.fontSize, chromeFont)
+  if rend != nil:
+    rend.dispose()
   rend = newGpuTerminalRenderer(atlas, chromeAtlas)
   rend.loadLogoTexture(config.logoPath)
   updateChromeHeights()
   resizeTerminalViewsPreservingView(anchors)
+
+proc snapshotToJson(s: ResourceSnapshot): JsonNode =
+  result = %*{
+    "total_live_bytes": s.totalLiveBytes,
+    "total_peak_bytes": s.totalPeakBytes,
+    "leak_count": s.leakCount(),
+    "anomaly_count": s.anomalies.len,
+    "has_leaks": s.hasLeaks(),
+  }
+  result["stats"] = newJArray()
+  for row in s.stats:
+    result["stats"].add %*{
+      "kind": row.kind,
+      "live_count": row.liveCount,
+      "peak_count": row.peakCount,
+      "live_bytes": row.liveBytes,
+      "peak_bytes": row.peakBytes,
+      "creates": row.creates,
+      "updates": row.updates,
+      "deletes": row.deletes,
+    }
+  result["live"] = newJArray()
+  for rec in s.live:
+    result["live"].add %*{
+      "kind": rec.kind,
+      "id": rec.id,
+      "label": rec.label,
+      "bytes": rec.bytes,
+    }
+  result["anomalies"] = newJArray()
+  for anomaly in s.anomalies:
+    result["anomalies"].add %*{
+      "kind": $anomaly.kind,
+      "resource_kind": anomaly.resourceKind,
+      "id": anomaly.id,
+      "label": anomaly.label,
+      "detail": anomaly.detail,
+    }
+
+proc writeGpuSnapshot() =
+  if gpuSnapshotPath.len == 0 or rend == nil: return
+  try:
+    writeFile(gpuSnapshotPath, $snapshotToJson(rend.gpuSnapshot()))
+  except CatchableError:
+    discard
 
 # ---------------------------------------------------------------------------
 # GLFW Callbacks
@@ -741,6 +790,7 @@ discard window.setMouseButtonCallback(onMouseButton); discard window.setCursorPo
 discard window.setScrollCallback(onScroll); discard window.setFramebufferSizeCallback(onResize)
 
 onResize(window, cint(winWidth), cint(winHeight))
+writeGpuSnapshot()
 
 let perf = newPerfMonitor()
 while windowShouldClose(window) == 0:
@@ -761,10 +811,14 @@ while windowShouldClose(window) == 0:
     drawActiveWorkspace()
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
     swapBuffers(window)
+    writeGpuSnapshot()
   pollEvents(); perf.endFrame()
   if perf.shouldReport(2.0):
     let s = perf.takeReport()
     echo "FPS: ", s.fps, " Latency: ", s.avgLatencyMs, " ms"
   if not changed: os.sleep(1)
 
+if rend != nil:
+  rend.dispose()
+  writeGpuSnapshot()
 terminate()

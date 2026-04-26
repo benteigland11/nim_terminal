@@ -34,6 +34,21 @@ proc newTileBatcher*(textureId: uint32, capacity: int = 50000): TileBatcher =
     count: 0
   )
 
+func gpuBufferId*(b: TileBatcher): uint32 =
+  if b == nil: 0'u32 else: b.vboId
+
+func vertexCapacity*(b: TileBatcher): int =
+  if b == nil: 0 else: b.capacity
+
+func vertexCount*(b: TileBatcher): int =
+  if b == nil: 0 else: b.count
+
+func vertexCapacityBytes*(b: TileBatcher): int64 =
+  if b == nil: 0'i64 else: int64(b.capacity) * int64(sizeof(Vertex))
+
+func uploadedVertexBytes*(b: TileBatcher): int64 =
+  if b == nil: 0'i64 else: int64(b.count) * int64(sizeof(Vertex))
+
 proc beginBatch*(b: TileBatcher) =
   if b.vboId == 0 and glActive:
     when not defined(glHeadless):
@@ -88,3 +103,10 @@ proc endBatch*(b: TileBatcher) =
     glDisableClientState(GL_TEXTURE_COORD_ARRAY)
     glDisableClientState(GL_COLOR_ARRAY)
     if b.vboId != 0: glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+proc dispose*(b: TileBatcher) =
+  if b == nil or b.vboId == 0: return
+  when not defined(glHeadless):
+    glDeleteBuffers(1, addr b.vboId)
+  b.vboId = 0
+  b.count = 0

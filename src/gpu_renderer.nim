@@ -10,6 +10,8 @@ import ../cg/data_screen_buffer_nim/src/screen_buffer_lib
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
 import ../cg/universal_tile_batcher_nim/src/tile_batcher_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
+import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
+import ../cg/data_pixel_resource_size_nim/src/pixel_resource_size_lib
 import ../cg/data_terminal_render_attrs_nim/src/terminal_render_attrs_lib as render_attrs
 import terminal
 
@@ -23,26 +25,55 @@ type
     bgTexId*: uint32      ## 1x1 white texture for drawing backgrounds
     logoTexId*: uint32
     logoAspect*: float32
+    resources*: ResourceLedger
+    disposed*: bool
 
-proc uploadAtlasTexture(atlas: GlyphAtlas, texId: uint32) =
+func glId(id: uint32): string = $id
+
+func atlasBytes(atlas: GlyphAtlas): int64 =
+  if atlas == nil or atlas.atlasImage.width <= 0 or atlas.atlasImage.height <= 0:
+    return 0
+  rgba8Bytes(atlas.atlasImage.width, atlas.atlasImage.height)
+
+proc recordTexture(r: GpuTerminalRenderer; id: uint32; label: string; bytes: int64) =
+  if r == nil or id == 0: return
+  r.resources.recordUpsert("texture", glId(id), bytes, label)
+
+proc recordBatcherBuffer(r: GpuTerminalRenderer) =
+  if r == nil or r.batcher == nil: return
+  let id = r.batcher.gpuBufferId()
+  if id == 0: return
+  r.resources.recordUpsert("buffer", glId(id), r.batcher.uploadedVertexBytes(), "tile batch vertex buffer")
+
+proc finishBatch(r: GpuTerminalRenderer) =
+  r.batcher.endBatch()
+  r.recordBatcherBuffer()
+
+proc uploadAtlasTexture(r: GpuTerminalRenderer; atlas: GlyphAtlas; texId: uint32; label: string) =
   glBindTexture(GL_TEXTURE_2D, texId)
   let img = atlas.atlasImage
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8.cint, cint(img.width), cint(img.height),
                0, GL_RGBA, GL_UNSIGNED_BYTE, addr img.data[0])
   atlas.isDirty = false
+  r.recordTexture(texId, label, atlasBytes(atlas))
 
 proc updateAtlasTexture*(r: GpuTerminalRenderer) =
   if not r.atlas.isDirty: return
-  uploadAtlasTexture(r.atlas, r.atlasTexId)
+  uploadAtlasTexture(r, r.atlas, r.atlasTexId, "glyph atlas")
 
 proc updateChromeAtlasTexture*(r: GpuTerminalRenderer) =
   if not r.chromeAtlas.isDirty: return
-  uploadAtlasTexture(r.chromeAtlas, r.chromeTexId)
+  uploadAtlasTexture(r, r.chromeAtlas, r.chromeTexId, "chrome glyph atlas")
 
 proc loadLogoTexture*(r: GpuTerminalRenderer, path: string) =
   try:
     let img = readImage(path)
     if img.width <= 0 or img.height <= 0 or img.data.len == 0: return
+    if r.logoTexId != 0:
+      var oldId = r.logoTexId
+      glDeleteTextures(1, addr oldId)
+      r.resources.recordDelete("texture", glId(oldId))
+      r.logoTexId = 0
     var id: uint32
     glGenTextures(1, addr id)
     glBindTexture(GL_TEXTURE_2D, id)
@@ -54,6 +85,7 @@ proc loadLogoTexture*(r: GpuTerminalRenderer, path: string) =
                  0, GL_RGBA, GL_UNSIGNED_BYTE, addr img.data[0])
     r.logoTexId = id
     r.logoAspect = img.width.float32 / img.height.float32
+    r.recordTexture(id, "titlebar logo", rgba8Bytes(img.width, img.height))
   except CatchableError:
     r.logoTexId = 0
     r.logoAspect = 1.0
@@ -130,10 +162,42 @@ proc newGpuTerminalRenderer*(atlas: GlyphAtlas, chromeAtlas: GlyphAtlas = nil): 
     chromeTexId: ids[1],
     bgTexId: ids[2],
     logoTexId: 0,
-    logoAspect: 1.0
+    logoAspect: 1.0,
+    resources: newResourceLedger(),
+    disposed: false,
   )
+  result.recordTexture(result.atlasTexId, "glyph atlas", atlasBytes(result.atlas))
+  result.recordTexture(result.chromeTexId, "chrome glyph atlas", atlasBytes(result.chromeAtlas))
+  result.recordTexture(result.bgTexId, "solid color texture", rgba8Bytes(1, 1))
   result.preRenderAscii()
   result.preRenderChromeAscii()
+
+proc gpuSnapshot*(r: GpuTerminalRenderer): ResourceSnapshot =
+  if r == nil:
+    return newResourceLedger().snapshot()
+  r.recordBatcherBuffer()
+  r.resources.snapshot()
+
+proc dispose*(r: GpuTerminalRenderer) =
+  if r == nil or r.disposed: return
+  if r.batcher != nil:
+    let id = r.batcher.gpuBufferId()
+    r.batcher.dispose()
+    if id != 0:
+      r.resources.recordDelete("buffer", glId(id))
+  var texIds: seq[uint32] = @[]
+  for id in [r.atlasTexId, r.chromeTexId, r.bgTexId, r.logoTexId]:
+    if id != 0:
+      texIds.add id
+  for id in texIds:
+    var local = id
+    glDeleteTextures(1, addr local)
+    r.resources.recordDelete("texture", glId(id))
+  r.atlasTexId = 0
+  r.chromeTexId = 0
+  r.bgTexId = 0
+  r.logoTexId = 0
+  r.disposed = true
 
 func ndcX(px, winWidth: int): float32 =
   -1.0'f32 + (float32(px) / float32(winWidth)) * 2.0'f32
@@ -206,7 +270,7 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
     r.addRect(x + w - 1, titleBarHeight + 4, 1, tabBarHeight - 8, winWidth, winHeight, border)
 
   r.addRect(tabAreaWidth, titleBarHeight + 2, plusWidth, tabBarHeight - 3, winWidth, winHeight, inactiveBg)
-  r.batcher.endBatch()
+  r.finishBatch()
 
   let logoX = 10
   let logoH = max(14, min(titleBarHeight - 8, 24))
@@ -221,7 +285,7 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
       0, 0, 1, 1,
       tile_batcher_lib.rgba(1, 1, 1, 1),
     )
-    r.batcher.endBatch()
+    r.finishBatch()
 
   r.batcher.textureId = r.chromeTexId
   r.batcher.beginBatch()
@@ -247,7 +311,7 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
 
   let plusX = tabAreaWidth + max(0, (plusWidth - r.chromeAtlas.cellWidth) div 2)
   r.addChromeText(plusX, textY, winWidth, winHeight, "+", text, 1)
-  r.batcher.endBatch()
+  r.finishBatch()
 
 proc drawPaneBorder*(r: GpuTerminalRenderer, x, y, w, h, winWidth, winHeight: int, active: bool) =
   if w <= 0 or h <= 0: return
@@ -260,14 +324,14 @@ proc drawPaneBorder*(r: GpuTerminalRenderer, x, y, w, h, winWidth, winHeight: in
   r.addRect(x, y + h - 1, w, 1, winWidth, winHeight, border)
   r.addRect(x, y, 1, h, winWidth, winHeight, border)
   r.addRect(x + w - 1, y, 1, h, winWidth, winHeight, border)
-  r.batcher.endBatch()
+  r.finishBatch()
 
 proc drawPaneBackground*(r: GpuTerminalRenderer, t: Terminal, x, y, w, h, winWidth, winHeight: int) =
   if w <= 0 or h <= 0: return
   r.batcher.textureId = r.bgTexId
   r.batcher.beginBatch()
   r.addRect(x, y, w, h, winWidth, winHeight, toRgba(t.screen.theme.background))
-  r.batcher.endBatch()
+  r.finishBatch()
 
 proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, x, y, w, h: int, showCursor = true) =
   ## Optimized single-pass rendering.
@@ -367,7 +431,7 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
       if afOverline in flags:
         r.batcher.addTile(px, ndcY(y + row * r.atlas.cellHeight, winHeight), lineW, lineH, 0, 0, 1, 1, color)
 
-  r.batcher.endBatch()
+  r.finishBatch()
 
   # --- ONE PASS FOR ALL GLYPHS ---
   r.batcher.textureId = r.atlasTexId
@@ -384,7 +448,7 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
         let resolved = render_attrs.resolveRenderAttrs(toRenderAttrs(cell.attrs), defaultFg, defaultBg, tAnsi)
         let color = toRgba(resolved.foreground)
         r.batcher.addTile(ndcX(x + col * r.atlas.cellWidth, winWidth), py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
-  r.batcher.endBatch()
+  r.finishBatch()
   glFlush()
   t.damage.clear()
 
