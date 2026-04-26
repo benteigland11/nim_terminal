@@ -87,6 +87,7 @@ type
     cmdSetScrollRegion
     cmdSetMode            ## SM / DECSET
     cmdResetMode          ## RM / DECRST
+    cmdRequestMode        ## DECRQM / request mode status
     cmdSetTabStop
     cmdClearTabStop
     cmdClearAllTabStops
@@ -142,7 +143,7 @@ type
       sgrParams*: seq[DispatchParam]
     of cmdSetScrollRegion:
       regionTop*, regionBottom*: int
-    of cmdSetMode, cmdResetMode:
+    of cmdSetMode, cmdResetMode, cmdRequestMode:
       modeCode*: int
       modeCodes*: seq[int]
       privateMode*: bool
@@ -260,6 +261,13 @@ proc translateCsi*(
     let bottom = if bot <= 0: DefaultScrollRegionBottom else: bot - 1
     return VtCommand(kind: cmdSetScrollRegion,
                      regionTop: top, regionBottom: bottom)
+  of 'p':
+    if hasPrivateMarker(intermediates, '$'):
+      return VtCommand(kind: cmdRequestMode,
+                       modeCode: paramOr(params, 0, 0),
+                       modeCodes: modeCodesFrom(params),
+                       privateMode: isPrivate)
+    return VtCommand(kind: cmdUnknown, rawByte: final, rawFinal: final)
   of 'h':
     return VtCommand(kind: cmdSetMode,
                      modeCode: paramOr(params, 0, 0),
@@ -271,9 +279,13 @@ proc translateCsi*(
                      modeCodes: modeCodesFrom(params),
                      privateMode: isPrivate)
   of 's':
-    return cmd(cmdSaveCursor)
+    if params.len == 0 and intermediates.len == 0:
+      return cmd(cmdSaveCursor)
+    return cmd(cmdIgnored)
   of 'u':
-    return cmd(cmdRestoreCursor)
+    if params.len == 0 and intermediates.len == 0:
+      return cmd(cmdRestoreCursor)
+    return cmd(cmdIgnored)
   of 'n':
     var copy: seq[DispatchParam] = @[]
     for p in params: copy.add p

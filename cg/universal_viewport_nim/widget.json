@@ -2,7 +2,7 @@
   "meta": {
     "id": "universal-viewport-nim",
     "name": "Viewport",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "domain": "universal",
     "tags": [
       "viewport",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T19:36:41.880061+00:00",
+    "validated_at": "2026-04-26T03:21:04.141028+00:00",
     "runtime": "nim 2.2.8"
   }
 }

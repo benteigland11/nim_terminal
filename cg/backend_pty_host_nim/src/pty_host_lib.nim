@@ -33,6 +33,16 @@ type
   PtyError* = object of CatchableError
     ## Raised by backends for unrecoverable PTY failures.
 
+  PtyReadKind* = enum
+    prData
+    prWouldBlock
+    prEof
+    prClosed
+
+  PtyReadResult* = object
+    kind*: PtyReadKind
+    count*: int
+
   PtyBackend* = concept b
     ## Contract a pseudo-terminal backend must satisfy.
     ##
@@ -62,6 +72,7 @@ type
     pid*: int
     rows*, cols*: int
     closed*: bool
+    eof*: bool
 
 # ---------------------------------------------------------------------------
 # Exit status helpers (pure, usable by any backend)
@@ -105,6 +116,7 @@ proc spawn*[B](
     rows: rows,
     cols: cols,
     closed: false,
+    eof: false,
   )
 
 proc close*[B](p: PtyHost[B]) =
@@ -126,7 +138,24 @@ proc read*[B](p: PtyHost[B], buf: var openArray[byte]): int =
   ## bytes read, 0 on EOF, or a negative value if a nonblocking backend
   ## would have blocked. Returns 0 if the host is already closed.
   if p.closed or buf.len == 0: return 0
-  p.backend.ptyRead(p.handle, buf)
+  let n = p.backend.ptyRead(p.handle, buf)
+  if n == 0: p.eof = true
+  n
+
+proc readResult*[B](p: PtyHost[B], buf: var openArray[byte]): PtyReadResult =
+  ## Read and classify the backend result so callers do not have to remember
+  ## the numeric convention for data / would-block / EOF / closed.
+  if p.closed:
+    return PtyReadResult(kind: prClosed, count: 0)
+  if buf.len == 0:
+    return PtyReadResult(kind: prWouldBlock, count: 0)
+  let n = p.backend.ptyRead(p.handle, buf)
+  if n > 0:
+    return PtyReadResult(kind: prData, count: n)
+  if n < 0:
+    return PtyReadResult(kind: prWouldBlock, count: 0)
+  p.eof = true
+  PtyReadResult(kind: prEof, count: 0)
 
 proc readString*[B](p: PtyHost[B], maxBytes: int = 4096): string =
   ## Convenience wrapper that returns bytes as a string. Empty string on

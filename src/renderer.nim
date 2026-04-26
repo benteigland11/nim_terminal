@@ -73,8 +73,8 @@ proc draw*(r: TerminalRenderer, t: Terminal) =
         r.atlas.drawGlyph(r.surface, cell.rune, x, y)
 
   # 3. Draw cursor (Only if it's currently in view)
-  let cursorViewportRow = t.viewport.bufferToViewport(s.scrollback.len + s.cursor.row)
-  if cursorViewportRow != -1 and not s.cursor.pendingWrap:
+  let cursorViewportRow = t.viewport.bufferToViewport(s.absoluteCursorRow())
+  if cursorViewportRow != -1 and s.cursor.visible and not s.cursor.pendingWrap:
     let cx = s.cursor.col * cw
     let cy = cursorViewportRow * ch
     ctx.fillStyle = toPixieColor(theme.cursor)

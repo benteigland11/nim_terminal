@@ -99,3 +99,53 @@ proc activatePrevious*(set: var TabSet): bool =
   let prevIdx = if idx <= 0: set.tabs.len - 1 else: idx - 1
   set.activeId = some(set.tabs[prevIdx].id)
   true
+
+# ---------------------------------------------------------------------------
+# Tab Strip Hit Testing
+# ---------------------------------------------------------------------------
+
+func plusButtonWidth*(tabBarHeight: int, minPlusWidth = 32): int =
+  max(minPlusWidth, tabBarHeight)
+
+func tabAreaWidth*(totalWidth, tabBarHeight: int, minPlusWidth = 32): int =
+  max(0, totalWidth - plusButtonWidth(tabBarHeight, minPlusWidth))
+
+func tabWidth*(set: TabSet, totalWidth, tabBarHeight: int, minPlusWidth = 32, minTabWidth = 12): int =
+  let areaWidth = tabAreaWidth(totalWidth, tabBarHeight, minPlusWidth)
+  if set.tabs.len == 0:
+    areaWidth
+  else:
+    max(minTabWidth, areaWidth div max(1, set.tabs.len))
+
+func tabAtX*(set: TabSet, x, totalWidth, tabBarHeight: int): Option[TabId] =
+  let areaWidth = tabAreaWidth(totalWidth, tabBarHeight)
+  if x < 0 or x >= areaWidth or set.tabs.len == 0:
+    return none(TabId)
+  let idx = x div set.tabWidth(totalWidth, tabBarHeight)
+  if idx < 0 or idx >= set.tabs.len:
+    none(TabId)
+  else:
+    some(set.tabs[idx].id)
+
+func closeTabAtX*(set: TabSet, x, totalWidth, tabBarHeight: int): Option[TabId] =
+  let areaWidth = tabAreaWidth(totalWidth, tabBarHeight)
+  if x < 0 or x >= areaWidth or set.tabs.len <= 1:
+    return none(TabId)
+  let width = set.tabWidth(totalWidth, tabBarHeight)
+  let idx = x div width
+  if idx < 0 or idx >= set.tabs.len:
+    return none(TabId)
+  let tabX = idx * width
+  let w = min(width, areaWidth - tabX)
+  if w < 44:
+    return none(TabId)
+  let closeSize = max(10, min(tabBarHeight - 10, 16))
+  let closeX = tabX + w - closeSize - 6
+  if x >= closeX and x < closeX + closeSize:
+    some(set.tabs[idx].id)
+  else:
+    none(TabId)
+
+func plusButtonAtX*(x, totalWidth, tabBarHeight: int): bool =
+  let width = plusButtonWidth(tabBarHeight)
+  x >= max(0, totalWidth - width)

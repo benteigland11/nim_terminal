@@ -78,6 +78,38 @@ func reportWindowTitle*(title: string): string =
   csi("l" & title & "\e\\")
 
 # ---------------------------------------------------------------------------
+# Mode Status (DECRPM)
+# ---------------------------------------------------------------------------
+
+type
+  ModeStatus* = enum
+    msNotRecognized = 0
+    msSet = 1
+    msReset = 2
+    msPermanentlySet = 3
+    msPermanentlyReset = 4
+
+  ModeSupport* = object
+    code*: int
+    privateMode*: bool
+    status*: ModeStatus
+
+func reportModeStatus*(mode: int, status: ModeStatus, privateMode = true): string =
+  ## Format a DECRPM response for DECRQM mode status queries.
+  let prefix = if privateMode: "?" else: ""
+  csi(prefix & $mode & ";" & $(ord(status)) & "$y")
+
+func modeStatusFrom*(modes: openArray[ModeSupport], code: int, privateMode = true): ModeStatus =
+  ## Lookup a mode status in a small caller-owned capability table.
+  for m in modes:
+    if m.code == code and m.privateMode == privateMode:
+      return m.status
+  msNotRecognized
+
+func modeSupport*(code: int, status: ModeStatus, privateMode = true): ModeSupport =
+  ModeSupport(code: code, status: status, privateMode: privateMode)
+
+# ---------------------------------------------------------------------------
 # Focus (CSI I / CSI O)
 # ---------------------------------------------------------------------------
 

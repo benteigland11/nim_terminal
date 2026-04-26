@@ -116,6 +116,18 @@ suite "CSI modes":
     check translateCsi(@[], @[], byte('g')).kind == cmdClearTabStop
     check translateCsi(@[p(3)], @[], byte('g')).kind == cmdClearAllTabStops
 
+  test "DECRQM private mode request is translated":
+    let c = translateCsi(@[p(2026)], @[byte('?'), byte('$')], byte('p'))
+    check c.kind == cmdRequestMode
+    check c.privateMode
+    check c.modeCode == 2026
+
+  test "kitty keyboard CSI u variants are not cursor restore":
+    check translateCsi(@[p(1)], @[byte('>')], byte('u')).kind == cmdIgnored
+    check translateCsi(@[], @[byte('<')], byte('u')).kind == cmdIgnored
+    check translateCsi(@[], @[byte('?')], byte('u')).kind == cmdIgnored
+    check translateCsi(@[], @[], byte('u')).kind == cmdRestoreCursor
+
 suite "ESC sequences":
   test "ESC 7 / 8 → save / restore":
     check translateEsc(@[], byte('7')).kind == cmdSaveCursor

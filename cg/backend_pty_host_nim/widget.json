@@ -2,7 +2,7 @@
   "meta": {
     "id": "backend-pty-host-nim",
     "name": "PTY Host",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "domain": "backend",
     "tags": [
       "pty",
@@ -24,8 +24,8 @@
     "domain": "Every tunable should be a parameter: timeouts, retry counts, pool sizes, base URLs, header names. A consumer must be able to point your widget at any endpoint or database without touching source. Never hardcode URLs in src/ - accept them as parameters and demonstrate with a real URL in examples/. Return structured data (dicts, typed objects) rather than formatted strings - let the caller decide how to present it. Do not log to stdout/stderr; raise exceptions or return error values instead."
   },
   "validation": {
-    "engine_version": 1,
-    "validated_at": "2026-04-21T04:42:25.719394+00:00",
+    "engine_version": 2,
+    "validated_at": "2026-04-26T03:20:44.782671+00:00",
     "runtime": "nim 2.2.8"
   }
 }

@@ -120,6 +120,15 @@ suite "terminal pipeline":
     check t.screen.lineText(0).strip() == "shell"
     check t.screen.lineText(1).strip() == ""
 
+  test "alternate screen transition clears transient selection":
+    let t = newMockTerminal(4, 10)
+    t.feed("shell")
+    t.selection.start(point(0, 0))
+    t.selection.update(point(0, 2))
+    check t.selection.isActive
+    t.feed("\e[?1049h")
+    check not t.selection.isActive
+
   test "inline command prompt resumes below output footprint":
     let t = newMockTerminal(6, 20)
     t.feed("sh$ claude\r\n")
@@ -144,6 +153,48 @@ suite "terminal pipeline":
     check t.screen.lineText(2).strip() == "Claude UI"
     check t.screen.lineText(4).strip() == "Status"
     check t.screen.lineText(5).strip() == "sh$"
+
+  test "cursor restore during inline repaint does not push input downward":
+    let t = newMockTerminal(8, 30)
+    t.feed("\e7")
+    t.feed("\e[1;1HEnter submit")
+    t.feed("\e[3;1Hf")
+    t.feed("\e8")
+    t.feed("\e[3;1Hfr")
+
+    check t.screen.lineText(0).strip() == "Enter submit"
+    check t.screen.lineText(2).strip() == "fr"
+    check t.screen.lineText(3).strip() == ""
+
+  test "DECTCEM toggles terminal cursor visibility":
+    let t = newMockTerminal(4, 20)
+    check t.screen.cursor.visible
+    t.feed("\e[?25l")
+    check not t.screen.cursor.visible
+    t.feed("\e[?25h")
+    check t.screen.cursor.visible
+
+  test "kitty keyboard enable does not restore cursor":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e7")
+    t.feed("\e[3;1Hopen")
+    t.feed("\e[>1u")
+    t.feed("code")
+    check t.screen.lineText(0).strip() == ""
+    check t.screen.lineText(2).strip() == "opencode"
+
+  test "DECRQM reports unsupported modern modes instead of timing out":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e[?2026$p")
+    check t.async.queueLen > 0
+
+  test "button-event and SGR mouse modes compose":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e[?1002h\e[?1006h")
+    check t.inputMode.mouseMode == mmButtonEvent
+    check t.inputMode.sgrMouse
+    discard t.sendMouse(mouse(meDrag, mbLeft, 1, 2))
+    check t.async.queueLen > 0
 
   test "full display erase alone does not push prompt to bottom":
     let t = newMockTerminal(6, 20)

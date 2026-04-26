@@ -19,6 +19,30 @@ suite "input vt encoding":
     # CSI < 0 ; 21 ; 11 m
     check cast[string](bytes) == "\e[<0;21;11m"
 
+  test "X11 mode ignores motion while button-event mode sends drag":
+    var mode = newInputMode()
+    mode.mouseMode = mmX11
+    check encodeMouseEvent(mouse(meDrag, mbLeft, 1, 2), mode).len == 0
+
+    mode.mouseMode = mmButtonEvent
+    let drag = encodeMouseEvent(mouse(meDrag, mbLeft, 1, 2), mode)
+    check drag.len > 0
+    check trackingWantsDrag(mode)
+
+  test "any-event mode sends plain motion":
+    var mode = newInputMode()
+    mode.mouseMode = mmAnyEvent
+    let move = encodeMouseEvent(mouse(meMove, mbLeft, 1, 2), mode)
+    check move.len > 0
+    check trackingWantsMotion(mode)
+
+  test "SGR coordinate encoding composes with button-event tracking":
+    var mode = newInputMode()
+    mode.mouseMode = mmButtonEvent
+    mode.sgrMouse = true
+    let drag = encodeMouseEvent(mouse(meDrag, mbLeft, 1, 2), mode)
+    check cast[string](drag) == "\e[<32;3;2M"
+
   test "bracketed paste":
     var mode = newInputMode()
     mode.bracketedPaste = true

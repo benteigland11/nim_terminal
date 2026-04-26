@@ -2,7 +2,7 @@
   "meta": {
     "id": "frontend-glfw-input-nim",
     "name": "Glfw Input",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "domain": "frontend",
     "tags": [
       "glfw",
@@ -26,8 +26,8 @@
     "domain": "All appearance values (colors, spacing, typography, shadows) must be exposed as parameters or CSS custom properties - hardcoded values lock consumers into your choices. Provide sensible defaults but every visual value must be overridable. No inline styles for anything that could vary by theme."
   },
   "validation": {
-    "engine_version": 1,
-    "validated_at": "2026-04-25T17:54:05.464034+00:00",
+    "engine_version": 2,
+    "validated_at": "2026-04-26T00:15:47.368717+00:00",
     "runtime": "nim 2.2.8"
   }
 }

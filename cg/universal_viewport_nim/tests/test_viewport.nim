@@ -40,3 +40,28 @@ suite "universal viewport":
     check v.scrollOffset == 6 # capped at 30-24
     v.scrollDown(100)
     check v.scrollOffset == 0 # capped at 0
+
+  test "capture and restore anchor preserves top when target stays visible":
+    var v = newViewport(10)
+    v.updateBufferHeight(100)
+    v.scrollUp(20)
+    let anchor = v.captureAnchor(75)
+    v.restoreAnchor(totalRows = 100, height = 6, anchor = anchor, contextRowsAbove = 2)
+    check v.viewportToBuffer(0) == anchor.topRow
+    check v.bufferToViewport(75) >= 0
+
+  test "restore anchor keeps context above target when top would hide it":
+    var v = newViewport(10)
+    v.updateBufferHeight(100)
+    v.scrollUp(20)
+    let anchor = v.captureAnchor(89)
+    v.restoreAnchor(totalRows = 100, height = 4, anchor = anchor, contextRowsAbove = 2)
+    check v.viewportToBuffer(0) == 87
+    check v.bufferToViewport(89) == 2
+
+  test "bottom anchor remains pinned to bottom":
+    var v = newViewport(10)
+    v.updateBufferHeight(100)
+    let anchor = v.captureAnchor(99)
+    v.restoreAnchor(totalRows = 120, height = 8, anchor = anchor, contextRowsAbove = 2)
+    check v.isAtBottom

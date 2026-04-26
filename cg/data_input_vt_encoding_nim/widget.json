@@ -2,7 +2,7 @@
   "meta": {
     "id": "data-input-vt-encoding-nim",
     "name": "Input Vt Encoding",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "domain": "data",
     "tags": [
       "terminal",
@@ -25,8 +25,8 @@
     "domain": "Transformation logic must be pure and stateless - same input always produces same output, no side effects. Accept the broadest practical input type (bytes, str, file-like, path) and let the caller choose. Expose encoding, delimiter, schema, and other format details as parameters. Raise descriptive errors on malformed input rather than silently coercing or dropping data."
   },
   "validation": {
-    "engine_version": 1,
-    "validated_at": "2026-04-25T17:20:41.570004+00:00",
+    "engine_version": 2,
+    "validated_at": "2026-04-26T03:21:24.837293+00:00",
     "runtime": "nim 2.2.8"
   }
 }

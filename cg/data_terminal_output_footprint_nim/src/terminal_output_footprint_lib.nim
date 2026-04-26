@@ -14,9 +14,10 @@ type
   OutputFootprint* = object
     bottomRow: int
     armed: bool
+    sawFullDisplayErase: bool
 
 func newOutputFootprint*(): OutputFootprint =
-  OutputFootprint(bottomRow: -1, armed: false)
+  OutputFootprint(bottomRow: -1, armed: false, sawFullDisplayErase: false)
 
 func bottomRow*(f: OutputFootprint): int = f.bottomRow
 
@@ -28,6 +29,11 @@ func noResumeAction*(): ResumeAction =
 proc reset*(f: var OutputFootprint) =
   f.bottomRow = -1
   f.armed = false
+  f.sawFullDisplayErase = false
+
+proc markFullDisplayErase*(f: var OutputFootprint, activeAlternate = false) =
+  if activeAlternate: return
+  f.sawFullDisplayErase = true
 
 proc recordRow*(f: var OutputFootprint, row: int, activeAlternate = false) =
   if activeAlternate or row < 0: return
@@ -49,7 +55,7 @@ proc armAfterCursorRestore*(
   if activeAlternate:
     f.armed = false
   else:
-    f.armed = f.bottomRow >= 0 and cursorRow < f.bottomRow
+    f.armed = f.sawFullDisplayErase and f.bottomRow >= 0 and cursorRow < f.bottomRow
 
 proc consumeResume*(
     f: var OutputFootprint,

@@ -16,18 +16,27 @@ suite "Terminal output footprint":
 
   test "arms after cursor restore above footprint":
     var f = newOutputFootprint()
+    f.markFullDisplayErase()
     f.recordRows(2, 4)
     f.armAfterCursorRestore(cursorRow = 1)
     check f.isArmed
 
+  test "does not arm after cursor restore without full display erase":
+    var f = newOutputFootprint()
+    f.recordRows(2, 4)
+    f.armAfterCursorRestore(cursorRow = 1)
+    check not f.isArmed
+
   test "does not arm after cursor restore below footprint":
     var f = newOutputFootprint()
+    f.markFullDisplayErase()
     f.recordRows(2, 4)
     f.armAfterCursorRestore(cursorRow = 5)
     check not f.isArmed
 
   test "resume moves to row below footprint":
     var f = newOutputFootprint()
+    f.markFullDisplayErase()
     f.recordRows(2, 4)
     f.armAfterCursorRestore(cursorRow = 1)
     let action = f.consumeResume(cursorRow = 1, screenRows = 10)
@@ -39,6 +48,7 @@ suite "Terminal output footprint":
 
   test "resume scrolls when footprint reaches bottom":
     var f = newOutputFootprint()
+    f.markFullDisplayErase()
     f.recordRow(5)
     f.armAfterCursorRestore(cursorRow = 1)
     let action = f.consumeResume(cursorRow = 1, screenRows = 6)

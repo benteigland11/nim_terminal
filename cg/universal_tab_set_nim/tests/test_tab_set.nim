@@ -59,3 +59,35 @@ suite "Tab Set":
     check tabs.activeId.get() == second
     check tabs.activatePrevious()
     check tabs.activeId.get() == first
+
+  test "tab strip metrics reserve plus button":
+    var tabs = newTabSet()
+    discard tabs.addTab("one")
+    discard tabs.addTab("two")
+
+    check plusButtonWidth(tabBarHeight = 24) == 32
+    check tabAreaWidth(totalWidth = 132, tabBarHeight = 24) == 100
+    check tabs.tabWidth(totalWidth = 132, tabBarHeight = 24) == 50
+    check plusButtonAtX(x = 101, totalWidth = 132, tabBarHeight = 24)
+    check not plusButtonAtX(x = 99, totalWidth = 132, tabBarHeight = 24)
+
+  test "tabAtX finds the tab under a coordinate":
+    var tabs = newTabSet()
+    let first = tabs.addTab("one")
+    let second = tabs.addTab("two")
+
+    check tabs.tabAtX(x = 10, totalWidth = 132, tabBarHeight = 24).get() == first
+    check tabs.tabAtX(x = 60, totalWidth = 132, tabBarHeight = 24).get() == second
+    check tabs.tabAtX(x = 120, totalWidth = 132, tabBarHeight = 24).isNone
+
+  test "closeTabAtX only hits close affordance when closable":
+    var tabs = newTabSet()
+    let first = tabs.addTab("one")
+    discard tabs.addTab("two")
+
+    check tabs.closeTabAtX(x = 36, totalWidth = 132, tabBarHeight = 24).get() == first
+    check tabs.closeTabAtX(x = 10, totalWidth = 132, tabBarHeight = 24).isNone
+
+    var single = newTabSet()
+    discard single.addTab("one")
+    check single.closeTabAtX(x = 36, totalWidth = 132, tabBarHeight = 24).isNone

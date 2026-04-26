@@ -7,23 +7,29 @@ import staticglfw
 import opengl
 import pixie
 import os
-import std/[options, strutils]
+import std/[options, parsecfg, strutils]
 import terminal
 import gpu_renderer
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
-from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toModifiers, toMouseButton
+from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toMouseButton, toPrintableRune
 import ../cg/universal_perf_monitor_nim/src/perf_monitor_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/universal_os_launcher_nim/src/os_launcher_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
+import ../cg/universal_process_cwd_nim/src/process_cwd_lib
+import ../cg/universal_path_candidates_nim/src/path_candidates_lib
 
 const
-  WindowTitle = "Nim Terminal"
-  FontPath = "resources/Inconsolata-Regular.ttf"
+  DefaultWindowTitle = "Nim Terminal"
+  ConfigPath = "nim_terminal.cfg"
+  DefaultFontPath = "resources/Inconsolata-Regular.ttf"
+  DefaultLogoPath = "logo.png"
+  DefaultFontSize = 20.0
+  DefaultTitleBarHeight = 30
+  DefaultTabBarHeight = 28
+  DefaultScrollback = 10000
   ZoomContextRowsAbove = 2
-  FallbackFontPaths = [
-    "/home/Vinscen/.local/share/fonts/JetBrainsMonoNerd/JetBrainsMonoNerdFontMono-Regular.ttf",
-    "/home/Vinscen/.local/share/fonts/JetBrainsMonoNerd/JetBrainsMonoNerdFont-Regular.ttf",
+  DefaultFallbackFontPaths = [
     "/usr/share/fonts/google-noto/NotoSansSymbols2-Regular.ttf",
     "/usr/share/fonts/google-noto-vf/NotoSansSymbols[wght].ttf",
     "/usr/share/fonts/google-noto-emoji-fonts/NotoEmoji-Regular.ttf",
@@ -35,24 +41,103 @@ type
   TerminalSession = object
     id: TabId
     terminal: Terminal
+    cwd: string
+
+  TerminalConfig = object
+    title: string
+    shellProgram: string
+    fontPath: string
+    fontSize: float
+    fallbackFontPaths: seq[string]
+    logoPath: string
+    titleBarHeight: int
+    tabBarHeight: int
+    backgroundColor: string
+    scrollback: int
 
 var
+  config = TerminalConfig(
+    title: DefaultWindowTitle,
+    shellProgram: when defined(windows): "cmd.exe" else: getEnv("SHELL", "/bin/sh"),
+    fontPath: DefaultFontPath,
+    fontSize: DefaultFontSize,
+    fallbackFontPaths: @DefaultFallbackFontPaths,
+    logoPath: DefaultLogoPath,
+    titleBarHeight: DefaultTitleBarHeight,
+    tabBarHeight: DefaultTabBarHeight,
+    backgroundColor: "#050607",
+    scrollback: DefaultScrollback,
+  )
   tabs = newTabSet()
   sessions: seq[TerminalSession] = @[]
   rend: GpuTerminalRenderer
   window: Window
   winWidth = 1280
   winHeight = 720
-  fontSize = 18.0
+  fontSize = DefaultFontSize
   font: Font
-  headerHeight = 28
+  chromeFont: Font
+  titleBarHeight = DefaultTitleBarHeight
+  tabBarHeight = DefaultTabBarHeight
+  headerHeight = titleBarHeight + tabBarHeight
+  draggingWindow = false
+  dragStartMouseX = 0.0
+  dragStartMouseY = 0.0
+  dragStartGlobalX = 0.0
+  dragStartGlobalY = 0.0
+  dragStartWinX: cint = 0
+  dragStartWinY: cint = 0
   fallbackTypefaces: seq[Typeface] = @[]
-
-let shellCmd = when defined(windows): "cmd.exe" else: getEnv("SHELL", "/bin/sh")
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+func splitList(value: string): seq[string] =
+  for item in value.split(','):
+    let trimmed = item.strip()
+    if trimmed.len > 0:
+      result.add trimmed
+
+proc parseFloatOr(value: string, fallback: float): float =
+  try:
+    result = parseFloat(value)
+  except ValueError:
+    result = fallback
+
+proc parseIntOr(value: string, fallback: int): int =
+  try:
+    result = parseInt(value)
+  except ValueError:
+    result = fallback
+
+proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
+  result = config
+  if not fileExists(path):
+    return
+  try:
+    let dict = loadConfig(path)
+    result.title = dict.getSectionValue("app", "title", result.title)
+    result.logoPath = resolveCandidatePath(dict.getSectionValue("app", "logo", result.logoPath), getCurrentDir())
+
+    let shell = dict.getSectionValue("shell", "program", result.shellProgram).strip()
+    if shell.len > 0:
+      result.shellProgram = shell
+
+    result.fontSize = max(4.0, parseFloatOr(dict.getSectionValue("font", "size", $result.fontSize), result.fontSize))
+    let fontCandidate = dict.getSectionValue("font", "primary", result.fontPath)
+    result.fontPath = firstExistingPath([fontCandidate, result.fontPath], getCurrentDir()).get(result.fontPath)
+
+    let configuredFallbacks = splitList(dict.getSectionValue("font", "fallbacks", ""))
+    if configuredFallbacks.len > 0:
+      result.fallbackFontPaths = configuredFallbacks
+
+    result.titleBarHeight = max(24, parseIntOr(dict.getSectionValue("chrome", "title_bar_height", $result.titleBarHeight), result.titleBarHeight))
+    result.tabBarHeight = max(22, parseIntOr(dict.getSectionValue("chrome", "tab_bar_height", $result.tabBarHeight), result.tabBarHeight))
+    result.backgroundColor = dict.getSectionValue("theme", "background", result.backgroundColor)
+    result.scrollback = max(100, parseIntOr(dict.getSectionValue("terminal", "scrollback", $result.scrollback), result.scrollback))
+  except CatchableError as e:
+    echo "Config warning: ", e.msg
 
 func castSet(s: cint): set[terminal.Modifier] =
   if (s and MOD_SHIFT) != 0: result.incl terminal.modShift
@@ -81,11 +166,19 @@ proc terminalRows(): int =
   if rend == nil or rend.atlas == nil or rend.atlas.cellHeight <= 0: return 1
   max(1, contentHeight() div rend.atlas.cellHeight)
 
-func cwdLabel(path: string): string =
-  let normalized = path.strip(chars = {'/', '\\'})
-  if normalized.len == 0: return path
-  let (_, tail) = splitPath(normalized)
-  if tail.len == 0: path else: tail
+proc updateChromeHeights() =
+  titleBarHeight = config.titleBarHeight
+  tabBarHeight = config.tabBarHeight
+  headerHeight = titleBarHeight + tabBarHeight
+
+proc refreshTabCwdLabels(): bool =
+  for i in 0 ..< sessions.len:
+    let cwd = processCwd(sessions[i].terminal.host.pid)
+    if cwd.isNone or cwd.get() == sessions[i].cwd: continue
+    sessions[i].cwd = cwd.get()
+    let label = cwdLabel(cwd.get())
+    if tabs.rename(sessions[i].id, label):
+      result = true
 
 proc shellArgsFor(cwd: string): seq[string] =
   when defined(windows):
@@ -101,6 +194,13 @@ proc resizeTerminals() =
     session.terminal.resize(cols, rows)
     session.terminal.damage.markAll()
 
+proc applyConfiguredTheme(term: Terminal) =
+  let background = parseColor(config.backgroundColor)
+  if background.isSome:
+    let c = background.get()
+    term.screen.theme.background = PaletteColor(r: c.r, g: c.g, b: c.b)
+    term.damage.markAll()
+
 type ZoomAnchor = object
   topAbsRow: int
   absRow: int
@@ -109,64 +209,32 @@ type ZoomAnchor = object
 
 proc resizeTerminalViewsPreservingView(anchors: seq[ZoomAnchor]) =
   if rend == nil or rend.atlas == nil: return
+  let cols = terminalCols()
   let rows = terminalRows()
   for i, session in sessions:
     let anchor = if i < anchors.len: anchors[i] else: ZoomAnchor(topAbsRow: -1, absRow: -1, viewportRow: 0, atBottom: true)
-    session.terminal.damage.resize(rows)
-    session.terminal.viewport.height = rows
-    session.terminal.viewport.updateBufferHeight(session.terminal.screen.totalRows, false)
-    if anchor.absRow >= 0:
-      let maxContextAbove = min(ZoomContextRowsAbove, anchor.absRow)
-      let cursorViewportIfTopPreserved = anchor.absRow - anchor.topAbsRow
-      let preferredTop =
-        if anchor.topAbsRow >= 0 and cursorViewportIfTopPreserved >= maxContextAbove and cursorViewportIfTopPreserved < rows:
-          anchor.topAbsRow
-        else:
-          anchor.absRow - maxContextAbove
-      let desiredOffset = session.terminal.screen.totalRows - rows - preferredTop
-      session.terminal.viewport.scrollOffset = max(0, min(session.terminal.viewport.maxScroll, desiredOffset))
-    else:
-      session.terminal.viewport.scrollToBottom()
+    session.terminal.resizeView(cols, rows)
+    session.terminal.viewport.restoreAnchor(
+      totalRows = session.terminal.screen.totalRows,
+      height = rows,
+      anchor = ViewAnchor(
+        topRow: anchor.topAbsRow,
+        targetRow: anchor.absRow,
+        targetViewportRow: anchor.viewportRow,
+        atBottom: anchor.atBottom,
+      ),
+      contextRowsAbove = ZoomContextRowsAbove,
+    )
     session.terminal.damage.markAll()
 
 proc addTerminalTab() =
   let cwd = getCurrentDir()
   let label = cwdLabel(cwd)
   let id = tabs.addTab(label)
-  let term = newTerminal(shellCmd, shellArgsFor(cwd), cwd = cwd, cols = terminalCols(), rows = terminalRows())
-  sessions.add TerminalSession(id: id, terminal: term)
+  let term = newTerminal(config.shellProgram, shellArgsFor(cwd), cwd = cwd, cols = terminalCols(), rows = terminalRows(), scrollback = config.scrollback)
+  applyConfiguredTheme(term)
+  sessions.add TerminalSession(id: id, terminal: term, cwd: cwd)
   resizeTerminals()
-
-proc tabWidthPx(): int =
-  let plusWidth = max(32, headerHeight)
-  let tabAreaWidth = max(0, winWidth - plusWidth)
-  if tabs.tabs.len == 0: tabAreaWidth else: max(12, tabAreaWidth div max(1, tabs.tabs.len))
-
-proc tabAreaWidthPx(): int =
-  let plusWidth = max(32, headerHeight)
-  max(0, winWidth - plusWidth)
-
-proc tabAt(x: int): Option[TabId] =
-  let tabAreaWidth = tabAreaWidthPx()
-  if x < 0 or x >= tabAreaWidth or tabs.tabs.len == 0: return none(TabId)
-  let idx = x div tabWidthPx()
-  if idx < 0 or idx >= tabs.tabs.len: none(TabId) else: some(tabs.tabs[idx].id)
-
-proc closeTabAt(x: int): Option[TabId] =
-  let tabAreaWidth = tabAreaWidthPx()
-  if x < 0 or x >= tabAreaWidth or tabs.tabs.len <= 1: return none(TabId)
-  let tabWidth = tabWidthPx()
-  let idx = x div tabWidth
-  if idx < 0 or idx >= tabs.tabs.len: return none(TabId)
-  let tabX = idx * tabWidth
-  let w = min(tabWidth, tabAreaWidth - tabX)
-  if w < 44: return none(TabId)
-  let closeSize = max(10, min(headerHeight - 10, 16))
-  let closeX = tabX + w - closeSize - 6
-  if x >= closeX and x < closeX + closeSize:
-    some(tabs.tabs[idx].id)
-  else:
-    none(TabId)
 
 proc removeTerminalTab(id: TabId) =
   if sessions.len <= 1: return
@@ -179,18 +247,21 @@ proc removeTerminalTab(id: TabId) =
       if term != nil: term.damage.markAll()
       return
 
-proc inPlusButton(x: int): bool =
-  let plusWidth = max(32, headerHeight)
-  x >= max(0, winWidth - plusWidth)
+proc inTitleBar(y: int): bool =
+  y >= 0 and y < titleBarHeight
+
+proc inTabBar(y: int): bool =
+  y >= titleBarHeight and y < headerHeight
 
 proc viewportRowFromY(y: cdouble): int =
   (int(y) - headerHeight) div rend.atlas.cellHeight
 
 proc loadFallbackTypefaces(): seq[Typeface] =
-  for path in FallbackFontPaths:
-    if not fileExists(path): continue
+  for path in config.fallbackFontPaths:
+    let resolved = resolveCandidatePath(path, getCurrentDir())
+    if not fileExists(resolved): continue
     try:
-      result.add readTypeface(path)
+      result.add readTypeface(resolved)
     except CatchableError:
       discard
 
@@ -198,45 +269,17 @@ proc applyFontFallbacks(atlas: GlyphAtlas) =
   if fallbackTypefaces.len > 0:
     atlas.setFallbackTypefaces(fallbackTypefaces)
 
-func modifiedCharRune(key: cint, mods: set[terminal.Modifier]): Option[uint32] =
-  let shifted = terminal.modShift in mods
-  case key
-  of KEY_SPACE: some(uint32(' '))
-  of KEY_A .. KEY_Z:
-    some(uint32((if shifted: ord('A') else: ord('a')) + (key - KEY_A)))
-  of KEY_0 .. KEY_9:
-    if shifted:
-      case key
-      of KEY_0: some(uint32(')'))
-      of KEY_1: some(uint32('!'))
-      of KEY_2: some(uint32('@'))
-      of KEY_3: some(uint32('#'))
-      of KEY_4: some(uint32('$'))
-      of KEY_5: some(uint32('%'))
-      of KEY_6: some(uint32('^'))
-      of KEY_7: some(uint32('&'))
-      of KEY_8: some(uint32('*'))
-      of KEY_9: some(uint32('('))
-      else: none(uint32)
-    else:
-      some(uint32(ord('0') + (key - KEY_0)))
-  of KEY_APOSTROPHE: some(uint32(if shifted: '"' else: '\''))
-  of KEY_COMMA: some(uint32(if shifted: '<' else: ','))
-  of KEY_MINUS: some(uint32(if shifted: '_' else: '-'))
-  of KEY_PERIOD: some(uint32(if shifted: '>' else: '.'))
-  of KEY_SLASH: some(uint32(if shifted: '?' else: '/'))
-  of KEY_SEMICOLON: some(uint32(if shifted: ':' else: ';'))
-  of KEY_EQUAL: some(uint32(if shifted: '+' else: '='))
-  of KEY_LEFT_BRACKET: some(uint32(if shifted: '{' else: '['))
-  of KEY_BACKSLASH: some(uint32(if shifted: '|' else: '\\'))
-  of KEY_RIGHT_BRACKET: some(uint32(if shifted: '}' else: ']'))
-  of KEY_GRAVE_ACCENT: some(uint32(if shifted: '~' else: '`'))
-  else: none(uint32)
+proc makeAtlas(size: float, targetFont: var Font): GlyphAtlas =
+  targetFont = readFont(config.fontPath)
+  targetFont.size = size
+  targetFont.paint.color = color(1, 1, 1, 1)
+  result = newGlyphAtlas(targetFont, size)
+  applyFontFallbacks(result)
 
 proc rebuildAtlas() =
   var anchors: seq[ZoomAnchor] = @[]
   for session in sessions:
-    let absCursor = session.terminal.screen.totalRows - session.terminal.screen.rows + session.terminal.screen.cursor.row
+    let absCursor = session.terminal.screen.absoluteCursorRow()
     let cursorViewport = session.terminal.viewport.bufferToViewport(absCursor)
     let topAbs = session.terminal.viewport.viewportToBuffer(0)
     anchors.add ZoomAnchor(
@@ -245,13 +288,11 @@ proc rebuildAtlas() =
       viewportRow: if cursorViewport >= 0: cursorViewport else: max(0, session.terminal.viewport.height - 1),
       atBottom: session.terminal.viewport.isAtBottom,
     )
-  font = readFont(FontPath)
-  font.size = fontSize
-  font.paint.color = color(1, 1, 1, 1)
-  let atlas = newGlyphAtlas(font, fontSize)
-  applyFontFallbacks(atlas)
-  rend = newGpuTerminalRenderer(atlas)
-  headerHeight = max(24, rend.atlas.cellHeight + 8)
+  let atlas = makeAtlas(fontSize, font)
+  let chromeAtlas = makeAtlas(config.fontSize, chromeFont)
+  rend = newGpuTerminalRenderer(atlas, chromeAtlas)
+  rend.loadLogoTexture(config.logoPath)
+  updateChromeHeights()
   resizeTerminalViewsPreservingView(anchors)
 
 # ---------------------------------------------------------------------------
@@ -316,7 +357,7 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
     # combinations. Send those from the key callback so Ctrl+C, Ctrl+D,
     # Alt+letter, etc. reach the child process.
     if terminal.modCtrl in m or terminal.modAlt in m:
-      let ch = modifiedCharRune(key, m)
+      let ch = toPrintableRune(key, mods)
       if ch.isSome:
         discard term.sendKey(keyChar(ch.get(), m))
         term.damage.markAll()
@@ -330,15 +371,31 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
 
 proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
   var x, y: cdouble; getCursorPos(win, addr x, addr y)
-  if button == MOUSE_BUTTON_LEFT and action == PRESS and int(y) < headerHeight:
-    let closeId = closeTabAt(int(x))
+  if button == MOUSE_BUTTON_LEFT and action == RELEASE:
+    draggingWindow = false
+
+  if button == MOUSE_BUTTON_LEFT and action == PRESS and inTitleBar(int(y)):
+    draggingWindow = true
+    dragStartMouseX = x
+    dragStartMouseY = y
+    getWindowPos(win, addr dragStartWinX, addr dragStartWinY)
+    dragStartGlobalX = float(dragStartWinX) + x
+    dragStartGlobalY = float(dragStartWinY) + y
+    let term = activeTerm()
+    if term != nil and term.activeLink.isSome:
+      term.activeLink = none(ActiveLink)
+      term.damage.markAll()
+    return
+
+  if button == MOUSE_BUTTON_LEFT and action == PRESS and inTabBar(int(y)):
+    let closeId = tabs.closeTabAtX(int(x), winWidth, tabBarHeight)
     if closeId.isSome:
       removeTerminalTab(closeId.get())
       return
-    if inPlusButton(int(x)):
+    if plusButtonAtX(int(x), winWidth, tabBarHeight):
       addTerminalTab()
       return
-    let tabId = tabAt(int(x))
+    let tabId = tabs.tabAtX(int(x), winWidth, tabBarHeight)
     if tabId.isSome:
       discard tabs.activate(tabId.get())
       let term = activeTerm()
@@ -368,6 +425,18 @@ proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
       discard term.sendMouse(mouse(if action == PRESS: mePress else: meRelease, cast[terminal.MouseButton](tmb), row, col, castSet(mods)))
 
 proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
+  if draggingWindow:
+    var currentWinX, currentWinY: cint
+    getWindowPos(win, addr currentWinX, addr currentWinY)
+    let currentGlobalX = float(currentWinX) + x
+    let currentGlobalY = float(currentWinY) + y
+    setWindowPos(
+      win,
+      dragStartWinX + cint(currentGlobalX - dragStartGlobalX),
+      dragStartWinY + cint(currentGlobalY - dragStartGlobalY),
+    )
+    return
+
   let term = activeTerm()
   if term == nil: return
   if int(y) < headerHeight:
@@ -399,6 +468,13 @@ proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
       term.activeLink = newActive
       term.damage.markAll()
 
+    if not term.inputMode.shouldIntercept() and term.inputMode.trackingWantsMotion():
+      let leftDown = getMouseButton(window, MOUSE_BUTTON_LEFT) == PRESS
+      let kind =
+        if leftDown and term.inputMode.trackingWantsDrag(): meDrag
+        else: meMove
+      discard term.sendMouse(mouse(kind, mbLeft, row, col, castSet(0)))
+
 proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
   let term = activeTerm()
   if term == nil: return
@@ -422,18 +498,21 @@ proc onResize(win: Window, width, height: cint) {.cdecl.} =
 # Main
 # ---------------------------------------------------------------------------
 
+config = loadTerminalConfig()
+fontSize = config.fontSize
+
 if init() == 0: quit("Failed to init GLFW")
 windowHint(CONTEXT_VERSION_MAJOR, 2); windowHint(CONTEXT_VERSION_MINOR, 1)
-window = createWindow(cint(winWidth), cint(winHeight), WindowTitle, nil, nil)
+window = createWindow(cint(winWidth), cint(winHeight), cstring(config.title), nil, nil)
 if window == nil: quit("Failed to create window")
 makeContextCurrent(window); loadExtensions()
 
-font = readFont(FontPath); font.size = fontSize; font.paint.color = color(1, 1, 1, 1)
 fallbackTypefaces = loadFallbackTypefaces()
-let atlas = newGlyphAtlas(font, fontSize)
-applyFontFallbacks(atlas)
-rend = newGpuTerminalRenderer(atlas)
-headerHeight = max(24, rend.atlas.cellHeight + 8)
+let atlas = makeAtlas(fontSize, font)
+let chromeAtlas = makeAtlas(config.fontSize, chromeFont)
+rend = newGpuTerminalRenderer(atlas, chromeAtlas)
+rend.loadLogoTexture(config.logoPath)
+updateChromeHeights()
 addTerminalTab()
 
 discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
@@ -454,10 +533,11 @@ while windowShouldClose(window) == 0:
   let term = activeTerm()
   if term == nil: break
   if atlas.isDirty: rend.updateAtlasTexture()
-  let changed = n > 0 or atlas.isDirty or term.damage.anyDirty
+  let tabLabelsChanged = refreshTabCwdLabels()
+  let changed = n > 0 or atlas.isDirty or term.damage.anyDirty or tabLabelsChanged
   if changed:
     rend.draw(term, winWidth, winHeight, headerHeight)
-    rend.drawChrome(tabs, winWidth, winHeight, headerHeight)
+    rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
     swapBuffers(window)
   pollEvents(); perf.endFrame()
   if perf.shouldReport(2.0):

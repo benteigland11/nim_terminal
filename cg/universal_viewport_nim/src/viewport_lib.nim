@@ -13,6 +13,12 @@ type
     totalRows*: int        ## Total rows currently in the buffer (history + active)
     scrollOffset*: int     ## How many rows we are scrolled up (0 = bottom)
 
+  ViewAnchor* = object
+    topRow*: int
+    targetRow*: int
+    targetViewportRow*: int
+    atBottom*: bool
+
 func newViewport*(height: int): Viewport =
   Viewport(height: height, totalRows: height, scrollOffset: 0)
 
@@ -64,3 +70,44 @@ func bufferToViewport*(v: Viewport, bufferRow: int): int =
   let currentTop = currentBottom - (v.height - 1)
   if bufferRow < currentTop or bufferRow > currentBottom: return -1
   bufferRow - currentTop
+
+func captureAnchor*(v: Viewport, targetBufferRow: int): ViewAnchor =
+  ## Capture a row to keep visible across a viewport/total-height change.
+  ViewAnchor(
+    topRow: v.viewportToBuffer(0),
+    targetRow: targetBufferRow,
+    targetViewportRow: v.bufferToViewport(targetBufferRow),
+    atBottom: v.isAtBottom,
+  )
+
+proc restoreAnchor*(
+    v: var Viewport,
+    totalRows, height: int,
+    anchor: ViewAnchor,
+    contextRowsAbove: int = 0,
+    preserveTopWhilePossible: bool = true
+) =
+  ## Restore viewport position after dimensions changed.
+  ##
+  ## When possible, preserves the old top row. If that would hide the target
+  ## row, keeps `contextRowsAbove` rows above the target instead.
+  v.height = max(1, height)
+  v.updateBufferHeight(max(1, totalRows), false)
+  if anchor.targetRow < 0:
+    v.scrollToBottom()
+    return
+  if anchor.atBottom:
+    v.scrollToBottom()
+    return
+
+  let context = max(0, min(contextRowsAbove, anchor.targetRow))
+  let oldTopShowsTarget =
+    preserveTopWhilePossible and
+    anchor.topRow >= 0 and
+    anchor.targetRow - anchor.topRow >= context and
+    anchor.targetRow - anchor.topRow < v.height
+  let preferredTop =
+    if oldTopShowsTarget: anchor.topRow
+    else: anchor.targetRow - context
+  let desiredOffset = v.totalRows - v.height - preferredTop
+  v.scrollOffset = max(0, min(v.maxScroll, desiredOffset))

@@ -102,6 +102,22 @@ suite "read":
     let p = spawn(b, "/bin/item")
     var buf = newSeq[byte](8)
     check p.read(buf) == 0
+    check p.eof
+
+  test "readResult classifies data, EOF, and closed":
+    let b = newFake()
+    b.readQueue.add bytesOf("ok")
+    let p = spawn(b, "/bin/item")
+    var buf = newSeq[byte](8)
+    let first = p.readResult(buf)
+    check first.kind == prData
+    check first.count == 2
+    let second = p.readResult(buf)
+    check second.kind == prEof
+    check p.eof
+    p.close()
+    let third = p.readResult(buf)
+    check third.kind == prClosed
 
   test "read after close returns 0 without consulting backend":
     let b = newFake()

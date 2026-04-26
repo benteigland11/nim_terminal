@@ -60,6 +60,18 @@ suite "Writing and cursor":
     check s.cursor.row == 0
     check s.trimmedLine(1) == ""
 
+  test "private screen modes update screen-owned cursor and wrap state":
+    let s = newScreen(4, 2)
+    check s.applyPrivateMode(25, false)
+    check not s.cursor.visible
+    check s.applyPrivateMode(25, true)
+    check s.cursor.visible
+    check s.applyPrivateMode(7, false)
+    check smAutoWrap notin s.modes
+    check s.applyPrivateMode(7, true)
+    check smAutoWrap in s.modes
+    check not s.applyPrivateMode(1000, true)
+
 suite "Scrolling":
   test "linefeed at bottom scrolls region up":
     let s = newScreen(4, 3)
@@ -100,6 +112,73 @@ suite "Scrolling":
     s.linefeed()                       # should scroll inside region only
     check s.trimmedLine(0) == "A"
     check s.trimmedLine(3) == "D"
+
+suite "Resize":
+  test "resizePreserveBottom grows above visible content":
+    let s = newScreen(4, 3)
+    for r in 0 ..< 3:
+      s.cursorTo(r, 0)
+      s.writeChar(char(ord('A') + r))
+    s.cursorTo(2, 0)
+
+    s.resizePreserveBottom(4, 5)
+
+    check s.cursor.row == 4
+    check s.trimmedLine(0) == ""
+    check s.trimmedLine(2) == "A"
+    check s.trimmedLine(3) == "B"
+    check s.trimmedLine(4) == "C"
+
+  test "resizePreserveBottom shrinks above visible content":
+    let s = newScreen(4, 5, scrollback = 10)
+    for r in 0 ..< 5:
+      s.cursorTo(r, 0)
+      s.writeChar(char(ord('A') + r))
+    s.cursorTo(4, 0)
+
+    s.resizePreserveBottom(4, 3)
+
+    check s.cursor.row == 2
+    check s.scrollbackLen == 2
+    check s.trimmedLine(0) == "C"
+    check s.trimmedLine(1) == "D"
+    check s.trimmedLine(2) == "E"
+
+  test "resizePreserveBottom reflows soft-wrapped lines wider":
+    let s = newScreen(4, 2)
+    s.writeString("abcdef")
+
+    check s.rowSoftWrapped(0)
+    s.resizePreserveBottom(8, 2)
+
+    check s.cursor.row == 1
+    check s.cursor.col == 6
+    check s.trimmedLine(0) == ""
+    check s.trimmedLine(1) == "abcdef"
+
+  test "resizePreserveBottom reflows logical lines narrower":
+    let s = newScreen(8, 3)
+    s.writeString("abcdef")
+
+    s.resizePreserveBottom(4, 3)
+
+    check s.cursor.row == 1
+    check s.cursor.col == 2
+    check s.trimmedLine(0) == "abcd"
+    check s.trimmedLine(1) == "ef"
+    check s.trimmedLine(2) == ""
+    check s.rowSoftWrapped(0)
+
+  test "resizePreserveBottom keeps spare space below top content":
+    let s = newScreen(12, 5)
+    s.writeString("hello")
+
+    s.resizePreserveBottom(6, 5)
+
+    check s.cursor.row == 0
+    check s.cursor.col == 5
+    check s.trimmedLine(0) == "hello"
+    check s.trimmedLine(1) == ""
 
 suite "Erase":
   test "EL clear-to-end blanks from cursor":
@@ -190,6 +269,39 @@ suite "Alternate screen":
 
     s.useAlternateScreen(false)
     check s.totalRows == 3
+
+  test "absolute cursor row follows active screen coordinate space":
+    let s = newScreen(4, 2, scrollback = 10)
+    s.writeString("one"); s.carriageReturn(); s.linefeed()
+    s.writeString("two"); s.carriageReturn(); s.linefeed()
+    s.cursorTo(1, 0)
+    check s.scrollbackLen == 1
+    check s.absoluteCursorRow() == 2
+
+    s.useAlternateScreen(true)
+    s.cursorTo(1, 0)
+    check s.absoluteCursorRow() == 1
+
+  test "alternate screen transition reports transient state resets":
+    let s = newScreen(4, 2)
+    let enter = s.switchAlternateScreen(true)
+    check s.usingAlt
+    check enter.changed
+    check enter.enteredAlt
+    check not enter.leftAlt
+    check enter.clearTransientUi
+    check enter.resetViewport
+    check enter.resetOutputFootprint
+
+    let noop = s.switchAlternateScreen(true)
+    check not noop.changed
+
+    let leave = s.switchAlternateScreen(false)
+    check not s.usingAlt
+    check leave.changed
+    check leave.leftAlt
+    check not leave.enteredAlt
+    check leave.clearTransientUi
 
 suite "Save / restore cursor":
   test "save/restore round-trips position and attrs":

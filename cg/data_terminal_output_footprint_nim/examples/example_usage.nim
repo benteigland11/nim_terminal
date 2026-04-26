@@ -3,6 +3,7 @@
 import terminal_output_footprint_lib
 
 var footprint = newOutputFootprint()
+footprint.markFullDisplayErase()
 footprint.recordRows(2, 4)
 footprint.armAfterCursorRestore(cursorRow = 1)
 

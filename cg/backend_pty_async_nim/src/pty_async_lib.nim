@@ -11,6 +11,15 @@ import std/options
 type
   PtyError* = object of CatchableError
 
+  AsyncReadKind* = enum
+    arData
+    arWouldBlock
+    arEof
+
+  AsyncReadResult* = object
+    kind*: AsyncReadKind
+    count*: int
+
   PtyBackend* = concept b
     ptyRead(b, int, var openArray[byte]) is int
     ptyWrite(b, int, openArray[byte]) is int
@@ -63,6 +72,19 @@ proc newAsyncPty*[B](backend: B, handle: int, queueCap: int = 16384): AsyncPty[B
 proc read*[B](p: AsyncPty[B], buf: var openArray[byte]): int =
   ## Non-blocking read from the PTY.
   p.backend.ptyRead(p.handle, buf)
+
+proc readResult*[B](p: AsyncPty[B], buf: var openArray[byte]): AsyncReadResult =
+  ## Read and classify the backend result so callers do not have to interpret
+  ## the signed integer convention themselves.
+  if buf.len == 0:
+    return AsyncReadResult(kind: arWouldBlock, count: 0)
+  let n = p.backend.ptyRead(p.handle, buf)
+  if n > 0:
+    AsyncReadResult(kind: arData, count: n)
+  elif n < 0:
+    AsyncReadResult(kind: arWouldBlock, count: 0)
+  else:
+    AsyncReadResult(kind: arEof, count: 0)
 
 func send*[B](p: AsyncPty[B], data: openArray[byte]): int =
   ## Queue data to be sent to the PTY. Returns number of bytes queued.

@@ -16,6 +16,8 @@ type
   MouseMode* = enum
     mmNone        ## Mouse tracking disabled
     mmX11         ## Legacy X10/X11 tracking (CSI M b x y)
+    mmButtonEvent ## Button-event tracking (press/release + drag)
+    mmAnyEvent    ## Any-event tracking (press/release + motion)
     mmSgr         ## SGR tracking (CSI < b ; x ; y M/m)
 
   InputMode* = object
@@ -23,6 +25,7 @@ type
     cursorApp*: bool      ## DECCKM (Application Cursor Keys)
     keypadApp*: bool      ## DECKPAM (Application Keypad)
     mouseMode*: MouseMode ## Active mouse protocol
+    sgrMouse*: bool       ## \e[?1006h (SGR mouse coordinate encoding)
     bracketedPaste*: bool ## \e[?2004h (Bracketed Paste Mode)
     focusReporting*: bool ## \e[?1004h (Focus Reporting Mode)
 
@@ -146,7 +149,7 @@ func mouseBtnParam(ev: MouseEvent): int =
 func encodeMouseInto(buf: var seq[byte], ev: MouseEvent, mode: MouseMode) =
   case mode
   of mmNone: discard
-  of mmX11:
+  of mmX11, mmButtonEvent, mmAnyEvent:
     # CSI M <btn+32> <x+32> <y+32>
     # Note: Limited to 223 columns/rows.
     buf.add Esc; buf.add byte('['); buf.add byte('M')
@@ -218,7 +221,16 @@ proc encodeKeyEvent*(ev: KeyEvent, mode: InputMode = newInputMode()): seq[byte] 
 proc encodeMouseEvent*(ev: MouseEvent, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]
   if mode.mouseMode == mmNone: return
-  encodeMouseInto(result, ev, mode.mouseMode)
+  if mode.mouseMode == mmX11 and (ev.kind == meMove or ev.kind == meDrag): return
+  if mode.mouseMode == mmButtonEvent and ev.kind == meMove: return
+  let wireMode = if mode.sgrMouse or mode.mouseMode == mmSgr: mmSgr else: mmX11
+  encodeMouseInto(result, ev, wireMode)
+
+func trackingWantsMotion*(mode: InputMode): bool =
+  mode.mouseMode == mmButtonEvent or mode.mouseMode == mmAnyEvent or mode.mouseMode == mmSgr
+
+func trackingWantsDrag*(mode: InputMode): bool =
+  mode.mouseMode == mmButtonEvent or mode.mouseMode == mmAnyEvent or mode.mouseMode == mmSgr
 
 proc encodePaste*(s: string, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]

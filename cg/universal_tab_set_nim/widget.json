@@ -2,7 +2,7 @@
   "meta": {
     "id": "universal-tab-set-nim",
     "name": "Tab Set",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "domain": "universal",
     "tags": [
       "tabs",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 2,
-    "validated_at": "2026-04-25T22:35:30.124397+00:00",
+    "validated_at": "2026-04-26T00:15:53.822704+00:00",
     "runtime": "nim 2.2.8"
   }
 }

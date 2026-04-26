@@ -22,3 +22,17 @@ suite "vt reports generator":
 
   test "reportWindowTitle":
     check reportWindowTitle("Hello") == "\e[lHello\e\\"
+
+  test "reportModeStatus":
+    check reportModeStatus(2026, msNotRecognized) == "\e[?2026;0$y"
+    check reportModeStatus(2004, msSet) == "\e[?2004;1$y"
+    check reportModeStatus(4, msReset, privateMode = false) == "\e[4;2$y"
+
+  test "modeStatusFrom table lookup":
+    let modes = [
+      modeSupport(2004, msSet),
+      modeSupport(4, msReset, privateMode = false),
+    ]
+    check modeStatusFrom(modes, 2004) == msSet
+    check modeStatusFrom(modes, 4, privateMode = false) == msReset
+    check modeStatusFrom(modes, 2026) == msNotRecognized

@@ -1,6 +1,8 @@
 
 ## Cartograph
 
+When trying to fix things, always look to modify an existing widget or add a widget. Don't rely on glue code to fix bugs. Glue code is config, not logic.
+
 Widget library manager. Widgets are reusable code modules with tests,
 examples, and metadata. Installed widgets live under `cg/<widget_id>/`.
 

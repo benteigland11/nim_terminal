@@ -136,7 +136,7 @@ func toPaletteColor(c: color_parser_lib.RgbColor): screen_buffer_lib.PaletteColo
   screen_buffer_lib.PaletteColor(r: c.r, g: c.g, b: c.b)
 
 func absoluteCursorRow(t: Terminal): int =
-  t.screen.totalRows - t.screen.rows + t.screen.cursor.row
+  t.screen.absoluteCursorRow()
 
 proc trackOutputFootprint(t: Terminal, row: int) =
   t.outputFootprint.recordRow(row, activeAlternate = t.screen.usingAlt)
@@ -164,27 +164,38 @@ proc armOutputFootprintIfRestored(t: Terminal) =
     activeAlternate = t.screen.usingAlt,
   )
 
+proc applyScreenTransition(t: Terminal, transition: ScreenContextTransition) =
+  if not transition.changed: return
+  if transition.clearTransientUi:
+    t.selection.clear()
+    t.activeLink = none(ActiveLink)
+  if transition.resetOutputFootprint:
+    t.outputFootprint.reset()
+  if transition.resetViewport:
+    t.viewport.updateBufferHeight(t.screen.totalRows, true)
+  t.damage.markAll()
+
 # ---------------------------------------------------------------------------
 # Command application
 # ---------------------------------------------------------------------------
 
 proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
   if private:
+    if t.screen.applyPrivateMode(code, set): return
     case code
     of 1:    t.inputMode.cursorApp = set
-    of 7:    (if set: t.screen.modes.incl smAutoWrap else: t.screen.modes.excl smAutoWrap)
     of 9:    t.inputMode.mouseMode = if set: mmX11 else: mmNone
     of 47, 1047:
-      t.screen.useAlternateScreen(set)
+      let transition = t.screen.switchAlternateScreen(set)
       if set:
         t.screen.cursorTo(0, 0)
         t.screen.eraseInDisplay(screen_buffer_lib.emAll)
-      t.viewport.updateBufferHeight(t.screen.totalRows, true)
-      t.damage.markAll()
+      t.applyScreenTransition(transition)
     of 66:   t.inputMode.keypadApp = set
     of 1000: t.inputMode.mouseMode = if set: mmX11 else: mmNone
-    of 1003: t.inputMode.mouseMode = if set: mmX11 else: mmNone
-    of 1006: t.inputMode.mouseMode = if set: mmSgr else: mmNone
+    of 1002: t.inputMode.mouseMode = if set: mmButtonEvent else: mmNone
+    of 1003: t.inputMode.mouseMode = if set: mmAnyEvent else: mmNone
+    of 1006: t.inputMode.sgrMouse = set
     of 1004: t.inputMode.focusReporting = set
     of 1048:
       if set:
@@ -195,21 +206,40 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
     of 1049:
       if set:
         t.screen.saveCursor()
-        t.screen.useAlternateScreen(true)
-        t.outputFootprint.reset()
+        let transition = t.screen.switchAlternateScreen(true)
         t.screen.cursorTo(0, 0)
         t.screen.eraseInDisplay(screen_buffer_lib.emAll)
+        t.applyScreenTransition(transition)
       else:
-        t.screen.useAlternateScreen(false)
+        let transition = t.screen.switchAlternateScreen(false)
         t.screen.restoreCursor()
-      t.viewport.updateBufferHeight(t.screen.totalRows, true)
-      t.damage.markAll()
+        t.applyScreenTransition(transition)
     of 2004: t.inputMode.bracketedPaste = set
     else: discard
   else:
     case code
     of 4: (if set: t.screen.modes.incl smInsert else: t.screen.modes.excl smInsert)
     else: discard
+
+func modeStatus(t: Terminal, code: int, private: bool): ModeStatus =
+  if private:
+    let modes = [
+      modeSupport(7, if smAutoWrap in t.screen.modes: msSet else: msReset),
+      modeSupport(25, if t.screen.cursor.visible: msSet else: msReset),
+      modeSupport(47, if t.screen.usingAlt: msSet else: msReset),
+      modeSupport(1047, if t.screen.usingAlt: msSet else: msReset),
+      modeSupport(1049, if t.screen.usingAlt: msSet else: msReset),
+      modeSupport(1000, if t.inputMode.mouseMode == mmX11: msSet else: msReset),
+      modeSupport(1002, if t.inputMode.mouseMode == mmButtonEvent: msSet else: msReset),
+      modeSupport(1003, if t.inputMode.mouseMode == mmAnyEvent: msSet else: msReset),
+      modeSupport(1004, if t.inputMode.focusReporting: msSet else: msReset),
+      modeSupport(1006, if t.inputMode.sgrMouse or t.inputMode.mouseMode == mmSgr: msSet else: msReset),
+      modeSupport(2004, if t.inputMode.bracketedPaste: msSet else: msReset),
+    ]
+    modeStatusFrom(modes, code, privateMode = true)
+  else:
+    let modes = [modeSupport(4, if smInsert in t.screen.modes: msSet else: msReset, privateMode = false)]
+    modeStatusFrom(modes, code, privateMode = false)
 
 proc apply*(t: Terminal, cmd: VtCommand) =
   let rowBefore = t.screen.cursor.row
@@ -257,6 +287,8 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdEraseInLine:    (t.screen.eraseInLine(toScreenErase(cmd.eraseMode)); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
   of cmdEraseInDisplay:
     t.screen.eraseInDisplay(toScreenErase(cmd.eraseMode))
+    if cmd.eraseMode == vt_commands_lib.emAll:
+      t.outputFootprint.markFullDisplayErase(activeAlternate = t.screen.usingAlt)
     t.damage.markAll()
   of cmdEraseChars:
     let saved = t.screen.cursor; let k = min(cmd.count, t.screen.cols - saved.col)
@@ -285,6 +317,8 @@ proc apply*(t: Terminal, cmd: VtCommand) =
     else:
       for code in cmd.modeCodes:
         t.applyMode(code, cmd.privateMode, false)
+  of cmdRequestMode:
+    discard t.async.send(cast[seq[byte]](reportModeStatus(cmd.modeCode, t.modeStatus(cmd.modeCode, cmd.privateMode), cmd.privateMode)))
   of cmdSetTabStop:     t.screen.setTabStop()
   of cmdClearTabStop:   t.screen.clearTabStop()
   of cmdClearAllTabStops: t.screen.clearAllTabStops()
@@ -367,9 +401,20 @@ proc selectionText*(t: Terminal): string =
 proc flush*(t: Terminal): int = t.async.flush()
 proc step*(t: Terminal, bufSize: int = 4096): int =
   if t.host.closed: return 0
-  var buf = newSeq[byte](bufSize); let n = t.async.read(buf)
-  if n > 0: t.feedBytes(buf.toOpenArray(0, n - 1))
-  discard t.async.flush(); n
+  var buf = newSeq[byte](bufSize)
+  let read = t.async.readResult(buf)
+  case read.kind
+  of arData:
+    if read.count > 0: t.feedBytes(buf.toOpenArray(0, read.count - 1))
+    discard t.async.flush()
+    read.count
+  of arWouldBlock:
+    discard t.async.flush()
+    -1
+  of arEof:
+    t.host.eof = true
+    t.host.close()
+    0
 
 proc drain*(t: Terminal, maxBytes: int = 1_000_000): int =
   var total = 0
@@ -383,6 +428,7 @@ proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusRepor
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.async.send(cast[seq[byte]](reportClipboard(selector, encoded))))
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())
+proc resizeView*(t: Terminal, cols, rows: int) = (t.screen.resizePreserveBottom(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.drag.height = rows; t.refreshViewport())
 
 proc termSignal*(): int =
   when defined(posix): int(SIGTERM)
