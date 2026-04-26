@@ -1,6 +1,6 @@
 # Waymark
 
-A native Nim terminal emulator, assembled from 38 reusable
+A native Nim terminal emulator, assembled from 43 reusable
 [Cartograph](https://github.com/benteigland11/Cartograph) widgets.
 
 Building in the open. Expect rough edges.
@@ -27,7 +27,7 @@ The terminal is the showcase. The widgets are the point.
   and zero-leak verdicts. See
   [`tests/memory/reports/SUMMARY.md`](tests/memory/reports/SUMMARY.md) and
   [`tests/memory/README.md`](tests/memory/README.md).
-- **Composability.** 38 widgets, each independently validated, tested,
+- **Composability.** 43 widgets, each independently validated, tested,
   and installable into other projects via `cartograph install`.
 - **Performance.** GPU-accelerated rendering through a glyph atlas + tile
   batcher. Microbenchmarks under [`benchmarks/`](benchmarks/).
@@ -103,7 +103,7 @@ grouped by domain underneath.
 
 ### All widgets, by domain
 
-<details><summary><b>universal</b> (24) — pure utilities, no domain dependency</summary>
+<details><summary><b>universal</b> (25) — pure utilities, no domain dependency</summary>
 
 | Widget | Purpose |
 |---|---|
@@ -153,21 +153,24 @@ grouped by domain underneath.
 
 </details>
 
-<details><summary><b>backend</b> (3) — process and PTY orchestration</summary>
+<details><summary><b>backend</b> (5) — process and PTY orchestration</summary>
 
 | Widget | Purpose |
 |---|---|
 | `backend-pty-host-nim` | Platform-neutral PTY orchestrator: `PtyBackend` concept + `PtyHost[B]`. |
 | `backend-pty-async-nim` | Non-blocking PTY orchestrator with a write queue. |
 | `backend-posix-pty-nim` | POSIX PTY child launch environment defaults and diagnostics helpers. |
+| `backend-system-clipboard-nim` | Cross-platform system clipboard bridge. |
+| `backend-windows-conpty-nim` | Windows ConPTY backend for native shell sessions. |
 
 </details>
 
-<details><summary><b>frontend</b> (1) — windowing and input</summary>
+<details><summary><b>frontend</b> (2) — windowing and input</summary>
 
 | Widget | Purpose |
 |---|---|
 | `frontend-glfw-input-nim` | Translates raw GLFW window events into terminal input types. |
+| `frontend-glfw-window-nim` | Reconciles GLFW window and framebuffer sizes for drawable layout. |
 
 </details>
 
