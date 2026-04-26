@@ -60,6 +60,27 @@ The first terminal starts in `[shell] start_directory` from
 active terminal's current directory. Leave `[shell] program` unset to use
 the platform default shell.
 
+## Shortcuts
+
+Waymark keeps common terminal control keys available to the child shell or
+TUI. For example, `Ctrl+C`, `Ctrl+D`, `Ctrl+Z`, and `Alt+key` are sent to
+the running process instead of being intercepted by the app.
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Shift+T` | Open a new tab in the active terminal's current directory. |
+| `Ctrl+Tab` | Switch to the next tab. |
+| `Ctrl+Shift+Tab` | Switch to the previous tab. |
+| `Ctrl+Shift+Enter` | Split the active tab into a new pane. |
+| `Ctrl+Shift+W` | Close the active pane. |
+| `Ctrl+Shift+C` | Copy selected text to the system clipboard. |
+| `Ctrl+Shift+V` | Paste clipboard text into the active terminal. |
+| `Ctrl++` / `Ctrl+=` | Increase terminal font size. |
+| `Ctrl+-` | Decrease terminal font size. |
+
+Click a pane to focus it. Each tab remembers its last focused pane, and the
+tab label follows that pane's current directory.
+
 ## Widgets
 
 All widgets live under `cg/`. The seven below form the spine of the
