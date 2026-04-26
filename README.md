@@ -5,7 +5,9 @@ A native Nim terminal emulator, assembled from 38 reusable
 
 Building in the open. Expect rough edges.
 
-<!-- DEMO GIF / asciinema cast goes here -->
+## Demo
+
+[![Waymark terminal emulator demo](https://img.youtube.com/vi/BxA0gGwy9rI/hqdefault.jpg)](https://youtu.be/BxA0gGwy9rI)
 
 ## What this is
 
