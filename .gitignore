@@ -23,6 +23,7 @@ benchmarks/terminal_benchmarks
 .claude/settings.local.json
 nim_terminal
 nim_terminal_release
+nim_terminal.overnight-bak
 nim.cfg
 *.exe
 
@@ -31,6 +32,15 @@ tests/memory/test_*
 !tests/memory/test_*.nim
 tests/memory/oneshot_*
 !tests/memory/oneshot_*.nim
+tests/memory/summarize_run
 tests/memory/valgrind/nim_terminal_debug
 tests/memory/valgrind/test_*
 !tests/memory/valgrind/test_*.nim
+
+# editor / agent scratch
+JAX_Brain.md
+.codex
+
+# transient memory test outputs (commit only curated SUMMARY.md when ready)
+tests/memory/reports/valgrind-*.log
+tests/memory/reports/overnight-*/
