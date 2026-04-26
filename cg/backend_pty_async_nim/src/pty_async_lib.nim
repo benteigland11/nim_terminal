@@ -62,7 +62,7 @@ proc consume(f: Fifo, n: int) =
 # Public API
 # ---------------------------------------------------------------------------
 
-proc newAsyncPty*[B](backend: B, handle: int, queueCap: int = 16384): AsyncPty[B] =
+func newAsyncPty*[B](backend: B, handle: int, queueCap: int = 16384): AsyncPty[B] =
   AsyncPty[B](
     backend: backend,
     handle: handle,

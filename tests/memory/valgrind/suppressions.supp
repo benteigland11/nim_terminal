@@ -1,0 +1,89 @@
+# Valgrind suppressions for nim_terminal
+#
+# These suppress KNOWN third-party noise from the GUI / GL stack that does not
+# reflect a leak in our code. Each entry is conservative and pinned to a
+# specific library so we don't hide leaks in our own widgets.
+#
+# Maintenance rule: if you add a suppression, leave a comment with the date
+# and the reason, and prefer suppressing only `definitely lost` / `possibly
+# lost` from the named library — never suppress all kinds blindly.
+
+# ---- Mesa / OpenGL drivers ----
+# Mesa caches per-context driver state that is not freed at exit. Reported as
+# "still reachable" or "possibly lost" depending on driver internals.
+{
+   mesa_driver_init
+   Memcheck:Leak
+   match-leak-kinds: definite,possible,reachable
+   ...
+   obj:*/libGL*.so*
+}
+{
+   mesa_dri_driver
+   Memcheck:Leak
+   match-leak-kinds: definite,possible,reachable
+   ...
+   obj:*/dri/*.so*
+}
+{
+   llvm_codegen_in_mesa
+   Memcheck:Leak
+   match-leak-kinds: definite,possible,reachable
+   ...
+   obj:*/libLLVM*.so*
+}
+
+# ---- GLFW ----
+# GLFW retains some monitor/joystick state until process exit; not freed
+# in glfwTerminate on every backend.
+{
+   glfw_terminate_residue
+   Memcheck:Leak
+   match-leak-kinds: definite,possible,reachable
+   ...
+   obj:*/libglfw*.so*
+}
+
+# ---- X11 / xcb ----
+{
+   x11_static_locale
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libX11*.so*
+}
+{
+   xcb_atom_cache
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libxcb*.so*
+}
+
+# ---- fontconfig / freetype ----
+# fontconfig keeps a process-wide pattern cache that is intentionally never
+# freed. freetype's hb-ft cache is similarly persistent.
+{
+   fontconfig_cache
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libfontconfig*.so*
+}
+{
+   freetype_cache
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libfreetype*.so*
+}
+
+# ---- dynamic loader ----
+# dlopen of plugins keeps symbol tables until exit.
+{
+   ld_dlopen_residue
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/ld-linux*.so*
+}

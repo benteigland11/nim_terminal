@@ -21,6 +21,11 @@ func reportCursorPosition*(row, col: int): string =
   ## and formatted as 1-indexed (VT standard).
   csi($(row + 1) & ";" & $(col + 1) & "R")
 
+func reportTerminalOk*(): string =
+  ## Format a Device Status Report (DSR 5) response indicating the terminal
+  ## is operating normally.
+  csi("0n")
+
 # ---------------------------------------------------------------------------
 # Device Attributes (DA)
 # ---------------------------------------------------------------------------
@@ -124,6 +129,17 @@ func reportFocus*(gained: bool): string =
 func reportClipboard*(selector, base64Data: string): string =
   ## Format OSC 52 response for clipboard queries.
   "\e]52;" & selector & ";" & base64Data & "\e\\"
+
+# ---------------------------------------------------------------------------
+# DCS state-string reports (DECRQSS)
+# ---------------------------------------------------------------------------
+
+func reportStateString*(value: string, valid = true): string =
+  ## Format a DECRQSS response.
+  ## Valid responses use DCS 1 $ r <value> ST; unsupported requests use
+  ## DCS 0 $ r ST so probing TUIs do not wait forever.
+  let status = if valid: "1" else: "0"
+  "\eP" & status & "$r" & value & "\e\\"
 
 # ---------------------------------------------------------------------------
 # Misc

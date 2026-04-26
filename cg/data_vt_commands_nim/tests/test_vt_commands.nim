@@ -90,6 +90,17 @@ suite "CSI SGR":
     let c = translateCsi(@[param(38, @[2, -1, 255, 100, 0])], @[], byte('m'))
     check c.sgrParams[0].subParams == @[2, -1, 255, 100, 0]
 
+  test "underline style reset sub-params survive translation":
+    let c = translateCsi(@[param(4, @[0])], @[], byte('m'))
+    check c.kind == cmdSetSgr
+    check c.sgrParams[0].value == 4
+    check c.sgrParams[0].subParams == @[0]
+
+  test "private final-m sequences are not SGR":
+    check translateCsi(@[p(4), p(2)], @[byte('>')], byte('m')).kind == cmdIgnored
+    check translateCsi(@[p(4)], @[byte('<')], byte('m')).kind == cmdIgnored
+    check translateCsi(@[p(4)], @[byte('?')], byte('m')).kind == cmdIgnored
+
 suite "CSI modes":
   test "CSI ? 25 h is DECSET private show-cursor":
     let c = translateCsi(@[p(25)], @[byte('?')], byte('h'))
@@ -121,6 +132,11 @@ suite "CSI modes":
     check c.kind == cmdRequestMode
     check c.privateMode
     check c.modeCode == 2026
+
+  test "DECSCUSR cursor style is translated":
+    let c = translateCsi(@[p(5)], @[byte(' ')], byte('q'))
+    check c.kind == cmdSetCursorStyle
+    check c.cursorStyleCode == 5
 
   test "kitty keyboard CSI u variants are not cursor restore":
     check translateCsi(@[p(1)], @[byte('>')], byte('u')).kind == cmdIgnored
@@ -196,6 +212,18 @@ suite "OSC":
     let d = translateOsc(bytesOf("133;D;12"))
     check d.kind == cmdShellCommandFinished
     check d.exitCode == 12
+
+suite "DCS":
+  test "DECRQSS state-string request is translated":
+    let c = translateDcs(@[], @[byte('$')], byte('q'), bytesOf("m"))
+    check c.kind == cmdRequestStateString
+    check c.stateString == "m"
+
+  test "unknown DCS remains passthrough":
+    let c = translateDcs(@[p(1)], @[], byte('x'), bytesOf("data"))
+    check c.kind == cmdDcsPassthrough
+    check c.dcsFinal == byte('x')
+    check c.dcsData == bytesOf("data")
 
 suite "Print":
   test "translatePrint carries rune + width":

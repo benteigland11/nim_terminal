@@ -29,13 +29,13 @@ suite "Split Pane Tree":
     check items[0].rect == rect(0, 0, 80, 10)
     check items[1].rect == rect(0, 10, 80, 30)
 
-  test "append policy creates side-by-side, then stacked, then side-by-side":
+  test "append policy keeps one full-width pane and balances the active row":
     var tree = newSplitPaneTree()
-    check tree.nextAppendAxis() == saHorizontal
+    check tree.nextAppendAxis() == saVertical
 
     let second = tree.splitActiveAppend()
     check second == paneId(2)
-    check tree.nextAppendAxis() == saVertical
+    check tree.nextAppendAxis() == saHorizontal
 
     let third = tree.splitActiveAppend()
     check third == paneId(3)
@@ -47,13 +47,28 @@ suite "Split Pane Tree":
     let items = tree.layouts(rect(0, 0, 100, 40))
     check items.len == 4
     check items[0].id == paneId(1)
-    check items[0].rect == rect(0, 0, 50, 40)
+    check items[0].rect == rect(0, 0, 100, 20)
     check items[1].id == paneId(2)
-    check items[1].rect == rect(50, 0, 50, 20)
+    check items[1].rect == rect(0, 20, 33, 20)
     check items[2].id == paneId(3)
-    check items[2].rect == rect(50, 20, 25, 20)
+    check items[2].rect == rect(33, 20, 33, 20)
     check items[3].id == paneId(4)
-    check items[3].rect == rect(75, 20, 25, 20)
+    check items[3].rect == rect(66, 20, 34, 20)
+
+  test "append policy rebalances repeated horizontal splits":
+    var tree = newSplitPaneTree()
+    discard tree.splitActiveAppend()
+    discard tree.splitActiveAppend()
+    discard tree.splitActiveAppend()
+    discard tree.splitActiveAppend()
+
+    let items = tree.layouts(rect(0, 0, 120, 40))
+    check items.len == 5
+    check items[0].rect == rect(0, 0, 120, 20)
+    check items[1].rect == rect(0, 20, 30, 20)
+    check items[2].rect == rect(30, 20, 30, 20)
+    check items[3].rect == rect(60, 20, 30, 20)
+    check items[4].rect == rect(90, 20, 30, 20)
 
   test "hit testing finds leaf by rectangle":
     var tree = newSplitPaneTree()

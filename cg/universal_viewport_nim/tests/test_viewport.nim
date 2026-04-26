@@ -65,3 +65,34 @@ suite "universal viewport":
     let anchor = v.captureAnchor(99)
     v.restoreAnchor(totalRows = 120, height = 8, anchor = anchor, contextRowsAbove = 2)
     check v.isAtBottom
+
+  test "resize anchor keeps visible cursor visible without forcing bottom pin":
+    var v = newViewport(10)
+    v.updateBufferHeight(100)
+    let anchor = v.captureResizeAnchor(95)
+    v.restoreAnchor(totalRows = 100, height = 6, anchor = anchor, contextRowsAbove = 2, pinBottom = false)
+    check v.bufferToViewport(95) >= 0
+    check v.isAtBottom == false
+
+  test "resize anchor preserves top row when target is not visible":
+    var v = newViewport(10)
+    v.updateBufferHeight(100)
+    v.scrollUp(40)
+    let top = v.viewportToBuffer(0)
+    let anchor = v.captureResizeAnchor(99)
+    check anchor.targetRow == -1
+    v.restoreAnchor(totalRows = 100, height = 6, anchor = anchor, contextRowsAbove = 2, pinBottom = false)
+    check v.viewportToBuffer(0) == top
+
+  test "ensureVisible scrolls only when target is outside the viewport":
+    var v = newViewport(5)
+    v.updateBufferHeight(20)
+    v.scrollUp(10)
+    let originalTop = v.viewportToBuffer(0)
+
+    v.ensureVisible(originalTop + 2, 1)
+    check v.viewportToBuffer(0) == originalTop
+
+    v.ensureVisible(19, 2)
+    check v.bufferToViewport(19) != -1
+    check v.viewportToBuffer(0) == 15

@@ -133,6 +133,14 @@ suite "CSI sequences":
     check ev.params[0].subParams[3] == 100
     check ev.params[0].subParams[4] == 0
 
+  test "CSI underline style reset sub-parameter":
+    let evs = run("\x1B[4:0m")
+    check evs.len == 1
+    check evs[0].final == byte('m')
+    check evs[0].params.len == 1
+    check evs[0].params[0].value == 4
+    check evs[0].params[0].subParams == @[0]
+
   test "CSI cancelled mid-sequence by ESC then re-issued":
     # Partial CSI, aborted by ESC, then a fresh full CSI.
     let evs = run("\x1B[12;\x1B[H")

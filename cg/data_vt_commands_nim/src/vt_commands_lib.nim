@@ -84,6 +84,7 @@ type
     cmdSaveCursor
     cmdRestoreCursor
     cmdSetSgr
+    cmdSetCursorStyle     ## DECSCUSR / CSI Ps SP q
     cmdSetScrollRegion
     cmdSetMode            ## SM / DECSET
     cmdResetMode          ## RM / DECRST
@@ -97,6 +98,7 @@ type
     cmdSetTitle           ## OSC 0 / 2
     cmdSetIconName        ## OSC 1
     cmdHyperlink          ## OSC 8
+    cmdRequestStateString ## DECRQSS / DCS $ q Pt ST
     cmdDcsPassthrough     ## DCS hook + put + unhook accumulated
     cmdClipboardRequest   ## OSC 52
     cmdSetPaletteColor    ## OSC 4
@@ -125,6 +127,8 @@ type
       dcsIntermediates*: seq[byte]
       dcsFinal*: byte
       dcsData*: seq[byte]
+    of cmdRequestStateString:
+      stateString*: string
     of cmdCursorUp, cmdCursorDown, cmdCursorForward, cmdCursorBackward,
        cmdCursorNextLine, cmdCursorPrevLine,
        cmdInsertLines, cmdDeleteLines,
@@ -141,6 +145,8 @@ type
       eraseMode*: EraseMode
     of cmdSetSgr:
       sgrParams*: seq[DispatchParam]
+    of cmdSetCursorStyle:
+      cursorStyleCode*: int
     of cmdSetScrollRegion:
       regionTop*, regionBottom*: int
     of cmdSetMode, cmdResetMode, cmdRequestMode:
@@ -214,7 +220,7 @@ func translateExecute*(b: byte): VtCommand =
 # CSI
 # ---------------------------------------------------------------------------
 
-proc translateCsi*(
+func translateCsi*(
     params: openArray[DispatchParam],
     intermediates: openArray[byte],
     final: byte,
@@ -252,6 +258,10 @@ proc translateCsi*(
   of 'X': return cmdN(cmdEraseChars, n)
   of '@': return cmdN(cmdInsertChars, n)
   of 'm':
+    if hasPrivateMarker(intermediates, '>') or
+        hasPrivateMarker(intermediates, '<') or
+        hasPrivateMarker(intermediates, '?'):
+      return cmd(cmdIgnored)
     var copy: seq[DispatchParam] = @[]
     for p in params: copy.add p
     return VtCommand(kind: cmdSetSgr, sgrParams: copy)
@@ -267,6 +277,11 @@ proc translateCsi*(
                        modeCode: paramOr(params, 0, 0),
                        modeCodes: modeCodesFrom(params),
                        privateMode: isPrivate)
+    return VtCommand(kind: cmdUnknown, rawByte: final, rawFinal: final)
+  of 'q':
+    if hasPrivateMarker(intermediates, ' '):
+      return VtCommand(kind: cmdSetCursorStyle,
+                       cursorStyleCode: paramOr(params, 0, 0))
     return VtCommand(kind: cmdUnknown, rawByte: final, rawFinal: final)
   of 'h':
     return VtCommand(kind: cmdSetMode,
@@ -305,13 +320,19 @@ proc translateCsi*(
   else:
     return VtCommand(kind: cmdUnknown, rawByte: final, rawFinal: final)
 
-proc translateDcs*(
+func translateDcs*(
     params: openArray[DispatchParam],
     intermediates: openArray[byte],
     final: byte,
     data: seq[byte],
 ): VtCommand =
   ## Translate a completed and accumulated DCS sequence.
+  if final == byte('q') and intermediates.len == 1 and intermediates[0] == byte('$'):
+    var request = ""
+    for b in data:
+      request.add char(b)
+    return VtCommand(kind: cmdRequestStateString, stateString: request)
+
   var pseq: seq[DispatchParam] = @[]
   for p in params: pseq.add p
   var iseq: seq[byte] = @[]
@@ -328,7 +349,7 @@ proc translateDcs*(
 # ESC (Fp/Fe/Fs, no CSI introducer)
 # ---------------------------------------------------------------------------
 
-proc translateEsc*(intermediates: openArray[byte], final: byte): VtCommand =
+func translateEsc*(intermediates: openArray[byte], final: byte): VtCommand =
   if intermediates.len == 0:
     case char(final)
     of '7': return cmd(cmdSaveCursor)
@@ -368,7 +389,7 @@ proc parsePrefix(data: openArray[byte]): tuple[code: int, bodyStart: int] =
   if i >= data.len or data[i] != byte(';'): return (-1, 0)
   (n, i + 1)
 
-proc translateOsc*(data: openArray[byte]): VtCommand =
+func translateOsc*(data: openArray[byte]): VtCommand =
   ## Translate an OSC payload (everything between `ESC ]` and the ST/BEL
   ## terminator, terminator bytes not included) into a typed command.
   let (code, body) = parsePrefix(data)

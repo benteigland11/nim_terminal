@@ -7,6 +7,9 @@ suite "vt reports generator":
     check reportCursorPosition(0, 0) == "\e[1;1R"
     check reportCursorPosition(23, 79) == "\e[24;80R"
 
+  test "reportTerminalOk formats DSR 5 response":
+    check reportTerminalOk() == "\e[0n"
+
   test "reportPrimaryDeviceAttributes includes expected parts":
     let s = reportPrimaryDeviceAttributes({tfAnsiColor, tfMouse1006})
     check s.contains("?62")
@@ -36,3 +39,7 @@ suite "vt reports generator":
     check modeStatusFrom(modes, 2004) == msSet
     check modeStatusFrom(modes, 4, privateMode = false) == msReset
     check modeStatusFrom(modes, 2026) == msNotRecognized
+
+  test "reportStateString formats DECRQSS responses":
+    check reportStateString("0m") == "\eP1$r0m\e\\"
+    check reportStateString("", valid = false) == "\eP0$r\e\\"

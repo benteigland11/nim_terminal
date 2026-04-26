@@ -50,7 +50,8 @@ proc newMockTerminal(rows, cols: int): Terminal =
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
 proc feed(t: Terminal, s: string) =
-  t.feedBytes(cast[seq[byte]](s))
+  if s.len == 0: return
+  t.feedBytes(s.toOpenArrayByte(0, s.high))
 
 func repeatedLine(line: string, count: int): string =
   result = newStringOfCap((line.len + 2) * count)

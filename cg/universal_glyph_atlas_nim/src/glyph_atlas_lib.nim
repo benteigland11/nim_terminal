@@ -18,6 +18,7 @@ type
     font*: Font
     fontSize*: float
     cellWidth*, cellHeight*: int
+    padding*: int
     atlasImage*: Image     ## The single big image containing all rendered glyphs
     cache: Table[uint32, Glyph]
     nextX, nextY: int      ## Current packing position in the atlas
@@ -34,6 +35,7 @@ func newGlyphAtlas*(font: Font, fontSize: float, atlasSize: int = 1024): GlyphAt
     fontSize: fontSize,
     cellWidth: cellWidth,
     cellHeight: cellHeight,
+    padding: 2,
     atlasImage: newImage(atlasSize, atlasSize),
     cache: initTable[uint32, Glyph](),
     nextX: 0,
@@ -44,18 +46,23 @@ func newGlyphAtlas*(font: Font, fontSize: float, atlasSize: int = 1024): GlyphAt
 proc getGlyph*(a: GlyphAtlas, rune: uint32): Glyph =
   ## Retrieve a glyph's UVs. Renders to the atlas if missing.
   if not a.cache.hasKey(rune):
+    let slotWidth = a.cellWidth + a.padding * 2
+    let slotHeight = a.cellHeight + a.padding * 2
+
     # Simple row-based packing
-    if a.nextX + a.cellWidth > a.atlasImage.width:
+    if a.nextX + slotWidth > a.atlasImage.width:
       a.nextX = 0
-      a.nextY += a.cellHeight
+      a.nextY += slotHeight
     
-    if a.nextY + a.cellHeight > a.atlasImage.height:
+    if a.nextY + slotHeight > a.atlasImage.height:
       # Atlas full!
       return Glyph()
 
     # Draw the rune into the atlas at (nextX, nextY)
     let text = $rune.Rune
-    a.atlasImage.fillText(a.font, text, translate(vec2(float(a.nextX), float(a.nextY))))
+    let drawX = a.nextX + a.padding
+    let drawY = a.nextY + a.padding
+    a.atlasImage.fillText(a.font, text, translate(vec2(float(drawX), float(drawY))))
     a.isDirty = true
     
     # Calculate UVs
@@ -63,14 +70,14 @@ proc getGlyph*(a: GlyphAtlas, rune: uint32): Glyph =
     let invH = 1.0 / float(a.atlasImage.height)
     
     let glyph = Glyph(
-      uvMin: vec2(float(a.nextX) * invW, float(a.nextY) * invH),
-      uvMax: vec2(float(a.nextX + a.cellWidth) * invW, float(a.nextY + a.cellHeight) * invH),
+      uvMin: vec2(float(drawX) * invW, float(drawY) * invH),
+      uvMax: vec2(float(drawX + a.cellWidth) * invW, float(drawY + a.cellHeight) * invH),
       width: a.cellWidth,
       height: a.cellHeight
     )
     
     a.cache[rune] = glyph
-    a.nextX += a.cellWidth
+    a.nextX += slotWidth
     
   a.cache[rune]
 

@@ -5,7 +5,7 @@
 ## scrollback ring. This widget is pure logic: it exposes a set of
 ## procedures to mutate the buffer.
 
-import std/[options, unicode]
+import std/[options, strutils, unicode]
 
 const
   DefaultTabWidth* = 8
@@ -39,24 +39,42 @@ type
 
   AttrFlag* = enum
     afBold
+    afDim
     afItalic
     afUnderline
+    afStrike
     afInverse
     afHidden
+    afOverline
+
+  UnderlineStyle* = enum
+    usNone
+    usSingle
+    usDouble
+    usCurly
+    usDotted
+    usDashed
 
   Attrs* = object
     fg*, bg*: Color
     flags*: set[AttrFlag]
+    underlineStyle*: UnderlineStyle
 
   Cell* = object
     rune*: uint32
     width*: uint8          ## 0 (continuation), 1 (normal), 2 (wide)
     attrs*: Attrs
 
+  CursorStyle* = enum
+    csBlock
+    csUnderline
+    csBar
+
   Cursor* = object
     row*, col*: int
     attrs*: Attrs
     visible*: bool
+    style*: CursorStyle
     pendingWrap*: bool     ## True if cursor is logically past end-of-line
 
   ScreenMode* = enum
@@ -111,7 +129,7 @@ func defaultTheme*(): TerminalTheme =
     background: rgb(0, 0, 0),
     foreground: rgb(229, 229, 229),
     cursor:     rgb(255, 255, 255),
-    selection:  rgb(173, 214, 255),
+    selection:  rgb(148, 113, 24),
     ansi: [
       rgb(0, 0, 0), rgb(205, 0, 0), rgb(0, 205, 0), rgb(205, 205, 0),
       rgb(0, 0, 238), rgb(205, 0, 205), rgb(0, 205, 205), rgb(229, 229, 229),
@@ -125,7 +143,7 @@ func indexedColor*(i: int): Color = Color(kind: ckIndexed, index: i)
 func rgbColor*(r, g, b: uint8): Color = Color(kind: ckRgb, r: r, g: g, b: b)
 
 func defaultAttrs*(): Attrs =
-  Attrs(fg: defaultColor(), bg: defaultColor(), flags: {})
+  Attrs(fg: defaultColor(), bg: defaultColor(), flags: {}, underlineStyle: usNone)
 
 func emptyCell*(attrs: Attrs = defaultAttrs()): Cell =
   Cell(rune: uint32(' '), width: 1, attrs: attrs)
@@ -152,9 +170,9 @@ func makeTabStops(cols, width: int): seq[bool] =
 # ---------------------------------------------------------------------------
 
 func newCursor(): Cursor =
-  Cursor(row: 0, col: 0, attrs: defaultAttrs(), visible: true, pendingWrap: false)
+  Cursor(row: 0, col: 0, attrs: defaultAttrs(), visible: true, style: csBlock, pendingWrap: false)
 
-proc newScreen*(
+func newScreen*(
     cols, rows: int,
     scrollback: int = DefaultScrollback
 ): Screen =
@@ -235,6 +253,28 @@ func absoluteLineText*(s: Screen, absRow: int): string =
   for c in cells:
     if c.isContinuation: continue
     result.add Rune(c.rune)
+
+func isBlankCell(c: Cell): bool =
+  c.rune == uint32(' ') and c.width == 1
+
+func contentLen(row: seq[Cell], softWrapped: bool): int =
+  if softWrapped: return row.len
+  result = row.len
+  while result > 0 and isBlankCell(row[result - 1]): dec result
+
+func absoluteContentLen*(s: Screen, absRow: int): int =
+  ## Returns the display width containing non-blank content for an absolute row.
+  ## Soft-wrapped rows keep their full width so wrapped logical lines remain
+  ## selectable through the wrap boundary.
+  if absRow < 0: return 0
+  if s.usingAlt:
+    if absRow >= s.rows: return 0
+    return contentLen(s.altGrid[absRow], absRow < s.altRowSoftWrap.len and s.altRowSoftWrap[absRow])
+  if absRow < s.scrollback.len:
+    return contentLen(s.scrollback[absRow], absRow < s.scrollbackSoftWrap.len and s.scrollbackSoftWrap[absRow])
+  let gr = absRow - s.scrollback.len
+  if gr < 0 or gr >= s.rows: return 0
+  contentLen(s.grid[gr], gr < s.rowSoftWrap.len and s.rowSoftWrap[gr])
 
 func colOfByteIndex*(s: Screen, absRow: int, byteIdx: int): int =
   ## Maps a byte index from the UTF-8 string back to a grid column.
@@ -400,13 +440,47 @@ proc resize*(s: Screen, cols, rows: int) =
   s.cols = cols; s.rows = rows; s.cursor.row = max(0, min(rows-1, s.cursor.row)); s.cursor.col = max(0, min(cols-1, s.cursor.col))
   s.scrollTop = 0; s.scrollBottom = rows - 1; s.tabStops = makeTabStops(cols, DefaultTabWidth)
 
-func isBlankCell(c: Cell): bool =
-  c.rune == uint32(' ') and c.width == 1
+func rowHasContent(row: seq[Cell], softWrapped: bool): bool =
+  contentLen(row, softWrapped) > 0
 
-func contentLen(row: seq[Cell], softWrapped: bool): int =
-  if softWrapped: return row.len
-  result = row.len
-  while result > 0 and isBlankCell(row[result - 1]): dec result
+proc resizeVisibleContentFromTop(
+    s: Screen,
+    cols, rows: int,
+    oldGrid, oldAltGrid: seq[seq[Cell]],
+    oldWraps, oldAltWraps: seq[bool],
+    oldCursorRow, oldCols: int,
+) =
+  let attrs = defaultAttrs()
+  var first = oldGrid.len
+  var last = -1
+  for r in 0 ..< oldGrid.len:
+    if rowHasContent(oldGrid[r], r < oldWraps.len and oldWraps[r]) or r == oldCursorRow:
+      first = min(first, r)
+      last = max(last, r)
+
+  if last < first:
+    first = max(0, min(oldGrid.len - 1, oldCursorRow))
+    last = first
+
+  let blockLen = min(rows, last - first + 1)
+  s.grid = makeGrid(cols, rows, attrs)
+  s.altGrid = makeGrid(cols, rows, attrs)
+  s.rowSoftWrap = makeWrapFlags(rows)
+  s.altRowSoftWrap = makeWrapFlags(rows)
+
+  for r in 0 ..< blockLen:
+    let oldIndex = first + r
+    s.grid[r] = oldGrid[oldIndex]
+    s.altGrid[r] = oldAltGrid[oldIndex]
+    s.rowSoftWrap[r] = oldIndex < oldWraps.len and oldWraps[oldIndex]
+    s.altRowSoftWrap[r] = oldIndex < oldAltWraps.len and oldAltWraps[oldIndex]
+    s.grid[r].setLen(cols)
+    s.altGrid[r].setLen(cols)
+    for c in oldCols ..< cols:
+      s.grid[r][c] = emptyCell(attrs)
+      s.altGrid[r][c] = emptyCell(attrs)
+
+  s.cursor.row = max(0, min(rows - 1, oldCursorRow - first))
 
 proc appendLogicalRows(
     logical: var seq[seq[Cell]],
@@ -437,7 +511,8 @@ proc appendLogicalRows(
 proc rewrapLogicalLines(
     logical: seq[seq[Cell]],
     cols, rows, scrollbackCap, cursorLine, cursorOffset, preferredCursorRow: int,
-    oldCursor: Cursor
+    oldCursor: Cursor,
+    preserveCursorRowWhenShort: bool
 ): tuple[
     grid: seq[seq[Cell]],
     wraps: seq[bool],
@@ -502,7 +577,7 @@ proc rewrapLogicalLines(
   if allRows.len < rows:
     let spareRows = rows - allRows.len
     leadingBlanks =
-      if cursorAbs >= 0: max(0, min(spareRows, preferredCursorRow - cursorAbs))
+      if preserveCursorRowWhenShort and cursorAbs >= 0: max(0, min(spareRows, preferredCursorRow - cursorAbs))
       else: 0
     for _ in 0 ..< leadingBlanks:
       allRows.insert(makeRow(cols, attrs), 0)
@@ -527,7 +602,7 @@ proc rewrapLogicalLines(
   result.cursor.col = max(0, min(cols - 1, cursorCol))
   result.cursor.pendingWrap = false
 
-proc resizePreserveBottom*(s: Screen, cols, rows: int) =
+proc resizePreserveBottom*(s: Screen, cols, rows: int, preserveCursorRowWhenShort = true) =
   ## Resize while preserving the bottom-relative position of visible content.
   ##
   ## This is useful for display-only zoom where the child process should not
@@ -545,7 +620,17 @@ proc resizePreserveBottom*(s: Screen, cols, rows: int) =
     let cursorAbsRow = s.scrollback.len + s.cursor.row
     logical.appendLogicalRows(cursorLine, cursorOffset, s.scrollback, s.scrollbackSoftWrap, 0, cursorAbsRow, s.cursor.col)
     logical.appendLogicalRows(cursorLine, cursorOffset, s.grid, s.rowSoftWrap, s.scrollback.len, cursorAbsRow, s.cursor.col)
-    let reflowed = rewrapLogicalLines(logical, cols, rows, s.scrollbackCap, cursorLine, cursorOffset, s.cursor.row, s.cursor)
+    let reflowed = rewrapLogicalLines(
+      logical,
+      cols,
+      rows,
+      s.scrollbackCap,
+      cursorLine,
+      cursorOffset,
+      s.cursor.row,
+      s.cursor,
+      preserveCursorRowWhenShort,
+    )
     s.grid = reflowed.grid
     s.rowSoftWrap = reflowed.wraps
     s.altGrid = makeGrid(cols, rows, defaultAttrs())
@@ -569,6 +654,16 @@ proc resizePreserveBottom*(s: Screen, cols, rows: int) =
   let oldAltWraps = s.altRowSoftWrap
   let oldCursorRow = s.cursor.row
   let diff = rows - oldRows
+
+  if not preserveCursorRowWhenShort:
+    resizeVisibleContentFromTop(s, cols, rows, oldGrid, oldAltGrid, oldWraps, oldAltWraps, oldCursorRow, oldCols)
+    s.cols = cols
+    s.rows = rows
+    s.cursor.col = max(0, min(cols - 1, s.cursor.col))
+    s.scrollTop = 0
+    s.scrollBottom = rows - 1
+    s.tabStops = makeTabStops(cols, DefaultTabWidth)
+    return
 
   s.grid = newSeq[seq[Cell]](rows)
   s.altGrid = newSeq[seq[Cell]](rows)
@@ -722,31 +817,130 @@ func applyIndexedOr24bit(p: openArray[SgrParam], si: int, cur: Color): (Color, i
   
   return (cur, 0)
 
+proc applyUnderlineStyle(s: Screen, param: SgrParam) =
+  ## SGR 4 can carry sub-parameters: 4:0 clears underline, while 4:1..5
+  ## select visible underline styles.
+  let styleCode =
+    if param.subParams.len > 0: param.subParams[0]
+    else: 1
+  case styleCode
+  of 0:
+    s.cursor.attrs.flags.excl afUnderline
+    s.cursor.attrs.underlineStyle = usNone
+  of 2:
+    s.cursor.attrs.flags.incl afUnderline
+    s.cursor.attrs.underlineStyle = usDouble
+  of 3:
+    s.cursor.attrs.flags.incl afUnderline
+    s.cursor.attrs.underlineStyle = usCurly
+  of 4:
+    s.cursor.attrs.flags.incl afUnderline
+    s.cursor.attrs.underlineStyle = usDotted
+  of 5:
+    s.cursor.attrs.flags.incl afUnderline
+    s.cursor.attrs.underlineStyle = usDashed
+  else:
+    s.cursor.attrs.flags.incl afUnderline
+    s.cursor.attrs.underlineStyle = usSingle
+
 proc applySgr*(s: Screen, params: openArray[SgrParam]) =
+  if params.len == 0:
+    s.cursor.attrs = defaultAttrs()
+    return
   var i = 0
   while i < params.len:
     case params[i].value
     of 0: s.cursor.attrs = defaultAttrs()
     of 1: s.cursor.attrs.flags.incl afBold
+    of 2: s.cursor.attrs.flags.incl afDim
     of 3: s.cursor.attrs.flags.incl afItalic
-    of 4: s.cursor.attrs.flags.incl afUnderline
+    of 4: s.applyUnderlineStyle(params[i])
+    of 9: s.cursor.attrs.flags.incl afStrike
+    of 21: s.cursor.attrs.flags.incl afUnderline
     of 7: s.cursor.attrs.flags.incl afInverse
     of 8: s.cursor.attrs.flags.incl afHidden
-    of 22: s.cursor.attrs.flags.excl afBold
+    of 22:
+      s.cursor.attrs.flags.excl afBold
+      s.cursor.attrs.flags.excl afDim
     of 23: s.cursor.attrs.flags.excl afItalic
-    of 24: s.cursor.attrs.flags.excl afUnderline
+    of 24:
+      s.cursor.attrs.flags.excl afUnderline
+      s.cursor.attrs.underlineStyle = usNone
     of 27: s.cursor.attrs.flags.excl afInverse
     of 28: s.cursor.attrs.flags.excl afHidden
+    of 29: s.cursor.attrs.flags.excl afStrike
+    of 53: s.cursor.attrs.flags.incl afOverline
+    of 55: s.cursor.attrs.flags.excl afOverline
     of 30..37: s.cursor.attrs.fg = indexedColor(params[i].value - 30)
-    of 38: (let (c, consumed) = applyIndexedOr24bit(params, i, s.cursor.attrs.fg); s.cursor.attrs.fg = c; i += consumed)
+    of 38:
+      let (c, consumed) = applyIndexedOr24bit(params, i, s.cursor.attrs.fg)
+      s.cursor.attrs.fg = c
+      i += consumed
     of 39: s.cursor.attrs.fg = defaultColor()
     of 40..47: s.cursor.attrs.bg = indexedColor(params[i].value - 40)
-    of 48: (let (c, consumed) = applyIndexedOr24bit(params, i, s.cursor.attrs.bg); s.cursor.attrs.bg = c; i += consumed)
+    of 48:
+      let (c, consumed) = applyIndexedOr24bit(params, i, s.cursor.attrs.bg)
+      s.cursor.attrs.bg = c
+      i += consumed
     of 49: s.cursor.attrs.bg = defaultColor()
     of 90..97:  s.cursor.attrs.fg = indexedColor(params[i].value - 90 + 8)
     of 100..107: s.cursor.attrs.bg = indexedColor(params[i].value - 100 + 8)
     else: discard
     inc i
+
+proc setCursorStyle*(s: Screen, code: int) =
+  ## Apply xterm DECSCUSR cursor style. Blinking variants are stored as their
+  ## non-blinking shape for now; rendering can add blink timing later.
+  case code
+  of 3, 4: s.cursor.style = csUnderline
+  of 5, 6: s.cursor.style = csBar
+  else: s.cursor.style = csBlock
+
+func cursorStyleReportCode*(s: Screen): int =
+  ## Return a stable DECSCUSR code for the current cursor shape.
+  case s.cursor.style
+  of csBlock: 1
+  of csUnderline: 3
+  of csBar: 5
+
+func colorSgrParams(c: Color, foreground: bool): seq[string] =
+  case c.kind
+  of ckDefault:
+    discard
+  of ckIndexed:
+    if c.index >= 0 and c.index <= 7:
+      result.add $(if foreground: 30 + c.index else: 40 + c.index)
+    elif c.index >= 8 and c.index <= 15:
+      result.add $(if foreground: 90 + c.index - 8 else: 100 + c.index - 8)
+    else:
+      result.add(if foreground: "38" else: "48")
+      result.add "5"
+      result.add $c.index
+  of ckRgb:
+    result.add(if foreground: "38" else: "48")
+    result.add "2"
+    result.add $c.r
+    result.add $c.g
+    result.add $c.b
+
+func sgrReport*(s: Screen): string =
+  ## Return a compact SGR state string suitable for DECRQSS "m" replies.
+  var parts: seq[string] = @[]
+  if afBold in s.cursor.attrs.flags: parts.add "1"
+  if afDim in s.cursor.attrs.flags: parts.add "2"
+  if afItalic in s.cursor.attrs.flags: parts.add "3"
+  if afUnderline in s.cursor.attrs.flags: parts.add "4"
+  if afInverse in s.cursor.attrs.flags: parts.add "7"
+  if afHidden in s.cursor.attrs.flags: parts.add "8"
+  if afStrike in s.cursor.attrs.flags: parts.add "9"
+  if afOverline in s.cursor.attrs.flags: parts.add "53"
+  parts.add colorSgrParams(s.cursor.attrs.fg, foreground = true)
+  parts.add colorSgrParams(s.cursor.attrs.bg, foreground = false)
+  if parts.len == 0: "0m" else: parts.join(";") & "m"
+
+func scrollRegionReport*(s: Screen): string =
+  ## Return the DECSTBM state string using 1-indexed row coordinates.
+  $(s.scrollTop + 1) & ";" & $(s.scrollBottom + 1) & "r"
 
 proc setTabStop*(s: Screen) = (if s.cursor.col < s.cols: s.tabStops[s.cursor.col] = true)
 proc clearTabStop*(s: Screen) = (if s.cursor.col < s.cols: s.tabStops[s.cursor.col] = false)

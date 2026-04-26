@@ -22,5 +22,15 @@ benchmarks/terminal_benchmarks
 .claude/reports/
 .claude/settings.local.json
 nim_terminal
+nim_terminal_release
 nim.cfg
 *.exe
+
+# memory test build artifacts (compiled test binaries + valgrind debug build)
+tests/memory/test_*
+!tests/memory/test_*.nim
+tests/memory/oneshot_*
+!tests/memory/oneshot_*.nim
+tests/memory/valgrind/nim_terminal_debug
+tests/memory/valgrind/test_*
+!tests/memory/valgrind/test_*.nim

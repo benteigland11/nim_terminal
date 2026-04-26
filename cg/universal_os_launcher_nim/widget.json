@@ -2,7 +2,7 @@
   "meta": {
     "id": "universal-os-launcher-nim",
     "name": "OS Launcher",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "domain": "universal",
     "tags": [
       "launch",
@@ -19,12 +19,12 @@
   "custom_notes": "",
   "library_notes": {
     "general": "Single responsibility - one widget does one thing. No global state. No project-specific code, hardcoded paths, credentials, or environment-specific values. Expose variation points as constructor parameters or function arguments - no hardcoded thresholds, colors, sizes, or behavior flags. URLs and endpoints belong in examples as demonstration data, not in src/ - if a widget needs a URL to operate, it must be a parameter the caller provides. All dependencies must be declared in widget.json tech_stack.dependencies. Widgets cannot depend on other widgets - they must be fully self-contained. If you need logic from another widget, copy it into src/ directly. Examples must run and exit cleanly with no user input, no network calls, and no external services or API keys - use fake/hardcoded data. The widget's own declared dependencies are fine and will be installed by the validator before the example runs. Do not modify library_notes - it is managed by Cartograph and will be restored on checkin.",
-    "language": "No project-specific names, identifiers, or terminology anywhere in src/, tests/, or examples/ - use generic names like 'item', 'value', 'exampleUser'. Use std/unittest for all tests (import std/unittest, not bare import unittest). Use func for pure procedures with no side effects \u2014 only use proc when side effects are required. Mark all public symbols with * (e.g. func myFunc*(x: int): int). Use camelCase for funcs/procs/variables, PascalCase for types. Prefer stdlib imports with the std/ prefix (e.g. import std/strutils, not import strutils). No echo in src/ files. No quit() or system.quit() in src/ files. No {.importc.} or {.compile.} pragmas \u2014 C FFI makes widgets platform-dependent and unvalidatable. No {.global.} pragma \u2014 widgets must not use global mutable state. No OS-targeting when defined(windows/linux/posix/etc.) \u2014 widgets must validate on all platforms. A widget_id.nimble file is required at the widget root - it is created by cartograph create and must stay in sync with widget.json dependencies. List nimble package dependencies in widget.json tech_stack.dependencies as 'pkgname >= version'.",
+    "language": "No project-specific names, identifiers, or terminology anywhere in src/, tests/, or examples/ - use generic names like 'item', 'value', 'exampleUser'. Use std/unittest for all tests (import std/unittest, not bare import unittest). Use func for pure procedures with no side effects \u2014 only use proc when side effects are required. Mark all public symbols with * (e.g. func myFunc*(x: int): int). Use camelCase for funcs/procs/variables, PascalCase for types. Prefer stdlib imports with the std/ prefix (e.g. import std/strutils, not import strutils). No echo in src/ files. No quit() or system.quit() in src/ files. No {.importc.} or {.compile.} pragmas \u2014 C FFI makes widgets platform-dependent and unvalidatable. No {.global.} pragma \u2014 widgets must not use global mutable state. No OS-targeting when defined(windows/linux/posix/etc.) \u2014 widgets must validate on all platforms. No cast[seq[T]] in src/ \u2014 GC-managed seq casts break GC invariants and are blocked; copy explicitly or use toOpenArrayByte. Avoid bare `except:` \u2014 catches Defect and KeyboardInterrupt; use a typed except like `except CatchableError:`. Avoid raw memory primitives (alloc/dealloc/copyMem, cast[ptr ...], ptr UncheckedArray) \u2014 prefer GC-managed seq/string; warns if used. A widget_id.nimble file is required at the widget root - it is created by cartograph create and must stay in sync with widget.json dependencies. List nimble package dependencies in widget.json tech_stack.dependencies as 'pkgname >= version'.",
     "domain": "Use this domain when a widget spans multiple domains or has no clear home \u2014 not because it must be pure. A retry utility, a date formatter, a general-purpose HTTP client all belong here. Expose variation points as parameters. Don't force it into a domain just to avoid universal."
   },
   "validation": {
-    "engine_version": 2,
-    "validated_at": "2026-04-25T21:45:25.221775+00:00",
-    "runtime": "nim 2.2.8"
+    "engine_version": 3,
+    "validated_at": "2026-04-26T06:19:59.314272+00:00",
+    "runtime": "nim 2.2.10"
   }
 }

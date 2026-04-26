@@ -16,6 +16,8 @@ suite "Writing and cursor":
     check s.cursor.row == 0
     check s.cursor.col == 5
     check s.trimmedLine(0) == "hello"
+    check s.absoluteContentLen(0) == 5
+    check s.absoluteContentLen(1) == 0
 
   test "newline/linefeed moves down and CR returns to col 0":
     let s = newScreen(10, 3)
@@ -52,6 +54,8 @@ suite "Writing and cursor":
     check s.cursor.col == 1
     check s.trimmedLine(0) == "abcd"
     check s.trimmedLine(1) == "e"
+    check s.absoluteContentLen(0) == 4
+    check s.absoluteContentLen(1) == 1
 
   test "autowrap disabled clamps at last column":
     let s = newScreen(4, 2)
@@ -129,6 +133,28 @@ suite "Resize":
     check s.trimmedLine(3) == "B"
     check s.trimmedLine(4) == "C"
 
+  test "resizePreserveBottom can grow short content at top":
+    let s = newScreen(4, 3)
+    s.writeString("hi")
+
+    s.resizePreserveBottom(4, 6, preserveCursorRowWhenShort = false)
+
+    check s.cursor.row == 0
+    check s.cursor.col == 2
+    check s.trimmedLine(0) == "hi"
+    check s.trimmedLine(1) == ""
+
+  test "resizePreserveBottom can shrink sparse content to top":
+    let s = newScreen(8, 8)
+    s.cursorTo(5, 0)
+    s.writeString("ls")
+    s.cursorTo(7, 0)
+
+    s.resizePreserveBottom(8, 4, preserveCursorRowWhenShort = false)
+
+    check s.trimmedLine(0) == "ls"
+    check s.cursor.row == 2
+
   test "resizePreserveBottom shrinks above visible content":
     let s = newScreen(4, 5, scrollback = 10)
     for r in 0 ..< 5:
@@ -178,6 +204,17 @@ suite "Resize":
     check s.cursor.row == 0
     check s.cursor.col == 5
     check s.trimmedLine(0) == "hello"
+    check s.trimmedLine(1) == ""
+
+  test "resizePreserveBottom can keep short reflowed content at top":
+    let s = newScreen(4, 4)
+    s.writeString("abcdef")
+
+    s.resizePreserveBottom(8, 4, preserveCursorRowWhenShort = false)
+
+    check s.cursor.row == 0
+    check s.cursor.col == 6
+    check s.trimmedLine(0) == "abcdef"
     check s.trimmedLine(1) == ""
 
 suite "Erase":
@@ -319,6 +356,15 @@ suite "Save / restore cursor":
     check s.cursor.attrs.fg.index == 1
 
 suite "SGR":
+  test "empty SGR resets attributes":
+    let s = newScreen(4, 1)
+    s.applySgr([sgr(1), sgr(31)])
+    check afBold in s.cursor.attrs.flags
+    s.applySgr([])
+    check s.cursor.attrs.flags == {}
+    check s.cursor.attrs.fg.kind == ckDefault
+    check s.cursor.attrs.bg.kind == ckDefault
+
   test "reset clears everything":
     let s = newScreen(4, 1)
     s.applySgr([sgr(1), sgr(31), sgr(0)])
@@ -360,6 +406,63 @@ suite "SGR":
     let s = newScreen(4, 1)
     s.applySgr([sgr(48, @[5, 123])])
     check s.cursor.attrs.bg.kind == ckIndexed and s.cursor.attrs.bg.index == 123
+
+  test "common decoration flags set and reset":
+    let s = newScreen(4, 1)
+    s.applySgr([sgr(2), sgr(3), sgr(4), sgr(9), sgr(53)])
+    check afDim in s.cursor.attrs.flags
+    check afItalic in s.cursor.attrs.flags
+    check afUnderline in s.cursor.attrs.flags
+    check afStrike in s.cursor.attrs.flags
+    check afOverline in s.cursor.attrs.flags
+
+    s.applySgr([sgr(22), sgr(23), sgr(24), sgr(29), sgr(55)])
+    check afDim notin s.cursor.attrs.flags
+    check afItalic notin s.cursor.attrs.flags
+    check afUnderline notin s.cursor.attrs.flags
+    check afStrike notin s.cursor.attrs.flags
+    check afOverline notin s.cursor.attrs.flags
+
+  test "colon underline style reset clears underline":
+    let s = newScreen(4, 1)
+    s.applySgr([sgr(4)])
+    check afUnderline in s.cursor.attrs.flags
+    check s.cursor.attrs.underlineStyle == usSingle
+    s.applySgr([sgr(4, @[0])])
+    check afUnderline notin s.cursor.attrs.flags
+    check s.cursor.attrs.underlineStyle == usNone
+    s.applySgr([sgr(4, @[3])])
+    check afUnderline in s.cursor.attrs.flags
+    check s.cursor.attrs.underlineStyle == usCurly
+
+  test "underline reset clears stored underline style":
+    let s = newScreen(4, 1)
+    s.applySgr([sgr(4, @[4])])
+    check s.cursor.attrs.underlineStyle == usDotted
+    s.applySgr([sgr(24)])
+    check afUnderline notin s.cursor.attrs.flags
+    check s.cursor.attrs.underlineStyle == usNone
+
+  test "cursor style maps DECSCUSR shapes":
+    let s = newScreen(4, 1)
+    check s.cursor.style == csBlock
+    check s.cursorStyleReportCode() == 1
+    s.setCursorStyle(4)
+    check s.cursor.style == csUnderline
+    check s.cursorStyleReportCode() == 3
+    s.setCursorStyle(6)
+    check s.cursor.style == csBar
+    check s.cursorStyleReportCode() == 5
+    s.setCursorStyle(0)
+    check s.cursor.style == csBlock
+
+  test "state reports expose SGR and scroll region":
+    let s = newScreen(4, 4)
+    check s.sgrReport() == "0m"
+    s.applySgr([sgr(1), sgr(2), sgr(4), sgr(38), sgr(5), sgr(10), sgr(48), sgr(2), sgr(1), sgr(2), sgr(3)])
+    check s.sgrReport() == "1;2;4;92;48;2;1;2;3m"
+    s.setScrollRegion(1, 2)
+    check s.scrollRegionReport() == "2;3r"
 
 suite "Resize":
   test "growing preserves content and adds blank rows":

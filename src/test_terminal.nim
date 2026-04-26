@@ -47,13 +47,15 @@ proc newMockTerminal*(rows, cols: int): Terminal =
     drag: newDragController(rows),
     shortcuts: newShortcutMap(),
     history: newSemanticHistory(),
+    diagnostics: newVtDiagnostics(16),
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
 proc feed*(t: Terminal, s: string) =
-  t.feedBytes(cast[seq[byte]](s))
+  if s.len == 0: return
+  t.feedBytes(s.toOpenArrayByte(0, s.high))
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -174,6 +176,27 @@ suite "terminal pipeline":
     t.feed("\e[?25h")
     check t.screen.cursor.visible
 
+  test "DECSCUSR changes cursor style":
+    let t = newMockTerminal(4, 20)
+    check t.screen.cursor.style == csBlock
+    t.feed("\e[4 q")
+    check t.screen.cursor.style == csUnderline
+    t.feed("\e[6 q")
+    check t.screen.cursor.style == csBar
+
+  test "SGR 4:0 clears underline through parser pipeline":
+    let t = newMockTerminal(4, 20)
+    t.feed("\e[4mA")
+    check afUnderline in t.screen.absoluteRowAt(0)[0].attrs.flags
+    t.feed("\e[4:0mB")
+    check afUnderline notin t.screen.absoluteRowAt(0)[1].attrs.flags
+
+  test "xterm key modifier options do not apply SGR underline":
+    let t = newMockTerminal(4, 20)
+    t.feed("\e[>4;2mA")
+    check afUnderline notin t.screen.absoluteRowAt(0)[0].attrs.flags
+    check afDim notin t.screen.absoluteRowAt(0)[0].attrs.flags
+
   test "kitty keyboard enable does not restore cursor":
     let t = newMockTerminal(5, 20)
     t.feed("\e7")
@@ -187,6 +210,36 @@ suite "terminal pipeline":
     let t = newMockTerminal(5, 20)
     t.feed("\e[?2026$p")
     check t.async.queueLen > 0
+
+  test "OSC 52 ignores malformed base64 without hiding callback failures":
+    let t = newMockTerminal(5, 20)
+    var called = false
+    t.onClipboardRequest = proc(selector, text: string) =
+      called = true
+
+    t.feed("\e]52;c;@@@\a")
+    check not called
+
+    t.feed("\e]52;c;aGVsbG8=\a")
+    check called
+
+    t.onClipboardRequest = proc(selector, text: string) =
+      raise newException(ValueError, "callback failed")
+    expect ValueError:
+      t.feed("\e]52;c;aGVsbG8=\a")
+
+  test "DECRQSS requests queue state-string replies":
+    let t = newMockTerminal(5, 20)
+    t.feed("\eP$qm\e\\")
+    check t.async.queueLen > 0
+    check t.diagnostics.snapshot().queryCount == 1
+
+  test "unknown control sequences are retained for diagnostics":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e[123x")
+    let snap = t.diagnostics.snapshot()
+    check snap.unknownCount == 1
+    check snap.events[^1].name == "unknown"
 
   test "button-event and SGR mouse modes compose":
     let t = newMockTerminal(5, 20)

@@ -105,17 +105,26 @@ proc splitActive*(t: var SplitPaneTree, axis: SplitAxis, ratio = 0.5): PaneId =
     t.root = newLeaf(result)
   t.active = result
 
+proc normalizeAxis(n: PaneNode, axis: SplitAxis) =
+  if n == nil or n.kind != pnkSplit: return
+  normalizeAxis(n.first, axis)
+  normalizeAxis(n.second, axis)
+  if n.axis == axis:
+    n.ratio = float(len(n.first)) / float(len(n))
+
 func nextAppendAxis*(t: SplitPaneTree): SplitAxis =
   ## Choose the next split direction for append-style pane creation.
   ##
-  ## The first append makes a side-by-side split. The third pane introduces a
-  ## top/bottom split in the currently active pane. Later appends split the
-  ## active pane side-by-side again, which keeps growing inside that region.
-  if t.len == 2: saVertical else: saHorizontal
+  ## The first append makes a top/bottom split so one pane can stay full width.
+  ## Later appends split the active pane side-by-side inside that row.
+  if t.len <= 1: saVertical else: saHorizontal
 
 proc splitActiveAppend*(t: var SplitPaneTree, ratio = 0.5): PaneId =
   ## Split the active leaf using the widget's default append policy.
-  result = t.splitActive(t.nextAppendAxis(), ratio)
+  let axis = t.nextAppendAxis()
+  result = t.splitActive(axis, ratio)
+  if axis == saHorizontal:
+    normalizeAxis(t.root, axis)
 
 proc activate*(t: var SplitPaneTree, id: PaneId): bool =
   if not t.contains(id): return false

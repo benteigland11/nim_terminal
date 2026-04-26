@@ -25,7 +25,8 @@ suite "pty async":
     let b = MockBackend(sent: @[], acceptCount: 0)
     let p = newAsyncPty(b, 1, queueCap = 100)
     
-    discard p.send(cast[seq[byte]]("Hello"))
+    let message = "Hello"
+    discard p.send(message.toOpenArrayByte(0, message.high))
     check p.queueLen == 5
     
     # Backend accepts 0 bytes

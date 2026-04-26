@@ -1,4 +1,4 @@
-import std/unittest
+import std/[options, unittest]
 import base64_codec
 
 suite "encode":
@@ -19,6 +19,10 @@ suite "decode":
 
   test "hello":
     check decode("aGVsbG8=") == "hello"
+
+  test "tryDecode returns none for malformed payload":
+    check tryDecode("@@@").isNone
+    check tryDecode("aGVsbG8=").get() == "hello"
 
   test "roundtrip":
     let inputs = ["hello world", "Nim is fun!", "1234567890"]

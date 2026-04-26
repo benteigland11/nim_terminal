@@ -71,6 +71,19 @@ func bufferToViewport*(v: Viewport, bufferRow: int): int =
   if bufferRow < currentTop or bufferRow > currentBottom: return -1
   bufferRow - currentTop
 
+proc ensureVisible*(v: var Viewport, bufferRow: int, contextRowsAbove: int = 0) =
+  ## Scroll just enough to make `bufferRow` visible.
+  ##
+  ## When the row is outside the current view, prefer keeping a small amount of
+  ## context above it. Already-visible rows are left untouched.
+  if bufferRow < 0: return
+  v.updateBufferHeight(v.totalRows, false)
+  if v.bufferToViewport(bufferRow) != -1: return
+  let context = max(0, min(contextRowsAbove, bufferRow))
+  let preferredTop = max(0, min(bufferRow - context, max(0, v.totalRows - v.height)))
+  let desiredOffset = v.totalRows - v.height - preferredTop
+  v.scrollOffset = max(0, min(v.maxScroll, desiredOffset))
+
 func captureAnchor*(v: Viewport, targetBufferRow: int): ViewAnchor =
   ## Capture a row to keep visible across a viewport/total-height change.
   ViewAnchor(
@@ -80,12 +93,27 @@ func captureAnchor*(v: Viewport, targetBufferRow: int): ViewAnchor =
     atBottom: v.isAtBottom,
   )
 
+func captureResizeAnchor*(v: Viewport, targetBufferRow: int): ViewAnchor =
+  ## Capture a stable resize anchor.
+  ##
+  ## If the target row is visible, preserve that row. If it is not visible,
+  ## preserve the current top row instead so scrolled-back views do not snap
+  ## back to an off-screen cursor during zoom or resize.
+  let targetViewport = v.bufferToViewport(targetBufferRow)
+  ViewAnchor(
+    topRow: v.viewportToBuffer(0),
+    targetRow: if targetViewport >= 0: targetBufferRow else: -1,
+    targetViewportRow: targetViewport,
+    atBottom: v.isAtBottom,
+  )
+
 proc restoreAnchor*(
     v: var Viewport,
     totalRows, height: int,
     anchor: ViewAnchor,
     contextRowsAbove: int = 0,
-    preserveTopWhilePossible: bool = true
+    preserveTopWhilePossible: bool = true,
+    pinBottom: bool = true
 ) =
   ## Restore viewport position after dimensions changed.
   ##
@@ -94,9 +122,13 @@ proc restoreAnchor*(
   v.height = max(1, height)
   v.updateBufferHeight(max(1, totalRows), false)
   if anchor.targetRow < 0:
-    v.scrollToBottom()
+    if anchor.topRow >= 0:
+      let desiredOffset = v.totalRows - v.height - anchor.topRow
+      v.scrollOffset = max(0, min(v.maxScroll, desiredOffset))
+    else:
+      v.scrollToBottom()
     return
-  if anchor.atBottom:
+  if pinBottom and anchor.atBottom:
     v.scrollToBottom()
     return
 

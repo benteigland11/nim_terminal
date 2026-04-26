@@ -21,6 +21,7 @@ import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/data_semantic_history_nim/src/semantic_history_lib
 import ../cg/universal_link_detector_nim/src/link_detector_lib
 import ../cg/data_terminal_output_footprint_nim/src/terminal_output_footprint_lib
+import ../cg/data_vt_diagnostics_nim/src/vt_diagnostics_lib as vt_diag
 
 # OS-Specific Backend Selection
 when defined(posix):
@@ -38,6 +39,7 @@ export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
        drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib,
        semantic_history_lib, link_detector_lib, terminal_output_footprint_lib
+export vt_diag
 
 type
   ActiveLink* = object
@@ -61,6 +63,7 @@ type
     drag*: DragController
     shortcuts*: ShortcutMap
     history*: SemanticHistory
+    diagnostics*: vt_diag.VtDiagnostics
     activeLink*: Option[ActiveLink]
     outputFootprint*: OutputFootprint
     # DCS accumulation
@@ -82,7 +85,8 @@ proc newTerminal*(
     cwd: string = "",
     cols: int = 80,
     rows: int = 24,
-    scrollback: int = DefaultScrollback
+    scrollback: int = DefaultScrollback,
+    diagnosticsCapacity: int = 128
 ): Terminal =
   when defined(posix):
     let backend = newPosixBackend()
@@ -109,6 +113,7 @@ proc newTerminal*(
     drag: newDragController(rows),
     shortcuts: sMap,
     history: newSemanticHistory(),
+    diagnostics: vt_diag.newVtDiagnostics(diagnosticsCapacity),
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
     dcsActive: false,
@@ -241,6 +246,25 @@ func modeStatus(t: Terminal, code: int, private: bool): ModeStatus =
     let modes = [modeSupport(4, if smInsert in t.screen.modes: msSet else: msReset, privateMode = false)]
     modeStatusFrom(modes, code, privateMode = false)
 
+proc sendReport(t: Terminal, report: string): int =
+  if report.len == 0: return 0
+  t.async.send(report.toOpenArrayByte(0, report.high))
+
+proc recordDiagnostic(t: Terminal, kind: vt_diag.VtEventKind, name, detail: string) =
+  if t.diagnostics != nil:
+    t.diagnostics.record(kind, name, detail)
+
+func stateStringReport(t: Terminal, request: string): string =
+  case request
+  of "m":
+    reportStateString(t.screen.sgrReport())
+  of " q":
+    reportStateString($t.screen.cursorStyleReportCode() & " q")
+  of "r":
+    reportStateString(t.screen.scrollRegionReport())
+  else:
+    reportStateString("", valid = false)
+
 proc apply*(t: Terminal, cmd: VtCommand) =
   let rowBefore = t.screen.cursor.row
   case cmd.kind
@@ -304,21 +328,25 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdSaveCursor:     t.screen.saveCursor()
   of cmdRestoreCursor:  t.screen.restoreCursor(); t.armOutputFootprintIfRestored()
   of cmdSetSgr:         t.screen.applySgr(toSgrParams(cmd.sgrParams))
+  of cmdSetCursorStyle: t.screen.setCursorStyle(cmd.cursorStyleCode); t.damage.markRow(t.screen.cursor.row)
   of cmdSetScrollRegion: (let bot = if cmd.regionBottom == DefaultScrollRegionBottom: t.screen.rows - 1 else: cmd.regionBottom; t.screen.setScrollRegion(cmd.regionTop, bot))
   of cmdSetMode:
+    t.recordDiagnostic(vt_diag.vekModeSet, "mode", $cmd.modeCodes)
     if cmd.modeCodes.len == 0:
       t.applyMode(cmd.modeCode, cmd.privateMode, true)
     else:
       for code in cmd.modeCodes:
         t.applyMode(code, cmd.privateMode, true)
   of cmdResetMode:
+    t.recordDiagnostic(vt_diag.vekModeReset, "mode", $cmd.modeCodes)
     if cmd.modeCodes.len == 0:
       t.applyMode(cmd.modeCode, cmd.privateMode, false)
     else:
       for code in cmd.modeCodes:
         t.applyMode(code, cmd.privateMode, false)
   of cmdRequestMode:
-    discard t.async.send(cast[seq[byte]](reportModeStatus(cmd.modeCode, t.modeStatus(cmd.modeCode, cmd.privateMode), cmd.privateMode)))
+    t.recordDiagnostic(vt_diag.vekModeQuery, "DECRQM", $cmd.modeCode)
+    discard t.sendReport(reportModeStatus(cmd.modeCode, t.modeStatus(cmd.modeCode, cmd.privateMode), cmd.privateMode))
   of cmdSetTabStop:     t.screen.setTabStop()
   of cmdClearTabStop:   t.screen.clearTabStop()
   of cmdClearAllTabStops: t.screen.clearAllTabStops()
@@ -326,23 +354,41 @@ proc apply*(t: Terminal, cmd: VtCommand) =
     let code = cmd.requestArgs.paramOr(0, 0)
     if not cmd.requestPrivate:
       case code
-      of 5: discard t.async.send(cast[seq[byte]]("\e[0n"))
-      of 6: discard t.async.send(cast[seq[byte]](reportCursorPosition(t.screen.cursor.row, t.screen.cursor.col)))
+      of 5:
+        discard t.sendReport(reportTerminalOk())
+        t.recordDiagnostic(vt_diag.vekReportSent, "DSR", "status")
+      of 6:
+        discard t.sendReport(reportCursorPosition(t.screen.cursor.row, t.screen.cursor.col))
+        t.recordDiagnostic(vt_diag.vekReportSent, "DSR", "cursor")
       else: discard
   of cmdRequestDeviceAttributes:
-    if not cmd.requestPrivate: discard t.async.send(cast[seq[byte]](reportPrimaryDeviceAttributes({tfAnsiColor, tf256Color, tfTrueColor, tfMouse1000, tfMouse1006})))
-    else: discard t.async.send(cast[seq[byte]](reportSecondaryDeviceAttributes(1)))
+    if not cmd.requestPrivate:
+      discard t.sendReport(reportPrimaryDeviceAttributes({tfAnsiColor, tf256Color, tfTrueColor, tfMouse1000, tfMouse1006}))
+      t.recordDiagnostic(vt_diag.vekReportSent, "DA", "primary")
+    else:
+      discard t.sendReport(reportSecondaryDeviceAttributes(1))
+      t.recordDiagnostic(vt_diag.vekReportSent, "DA", "secondary")
   of cmdRequestWindowReport:
     let code = cmd.requestArgs.paramOr(0, 0)
     case code
-    of 18: discard t.async.send(cast[seq[byte]](reportWindowSize(t.screen.rows, t.screen.cols)))
-    of 19: discard t.async.send(cast[seq[byte]](reportScreenSize(t.screen.rows, t.screen.cols)))
-    of 21: discard t.async.send(cast[seq[byte]](reportWindowTitle(t.screen.title)))
+    of 18:
+      discard t.sendReport(reportWindowSize(t.screen.rows, t.screen.cols))
+      t.recordDiagnostic(vt_diag.vekReportSent, "window", "text-area-size")
+    of 19:
+      discard t.sendReport(reportScreenSize(t.screen.rows, t.screen.cols))
+      t.recordDiagnostic(vt_diag.vekReportSent, "window", "screen-size")
+    of 21:
+      discard t.sendReport(reportWindowTitle(t.screen.title))
+      t.recordDiagnostic(vt_diag.vekReportSent, "window", "title")
     else: discard
   of cmdSetTitle: (t.screen.title = cmd.text; if t.onTitleChanged != nil: t.onTitleChanged(cmd.text))
   of cmdSetIconName: (t.screen.iconName = cmd.text; if t.onIconNameChanged != nil: t.onIconNameChanged(cmd.text))
   of cmdHyperlink: discard
-  of cmdClipboardRequest: (if t.onClipboardRequest != nil: (try: (let decoded = decode(cmd.base64Data); t.onClipboardRequest(cmd.clipboardSelector, decoded)) except: discard))
+  of cmdClipboardRequest:
+    if t.onClipboardRequest != nil:
+      let decoded = tryDecode(cmd.base64Data)
+      if decoded.isSome:
+        t.onClipboardRequest(cmd.clipboardSelector, decoded.get())
   of cmdSetPaletteColor:
     let color = parseColor(cmd.paletteColorSpec)
     if color.isSome: (let idx = cmd.paletteIndex; if idx >= 0 and idx <= 15: (t.screen.theme.ansi[idx] = toPaletteColor(color.get); t.damage.markAll()))
@@ -367,9 +413,16 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdShellCommandFinished:
     t.finishOutputFootprint(force = t.history.phase == sphOutput)
     t.history.markCommandFinished(t.absoluteCursorRow(), cmd.exitCode)
-  of cmdDcsPassthrough: (if t.onDcsPassthrough != nil: t.onDcsPassthrough(cmd))
+  of cmdRequestStateString:
+    t.recordDiagnostic(vt_diag.vekStateQuery, "DECRQSS", cmd.stateString)
+    discard t.sendReport(t.stateStringReport(cmd.stateString))
+  of cmdDcsPassthrough:
+    t.recordDiagnostic(vt_diag.vekUnknownDcs, "DCS", $char(cmd.dcsFinal))
+    if t.onDcsPassthrough != nil: t.onDcsPassthrough(cmd)
   of cmdReset: (t.screen.reset(); t.damage.markAll())
-  of cmdIgnored, cmdUnknown: discard
+  of cmdIgnored: discard
+  of cmdUnknown:
+    t.recordDiagnostic(vt_diag.vekUnknownCsi, "unknown", $char(cmd.rawFinal))
 
 proc feedBytes*(t: Terminal, data: openArray[byte]) =
   proc vtEmit(ev: VtEvent) =
@@ -424,8 +477,8 @@ proc drain*(t: Terminal, maxBytes: int = 1_000_000): int =
 proc sendKey*(t: Terminal, ev: KeyEvent): int = (let bytes = encodeKeyEvent(ev, t.inputMode); if bytes.len == 0: 0 else: t.async.send(bytes))
 proc sendMouse*(t: Terminal, ev: MouseEvent): int = (let bytes = encodeMouseEvent(ev, t.inputMode); if bytes.len == 0: 0 else: t.async.send(bytes))
 proc sendPaste*(t: Terminal, text: string): int = (let bytes = encodePaste(text, t.inputMode); if bytes.len == 0: 0 else: t.async.send(bytes))
-proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusReporting: 0 else: t.async.send(cast[seq[byte]](reportFocus(gained))))
-proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.async.send(cast[seq[byte]](reportClipboard(selector, encoded))))
+proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusReporting: 0 else: t.sendReport(reportFocus(gained)))
+proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.sendReport(reportClipboard(selector, encoded)))
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())
 proc resizeView*(t: Terminal, cols, rows: int) = (t.screen.resizePreserveBottom(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.drag.height = rows; t.refreshViewport())

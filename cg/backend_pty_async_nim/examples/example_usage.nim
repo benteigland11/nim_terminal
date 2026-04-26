@@ -12,7 +12,8 @@ let backend = MockB()
 let p = newAsyncPty(backend, 1)
 
 # 3. Queue some data
-discard p.send(cast[seq[byte]]("Hello Shell"))
+let message = "Hello Shell"
+discard p.send(message.toOpenArrayByte(0, message.high))
 
 # 4. Flush in your main loop
 let written = p.flush()

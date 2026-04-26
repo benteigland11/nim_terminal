@@ -20,6 +20,9 @@ suite "glyph atlas":
       let glyph = atlas.getGlyph(uint32('A'))
       check glyph.width == atlas.cellWidth
       check glyph.height == atlas.cellHeight
+      check atlas.padding > 0
+      check glyph.uvMin.x > 0
+      check glyph.uvMin.y > 0
     else:
       skip()
 
