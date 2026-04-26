@@ -22,6 +22,7 @@ func translateErrorCode*(code: int64): string =
   of 6: "The handle is invalid (ERROR_INVALID_HANDLE)"
   of 109: "The pipe has been ended (ERROR_BROKEN_PIPE)"
   of 232: "The pipe is being closed (ERROR_NO_DATA)"
+  of 267: "The directory name is invalid (ERROR_DIRECTORY)"
   of 997: "Overlapped I/O operation is in progress (ERROR_IO_PENDING)"
   # Common HRESULTs (cast to int64)
   of -2147024809: "Invalid parameter (E_INVALIDARG)" # 0x80070057

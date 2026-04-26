@@ -21,6 +21,7 @@ import ../cg/universal_path_candidates_nim/src/path_candidates_lib
 import ../cg/universal_split_pane_tree_nim/src/split_pane_tree_lib as pane_tree
 import ../cg/universal_resource_budget_nim/src/resource_budget_lib
 import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
+import ../cg/backend_system_clipboard_nim/src/system_clipboard_lib
 
 const
   DefaultWindowTitle = "Waymark - Built with Nim"
@@ -116,6 +117,9 @@ var
   dragStartWinY: cint = 0
   fallbackTypefaces: seq[Typeface] = @[]
   gpuSnapshotPath = getEnv("WAYMARK_GPU_SNAPSHOT_PATH", "")
+  lifecycleChaosCycles = 0
+  keyTextFallback = false
+  inputDebug = false
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -268,16 +272,19 @@ proc updateChromeHeights() =
   headerHeight = titleBarHeight + tabBarHeight
 
 proc refreshTabCwdLabels(): bool =
-  for wi in 0 ..< workspaces.len:
-    if workspaces[wi].sessions.len == 0: continue
-    let activeIdx = workspaces[wi].activeSessionIndex()
-    if activeIdx < 0: continue
-    let cwd = processCwd(workspaces[wi].sessions[activeIdx].terminal.host.pid)
-    if cwd.isNone or cwd.get() == workspaces[wi].sessions[activeIdx].cwd: continue
-    workspaces[wi].sessions[activeIdx].cwd = cwd.get()
-    let label = cwdLabel(cwd.get())
-    if tabs.rename(workspaces[wi].id, label):
-      result = true
+  when defined(windows):
+    false
+  else:
+    for wi in 0 ..< workspaces.len:
+      if workspaces[wi].sessions.len == 0: continue
+      let activeIdx = workspaces[wi].activeSessionIndex()
+      if activeIdx < 0: continue
+      let cwd = processCwd(workspaces[wi].sessions[activeIdx].terminal.host.pid)
+      if cwd.isNone or cwd.get() == workspaces[wi].sessions[activeIdx].cwd: continue
+      workspaces[wi].sessions[activeIdx].cwd = cwd.get()
+      let label = cwdLabel(cwd.get())
+      if tabs.rename(workspaces[wi].id, label):
+        result = true
 
 proc activeSessionCwd(fallback = ""): string =
   let workspace = activeWorkspace()
@@ -286,10 +293,36 @@ proc activeSessionCwd(fallback = ""): string =
   let idx = workspace[].activeSessionIndex()
   if idx < 0:
     return if fallback.len > 0: fallback else: getCurrentDir()
-  let live = processCwd(workspace[].sessions[idx].terminal.host.pid)
-  if live.isSome:
-    workspace[].sessions[idx].cwd = live.get()
+  when not defined(windows):
+    let live = processCwd(workspace[].sessions[idx].terminal.host.pid)
+    if live.isSome:
+      workspace[].sessions[idx].cwd = live.get()
   workspace[].sessions[idx].cwd
+
+proc validSessionCwd(candidate: string): string =
+  let expanded = expandTilde(candidate.strip())
+  if expanded.len > 0 and dirExists(expanded):
+    return expanded
+  let current = getCurrentDir()
+  if current.len > 0 and dirExists(current):
+    return current
+  let home = getHomeDir()
+  if home.len > 0 and dirExists(home):
+    return home
+  when defined(windows):
+    let userProfile = getEnv("USERPROFILE", "")
+    if userProfile.len > 0 and dirExists(userProfile):
+      return userProfile
+    let homeDrive = getEnv("HOMEDRIVE", "")
+    let homePath = getEnv("HOMEPATH", "")
+    if homeDrive.len > 0 and homePath.len > 0 and dirExists(homeDrive & homePath):
+      return homeDrive & homePath
+    let temp = getEnv("TEMP", "")
+    if temp.len > 0 and dirExists(temp):
+      return temp
+    if dirExists("C:\\"):
+      return "C:\\"
+  ""
 
 proc shellArgsFor(cwd: string): seq[string] =
   when defined(windows):
@@ -358,20 +391,21 @@ proc paneBudgetAllows(workspace: TerminalWorkspace, requested = 1): bool =
   decision.allowed
 
 proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
+  let sessionCwd = validSessionCwd(cwd)
   let term = newTerminal(
     config.shellProgram,
-    shellArgsFor(cwd),
-    cwd = cwd,
+    shellArgsFor(sessionCwd),
+    cwd = sessionCwd,
     cols = paneCols(area),
     rows = paneRows(area),
     scrollback = config.scrollback,
     diagnosticsCapacity = config.diagnosticsCapacity,
   )
   applyConfiguredTheme(term)
-  TerminalSession(id: paneId, terminal: term, cwd: cwd)
+  TerminalSession(id: paneId, terminal: term, cwd: sessionCwd)
 
 proc addTerminalTab() =
-  let cwd = activeSessionCwd()
+  let cwd = validSessionCwd(activeSessionCwd())
   let label = cwdLabel(cwd)
   let id = tabs.addTab(label)
   var workspace = TerminalWorkspace(id: id, panes: pane_tree.newSplitPaneTree(), sessions: @[])
@@ -384,7 +418,7 @@ proc splitActivePane() =
   if workspace == nil: return
   if not workspace[].paneBudgetAllows(): return
   let sourcePane = workspace[].panes.active
-  let cwd = activeSessionCwd()
+  let cwd = validSessionCwd(activeSessionCwd())
   let fresh = workspace[].panes.splitActiveAppend()
   let layouts = workspace[].panes.layouts(contentRect())
   var area = contentRect()
@@ -543,14 +577,79 @@ proc writeGpuSnapshot() =
   except CatchableError:
     discard
 
+proc copyToClipboard(text: string) =
+  let copied = copyText(text)
+  if not copied.success:
+    window.setClipboardString(cstring(text))
+
+proc closeAllWorkspaces() =
+  for workspace in workspaces:
+    for session in workspace.sessions:
+      session.terminal.close()
+  workspaces.setLen(0)
+  tabs = newTabSet()
+
+proc renderOnce() =
+  drawActiveWorkspace()
+  rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
+  swapBuffers(window)
+  writeGpuSnapshot()
+
+proc runLifecycleChaos(cycles: int) =
+  if cycles <= 0: return
+  var maxTabs = 0
+  var maxPanes = 0
+  for i in 0 ..< cycles:
+    case i mod 8
+    of 0:
+      addTerminalTab()
+    of 1, 2:
+      splitActivePane()
+    of 3:
+      closeActivePane()
+    of 4:
+      if tabs.activeId.isSome and tabs.tabs.len > 1:
+        removeTerminalTab(tabs.activeId.get())
+    of 5:
+      fontSize += 1.0
+      rebuildAtlas()
+    of 6:
+      fontSize = max(4.0, fontSize - 1.0)
+      rebuildAtlas()
+    else:
+      winWidth = if winWidth == 1280: 960 else: 1280
+      winHeight = if winHeight == 720: 640 else: 720
+      glViewport(0, 0, cint(winWidth), cint(winHeight))
+      resizeTerminals()
+
+    maxTabs = max(maxTabs, tabs.tabs.len)
+    let workspace = activeWorkspace()
+    if workspace != nil:
+      maxPanes = max(maxPanes, workspace[].sessions.len)
+      for session in workspace[].sessions.mitems:
+        session.terminal.damage.markAll()
+    renderOnce()
+    pollEvents()
+
+  let snap = rend.gpuSnapshot()
+  echo "[chaos] cycles=", cycles,
+       " max_tabs=", maxTabs,
+       " max_panes=", maxPanes,
+       " gpu_live_bytes=", snap.totalLiveBytes,
+       " gpu_peak_bytes=", snap.totalPeakBytes,
+       " live_resources=", snap.leakCount(),
+       " anomalies=", snap.anomalies.len
+
 # ---------------------------------------------------------------------------
 # GLFW Callbacks
 # ---------------------------------------------------------------------------
 
 proc onChar(win: Window, codepoint: cuint) {.cdecl.} =
+  if keyTextFallback: return
   let term = activeTerm()
   if term == nil: return
-  discard term.sendKey(keyChar(uint32(codepoint)))
+  let sent = term.sendKey(keyChar(uint32(codepoint)))
+  if inputDebug: echo "[input] char codepoint=", codepoint, " queued=", sent
   term.damage.markAll()
 
 proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
@@ -558,6 +657,7 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
     let term = activeTerm()
     if term == nil: return
     let m = castSet(mods)
+    if inputDebug: echo "[input] key key=", key, " action=", action, " mods=", mods
 
     if terminal.modCtrl in m and terminal.modShift in m and key == KEY_T:
       addTerminalTab()
@@ -597,7 +697,7 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
             var res = newSeq[CellData](row.len)
             for i, c in row: res[i] = CellData(rune: c.rune, width: int(c.width))
             res
-          window.setClipboardString(cstring(text))
+          copyToClipboard(text)
         return
       of "paste":
         let text = window.getClipboardString()
@@ -613,14 +713,23 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
     if terminal.modCtrl in m or terminal.modAlt in m:
       let ch = toPrintableRune(key, mods)
       if ch.isSome:
-        discard term.sendKey(keyChar(ch.get(), m))
+        let sent = term.sendKey(keyChar(ch.get(), m))
+        if inputDebug: echo "[input] modified printable codepoint=", ch.get(), " queued=", sent
+        term.damage.markAll()
+        return
+    elif keyTextFallback:
+      let ch = toPrintableRune(key, mods)
+      if ch.isSome:
+        let sent = term.sendKey(keyChar(ch.get(), m))
+        if inputDebug: echo "[input] fallback printable codepoint=", ch.get(), " queued=", sent
         term.damage.markAll()
         return
 
     # 3. Standard keys
     let tk = toKeyCode(key).int
     if tk != 0 and tk != 1: # 0 = kNone, 1 = kChar
-      discard term.sendKey(terminal.key(cast[terminal.KeyCode](tk), m))
+      let sent = term.sendKey(terminal.key(cast[terminal.KeyCode](tk), m))
+      if inputDebug: echo "[input] special key=", tk, " queued=", sent
       term.damage.markAll()
 
 proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
@@ -770,12 +879,25 @@ proc onResize(win: Window, width, height: cint) {.cdecl.} =
 
 config = loadTerminalConfig()
 fontSize = config.fontSize
+lifecycleChaosCycles = parseIntOr(getEnv("WAYMARK_LIFECYCLE_CHAOS_CYCLES", "0"), 0)
+keyTextFallback =
+  when defined(windows):
+    getEnv("WAYMARK_KEY_TEXT_FALLBACK", "1") != "0"
+  else:
+    getEnv("WAYMARK_KEY_TEXT_FALLBACK", "0") == "1"
+inputDebug = getEnv("WAYMARK_INPUT_DEBUG", "0") == "1"
 
 if init() == 0: quit("Failed to init GLFW")
 windowHint(CONTEXT_VERSION_MAJOR, 2); windowHint(CONTEXT_VERSION_MINOR, 1)
 window = createWindow(cint(winWidth), cint(winHeight), cstring(config.title), nil, nil)
 if window == nil: quit("Failed to create window")
 makeContextCurrent(window); loadExtensions()
+var fbWidth, fbHeight: cint
+getFramebufferSize(window, addr fbWidth, addr fbHeight)
+if fbWidth > 0 and fbHeight > 0:
+  winWidth = int(fbWidth)
+  winHeight = int(fbHeight)
+  glViewport(0, 0, fbWidth, fbHeight)
 
 fallbackTypefaces = loadFallbackTypefaces()
 let atlas = makeAtlas(fontSize, font)
@@ -791,6 +913,15 @@ discard window.setScrollCallback(onScroll); discard window.setFramebufferSizeCal
 
 onResize(window, cint(winWidth), cint(winHeight))
 writeGpuSnapshot()
+
+if lifecycleChaosCycles > 0:
+  runLifecycleChaos(lifecycleChaosCycles)
+  closeAllWorkspaces()
+  if rend != nil:
+    rend.dispose()
+    writeGpuSnapshot()
+  terminate()
+  quit(0)
 
 let perf = newPerfMonitor()
 while windowShouldClose(window) == 0:

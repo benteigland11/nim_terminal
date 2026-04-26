@@ -27,10 +27,22 @@ when defined(windows):
   proc InitializeProcThreadAttributeList*(lpAttributeList: pointer, dwAttributeCount: DWORD, dwFlags: DWORD, lpSize: ptr SIZE_T): WINBOOL {.stdcall, importc: "InitializeProcThreadAttributeList", dynlib: "kernel32.dll".}
   proc UpdateProcThreadAttribute*(lpAttributeList: pointer, dwFlags: DWORD, Attribute: SIZE_T, lpValue: pointer, cbSize: SIZE_T, lpPreviousValue: pointer, lpReturnSize: ptr SIZE_T): WINBOOL {.stdcall, importc: "UpdateProcThreadAttribute", dynlib: "kernel32.dll".}
   proc DeleteProcThreadAttributeList*(lpAttributeList: pointer) {.stdcall, importc: "DeleteProcThreadAttributeList", dynlib: "kernel32.dll".}
+  proc CreateProcessWithStartupInfoExW(
+    lpApplicationName, lpCommandLine: WideCString,
+    lpProcessAttributes: ptr SECURITY_ATTRIBUTES,
+    lpThreadAttributes: ptr SECURITY_ATTRIBUTES,
+    bInheritHandles: WINBOOL,
+    dwCreationFlags: int32,
+    lpEnvironment: pointer,
+    lpCurrentDirectory: WideCString,
+    lpStartupInfo: ptr STARTUPINFOEXW,
+    lpProcessInformation: var PROCESS_INFORMATION,
+  ): WINBOOL {.stdcall, importc: "CreateProcessW", dynlib: "kernel32.dll".}
 
   const
     EXTENDED_STARTUPINFO_PRESENT = 0x00080000'i32
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016'u
+    ERROR_DIRECTORY = 267'i64
 
   type
     WindowsBackend* = ref object
@@ -79,23 +91,38 @@ when defined(windows):
     var avail: DWORD
     if PeekNamedPipe(Handle(b.ptyOut.value), nil, 0, nil, addr avail, nil) == 0:
       let err = osLastError().int64
-      if err == 109: return -1 # ERROR_BROKEN_PIPE
+      if err == 109: return 0 # ERROR_BROKEN_PIPE
+      when defined(windows):
+        if getEnv("WAYMARK_INPUT_DEBUG", "0") == "1":
+          echo "[pty-read] peek failed error=", err
       return -1
 
-    if avail == 0: return 0
+    if avail == 0: return -1
 
     var bytesRead: int32
     if readFile(Handle(b.ptyOut.value), addr buf[0], int32(buf.len), addr bytesRead, nil) == 0:
       let err = osLastError().int64
-      if err == 109: return -1 # ERROR_BROKEN_PIPE
+      if err == 109: return 0 # ERROR_BROKEN_PIPE
+      when defined(windows):
+        if getEnv("WAYMARK_INPUT_DEBUG", "0") == "1":
+          echo "[pty-read] read failed error=", err
       return -1
+    when defined(windows):
+      if getEnv("WAYMARK_INPUT_DEBUG", "0") == "1":
+        echo "[pty-read] avail=", avail, " read=", bytesRead
     int(bytesRead)
 
   proc ptyWrite*(b: WindowsBackend, h: int, data: openArray[byte]): int =
     if data.len == 0: return 0
     var bytesWritten: int32
     if writeFile(Handle(b.ptyIn.value), unsafeAddr data[0], int32(data.len), addr bytesWritten, nil) == 0:
+      when defined(windows):
+        if getEnv("WAYMARK_INPUT_DEBUG", "0") == "1":
+          echo "[pty-write] failed len=", data.len, " error=", osLastError().int64
       return -1
+    when defined(windows):
+      if getEnv("WAYMARK_INPUT_DEBUG", "0") == "1":
+        echo "[pty-write] len=", data.len, " wrote=", bytesWritten
     int(bytesWritten)
 
   proc ptyResize*(b: WindowsBackend, h: int, rows, cols: int) =
@@ -154,8 +181,13 @@ when defined(windows):
 
     let flags = EXTENDED_STARTUPINFO_PRESENT
 
-    if createProcessW(nil, wCmdLine, nil, nil, 0, int32(flags), nil, pCwd, si.StartupInfo, pi) == 0:
-      raiseWinError(osLastError().int64, "CreateProcessW")
+    if CreateProcessWithStartupInfoExW(nil, wCmdLine, nil, nil, 0, int32(flags), nil, pCwd, addr si, pi) == 0:
+      let err = osLastError().int64
+      if err == ERROR_DIRECTORY and pCwd != nil:
+        if CreateProcessWithStartupInfoExW(nil, wCmdLine, nil, nil, 0, int32(flags), nil, nil, addr si, pi) == 0:
+          raiseWinError(osLastError().int64, "CreateProcessW")
+      else:
+        raiseWinError(err, "CreateProcessW")
 
     DeleteProcThreadAttributeList(attrList)
     dealloc(attrList)
