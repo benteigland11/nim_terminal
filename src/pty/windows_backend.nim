@@ -162,7 +162,7 @@ when defined(windows):
       raiseWinError(osLastError().int64, "InitializeProcThreadAttributeList")
 
     var hPC = b.hPC
-    if UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, addr hPC, cast[SIZE_T](sizeof(HPCON)), nil, nil) == 0:
+    if UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, cast[pointer](hPC), cast[SIZE_T](sizeof(HPCON)), nil, nil) == 0:
       raiseWinError(osLastError().int64, "UpdateProcThreadAttribute")
 
     var si: STARTUPINFOEXW
