@@ -39,7 +39,8 @@ proc beginBatch*(b: TileBatcher) =
     when not defined(glHeadless):
       try:
         glGenBuffers(1, addr b.vboId)
-      except: glActive = false
+      except CatchableError:
+        glActive = false
     else: b.vboId = 1
   b.count = 0
 

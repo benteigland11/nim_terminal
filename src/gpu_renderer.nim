@@ -221,8 +221,22 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
   r.addChromeText(plusX, textY, winWidth, winHeight, "+", text, 1)
   r.batcher.endBatch()
 
-proc draw*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, topOffsetPx: int = 0) =
+proc drawPaneBorder*(r: GpuTerminalRenderer, x, y, w, h, winWidth, winHeight: int, active: bool) =
+  if w <= 0 or h <= 0: return
+  let border =
+    if active: tile_batcher_lib.rgba(0.00, 0.73, 0.42, 1.0)
+    else: tile_batcher_lib.rgba(0.16, 0.19, 0.22, 1.0)
+  r.batcher.textureId = r.bgTexId
+  r.batcher.beginBatch()
+  r.addRect(x, y, w, 1, winWidth, winHeight, border)
+  r.addRect(x, y + h - 1, w, 1, winWidth, winHeight, border)
+  r.addRect(x, y, 1, h, winWidth, winHeight, border)
+  r.addRect(x + w - 1, y, 1, h, winWidth, winHeight, border)
+  r.batcher.endBatch()
+
+proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, x, y, w, h: int) =
   ## Optimized single-pass rendering.
+  if w <= 0 or h <= 0: return
   let s = t.screen; let theme = s.theme
   let rows = max(1, t.viewport.height); let cols = s.cols
 
@@ -234,29 +248,28 @@ proc draw*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, topOff
   let cw = float32(r.atlas.cellWidth); let ch = float32(r.atlas.cellHeight)
   let sw = float32(winWidth); let sh = float32(winHeight)
   let tw = (cw / sw) * 2.0; let th = (ch / sh) * 2.0
-  let topOffset = (float32(topOffsetPx) / sh) * 2.0
 
   glEnable(GL_TEXTURE_2D); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
   # --- ONE PASS FOR ALL BACKGROUNDS ---
   r.batcher.textureId = r.bgTexId
   r.batcher.beginBatch()
-  r.batcher.addTile(-1.0, 1.0 - topOffset, 2.0, 2.0 - topOffset, 0, 0, 1, 1, tBg) # Screen fill
+  r.addRect(x, y, w, h, winWidth, winHeight, tBg)
 
   for row in 0 ..< rows:
     let absRow = t.viewport.viewportToBuffer(row)
     let cells = s.absoluteRowAt(absRow)
     if cells.len == 0: continue
-    let py = 1.0 - topOffset - (float32(row) * th)
+    let py = ndcY(y + row * r.atlas.cellHeight, winHeight)
     for col in 0 ..< min(cols, cells.len):
       let cell = cells[col]
       if cell.attrs.bg.kind != screen_buffer_lib.ckDefault:
         let color = resolveColor(cell.attrs.bg, tAnsi)
-        r.batcher.addTile(-1.0 + (float32(col)*tw), py, tw*float32(cell.width), th, 0, 0, 1, 1, color)
+        r.batcher.addTile(ndcX(x + col * r.atlas.cellWidth, winWidth), py, tw*float32(cell.width), th, 0, 0, 1, 1, color)
   # Cursor
   let cvr = t.viewport.bufferToViewport(s.absoluteCursorRow())
   if cvr != -1 and s.cursor.visible and not s.cursor.pendingWrap:
-    r.batcher.addTile(-1.0 + (float32(s.cursor.col)*tw), 1.0 - topOffset - (float32(cvr)*th), tw, th, 0, 0, 1, 1, tCursor)
+    r.batcher.addTile(ndcX(x + s.cursor.col * r.atlas.cellWidth, winWidth), ndcY(y + cvr * r.atlas.cellHeight, winHeight), tw, th, 0, 0, 1, 1, tCursor)
 
   # --- PASS 1.5: SELECTION HIGHLIGHT & LINKS ---
   if t.selection.isActive:
@@ -264,18 +277,18 @@ proc draw*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, topOff
     for sp in t.selection.spans(cols):
       let vRow = t.viewport.bufferToViewport(sp.row)
       if vRow != -1:
-        let px = -1.0 + (float32(sp.startCol) * tw)
-        let py = 1.0 - topOffset - (float32(vRow) * th)
+        let px = ndcX(x + sp.startCol * r.atlas.cellWidth, winWidth)
+        let py = ndcY(y + vRow * r.atlas.cellHeight, winHeight)
         r.batcher.addTile(px, py, tw * float32(sp.endCol - sp.startCol), th, 0, 0, 1, 1, tSel)
 
   if t.activeLink.isSome:
     let al = t.activeLink.get()
     let vRow = t.viewport.bufferToViewport(al.row)
     if vRow != -1:
-      let px = -1.0 + (float32(al.startCol) * tw)
+      let px = ndcX(x + al.startCol * r.atlas.cellWidth, winWidth)
       # Draw a thin line at the bottom of the cell (y offset)
       let lineTh = th * 0.05
-      let py = 1.0 - topOffset - (float32(vRow) * th) - (th - lineTh)
+      let py = ndcY(y + vRow * r.atlas.cellHeight, winHeight) - (th - lineTh)
       r.batcher.addTile(px, py, tw * float32(al.endCol - al.startCol), lineTh, 0, 0, 1, 1, tCursor)
 
   r.batcher.endBatch()
@@ -287,14 +300,17 @@ proc draw*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, topOff
     let absRow = t.viewport.viewportToBuffer(row)
     let cells = s.absoluteRowAt(absRow)
     if cells.len == 0: continue
-    let py = 1.0 - topOffset - (float32(row) * th)
+    let py = ndcY(y + row * r.atlas.cellHeight, winHeight)
     for col in 0 ..< min(cols, cells.len):
       let cell = cells[col]
       if cell.rune > 32:
         let glyph = r.atlas.getGlyph(cell.rune)
         let color = if cell.attrs.fg.kind == screen_buffer_lib.ckDefault: tFg
                     else: resolveColor(cell.attrs.fg, tAnsi)
-        r.batcher.addTile(-1.0 + (float32(col)*tw), py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
+        r.batcher.addTile(ndcX(x + col * r.atlas.cellWidth, winWidth), py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
   r.batcher.endBatch()
   glFlush()
   t.damage.clear()
+
+proc draw*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, topOffsetPx: int = 0) =
+  r.drawInRect(t, winWidth, winHeight, 0, topOffsetPx, winWidth, max(1, winHeight - topOffsetPx))

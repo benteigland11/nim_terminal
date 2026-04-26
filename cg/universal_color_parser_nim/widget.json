@@ -2,7 +2,7 @@
   "meta": {
     "id": "universal-color-parser-nim",
     "name": "Color Parser",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "domain": "universal",
     "tags": [
       "color",
@@ -24,8 +24,8 @@
     "domain": "Use this domain when a widget spans multiple domains or has no clear home \u2014 not because it must be pure. A retry utility, a date formatter, a general-purpose HTTP client all belong here. Expose variation points as parameters. Don't force it into a domain just to avoid universal."
   },
   "validation": {
-    "engine_version": 1,
-    "validated_at": "2026-04-25T17:37:48.076367+00:00",
+    "engine_version": 3,
+    "validated_at": "2026-04-26T04:14:46.675987+00:00",
     "runtime": "nim 2.2.8"
   }
 }

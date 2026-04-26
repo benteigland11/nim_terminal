@@ -50,7 +50,7 @@ func parseColor*(spec: string): Option[RgbColor] =
       let parts = s[4..^1].split('/')
       if parts.len == 3:
         return some(rgb(hexToByte(parts[0]), hexToByte(parts[1]), hexToByte(parts[2])))
-  except:
+  except ValueError:
     discard
     
   none(RgbColor)

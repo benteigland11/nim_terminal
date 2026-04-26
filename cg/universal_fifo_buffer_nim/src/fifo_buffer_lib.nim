@@ -56,7 +56,8 @@ proc write*(b: FifoBuffer, data: openArray[byte]): int =
 
 proc writeString*(b: FifoBuffer, s: string): int =
   ## Write as many bytes as possible from `s`.
-  b.write(cast[seq[byte]](s))
+  if s.len == 0: return 0
+  b.write(s.toOpenArrayByte(0, s.high))
 
 # ---------------------------------------------------------------------------
 # Reading

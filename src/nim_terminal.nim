@@ -18,6 +18,7 @@ import ../cg/universal_os_launcher_nim/src/os_launcher_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
 import ../cg/universal_process_cwd_nim/src/process_cwd_lib
 import ../cg/universal_path_candidates_nim/src/path_candidates_lib
+import ../cg/universal_split_pane_tree_nim/src/split_pane_tree_lib as pane_tree
 
 const
   DefaultWindowTitle = "Nim Terminal"
@@ -38,10 +39,20 @@ const
   ]
 
 type
+  PaneId = pane_tree.PaneId
+  SplitPaneTree = pane_tree.SplitPaneTree
+  PaneLayout = pane_tree.PaneLayout
+  PaneRect = pane_tree.Rect
+
   TerminalSession = object
-    id: TabId
+    id: PaneId
     terminal: Terminal
     cwd: string
+
+  TerminalWorkspace = object
+    id: TabId
+    panes: SplitPaneTree
+    sessions: seq[TerminalSession]
 
   TerminalConfig = object
     title: string
@@ -69,7 +80,7 @@ var
     scrollback: DefaultScrollback,
   )
   tabs = newTabSet()
-  sessions: seq[TerminalSession] = @[]
+  workspaces: seq[TerminalWorkspace] = @[]
   rend: GpuTerminalRenderer
   window: Window
   winWidth = 1280
@@ -145,26 +156,70 @@ func castSet(s: cint): set[terminal.Modifier] =
   if (s and MOD_CONTROL) != 0: result.incl terminal.modCtrl
   if (s and MOD_SUPER) != 0: result.incl terminal.modSuper
 
-proc activeSessionIndex(): int =
+proc activeWorkspaceIndex(): int =
   if tabs.activeId.isNone: return -1
   let activeId = tabs.activeId.get()
-  for i, session in sessions:
-    if session.id == activeId: return i
+  for i, workspace in workspaces:
+    if workspace.id == activeId: return i
   -1
 
+proc activeWorkspace(): ptr TerminalWorkspace =
+  let idx = activeWorkspaceIndex()
+  if idx < 0: nil else: addr workspaces[idx]
+
+proc sessionIndex(workspace: TerminalWorkspace, paneId: PaneId): int =
+  for i, session in workspace.sessions:
+    if session.id == paneId: return i
+  -1
+
+proc activeSessionIndex(workspace: TerminalWorkspace): int =
+  workspace.sessionIndex(workspace.panes.active)
+
 proc activeTerm(): Terminal =
-  let idx = activeSessionIndex()
-  if idx < 0: nil else: sessions[idx].terminal
+  let workspace = activeWorkspace()
+  if workspace == nil: return nil
+  let idx = workspace[].activeSessionIndex()
+  if idx < 0: nil else: workspace[].sessions[idx].terminal
+
+proc sessionByPane(workspace: var TerminalWorkspace, paneId: PaneId): ptr TerminalSession =
+  let idx = workspace.sessionIndex(paneId)
+  if idx < 0: nil else: addr workspace.sessions[idx]
 
 proc contentHeight(): int = max(1, winHeight - headerHeight)
 
-proc terminalCols(): int =
+proc paneCols(area: PaneRect): int =
   if rend == nil or rend.atlas == nil or rend.atlas.cellWidth <= 0: return 1
-  max(1, winWidth div rend.atlas.cellWidth)
+  max(1, (area.w - 2) div rend.atlas.cellWidth)
 
-proc terminalRows(): int =
+proc paneRows(area: PaneRect): int =
   if rend == nil or rend.atlas == nil or rend.atlas.cellHeight <= 0: return 1
-  max(1, contentHeight() div rend.atlas.cellHeight)
+  max(1, (area.h - 2) div rend.atlas.cellHeight)
+
+proc contentRect(): PaneRect =
+  pane_tree.rect(0, headerHeight, winWidth, contentHeight())
+
+proc paneInnerRect(area: PaneRect): PaneRect =
+  if area.w <= 2 or area.h <= 2: area
+  else: pane_tree.rect(area.x + 1, area.y + 1, area.w - 2, area.h - 2)
+
+proc activePaneLayouts(): seq[PaneLayout] =
+  let idx = activeWorkspaceIndex()
+  if idx < 0: return @[]
+  workspaces[idx].panes.layouts(contentRect())
+
+proc activeSessionRect(paneId: PaneId): Option[PaneRect] =
+  for item in activePaneLayouts():
+    if item.id == paneId:
+      return some(paneInnerRect(item.rect))
+  none(PaneRect)
+
+proc focusPaneAt(x, y: int): ptr TerminalSession =
+  let wi = activeWorkspaceIndex()
+  if wi < 0: return nil
+  let hit = workspaces[wi].panes.hitTest(contentRect(), x, y)
+  if hit.isNone: return nil
+  discard workspaces[wi].panes.activate(hit.get())
+  workspaces[wi].sessionByPane(hit.get())
 
 proc updateChromeHeights() =
   titleBarHeight = config.titleBarHeight
@@ -172,12 +227,15 @@ proc updateChromeHeights() =
   headerHeight = titleBarHeight + tabBarHeight
 
 proc refreshTabCwdLabels(): bool =
-  for i in 0 ..< sessions.len:
-    let cwd = processCwd(sessions[i].terminal.host.pid)
-    if cwd.isNone or cwd.get() == sessions[i].cwd: continue
-    sessions[i].cwd = cwd.get()
+  for wi in 0 ..< workspaces.len:
+    if workspaces[wi].sessions.len == 0: continue
+    let activeIdx = workspaces[wi].activeSessionIndex()
+    if activeIdx < 0: continue
+    let cwd = processCwd(workspaces[wi].sessions[activeIdx].terminal.host.pid)
+    if cwd.isNone or cwd.get() == workspaces[wi].sessions[activeIdx].cwd: continue
+    workspaces[wi].sessions[activeIdx].cwd = cwd.get()
     let label = cwdLabel(cwd.get())
-    if tabs.rename(sessions[i].id, label):
+    if tabs.rename(workspaces[wi].id, label):
       result = true
 
 proc shellArgsFor(cwd: string): seq[string] =
@@ -188,11 +246,13 @@ proc shellArgsFor(cwd: string): seq[string] =
 
 proc resizeTerminals() =
   if rend == nil or rend.atlas == nil: return
-  let cols = terminalCols()
-  let rows = terminalRows()
-  for session in sessions:
-    session.terminal.resize(cols, rows)
-    session.terminal.damage.markAll()
+  for workspace in workspaces.mitems:
+    let layouts = workspace.panes.layouts(contentRect())
+    for item in layouts:
+      let idx = workspace.sessionIndex(item.id)
+      if idx < 0: continue
+      workspace.sessions[idx].terminal.resize(paneCols(item.rect), paneRows(item.rect))
+      workspace.sessions[idx].terminal.damage.markAll()
 
 proc applyConfiguredTheme(term: Terminal) =
   let background = parseColor(config.backgroundColor)
@@ -209,39 +269,77 @@ type ZoomAnchor = object
 
 proc resizeTerminalViewsPreservingView(anchors: seq[ZoomAnchor]) =
   if rend == nil or rend.atlas == nil: return
-  let cols = terminalCols()
-  let rows = terminalRows()
-  for i, session in sessions:
-    let anchor = if i < anchors.len: anchors[i] else: ZoomAnchor(topAbsRow: -1, absRow: -1, viewportRow: 0, atBottom: true)
-    session.terminal.resizeView(cols, rows)
-    session.terminal.viewport.restoreAnchor(
-      totalRows = session.terminal.screen.totalRows,
-      height = rows,
-      anchor = ViewAnchor(
-        topRow: anchor.topAbsRow,
-        targetRow: anchor.absRow,
-        targetViewportRow: anchor.viewportRow,
-        atBottom: anchor.atBottom,
-      ),
-      contextRowsAbove = ZoomContextRowsAbove,
-    )
-    session.terminal.damage.markAll()
+  var anchorIdx = 0
+  for workspace in workspaces.mitems:
+    let layouts = workspace.panes.layouts(contentRect())
+    for item in layouts:
+      let idx = workspace.sessionIndex(item.id)
+      if idx < 0: continue
+      let anchor = if anchorIdx < anchors.len: anchors[anchorIdx] else: ZoomAnchor(topAbsRow: -1, absRow: -1, viewportRow: 0, atBottom: true)
+      inc anchorIdx
+      let rows = paneRows(item.rect)
+      workspace.sessions[idx].terminal.resizeView(paneCols(item.rect), rows)
+      workspace.sessions[idx].terminal.viewport.restoreAnchor(
+        totalRows = workspace.sessions[idx].terminal.screen.totalRows,
+        height = rows,
+        anchor = ViewAnchor(
+          topRow: anchor.topAbsRow,
+          targetRow: anchor.absRow,
+          targetViewportRow: anchor.viewportRow,
+          atBottom: anchor.atBottom,
+        ),
+        contextRowsAbove = ZoomContextRowsAbove,
+      )
+      workspace.sessions[idx].terminal.damage.markAll()
+
+proc newSession(paneId: PaneId, area: PaneRect): TerminalSession =
+  let cwd = getCurrentDir()
+  let term = newTerminal(config.shellProgram, shellArgsFor(cwd), cwd = cwd, cols = paneCols(area), rows = paneRows(area), scrollback = config.scrollback)
+  applyConfiguredTheme(term)
+  TerminalSession(id: paneId, terminal: term, cwd: cwd)
 
 proc addTerminalTab() =
   let cwd = getCurrentDir()
   let label = cwdLabel(cwd)
   let id = tabs.addTab(label)
-  let term = newTerminal(config.shellProgram, shellArgsFor(cwd), cwd = cwd, cols = terminalCols(), rows = terminalRows(), scrollback = config.scrollback)
-  applyConfiguredTheme(term)
-  sessions.add TerminalSession(id: id, terminal: term, cwd: cwd)
+  var workspace = TerminalWorkspace(id: id, panes: pane_tree.newSplitPaneTree(), sessions: @[])
+  workspace.sessions.add newSession(workspace.panes.active, contentRect())
+  workspaces.add workspace
   resizeTerminals()
 
+proc splitActivePane() =
+  let workspace = activeWorkspace()
+  if workspace == nil: return
+  let fresh = workspace[].panes.splitActiveAppend()
+  let layouts = workspace[].panes.layouts(contentRect())
+  var area = contentRect()
+  for item in layouts:
+    if item.id == fresh:
+      area = item.rect
+      break
+  workspace[].sessions.add newSession(fresh, area)
+  resizeTerminals()
+
+proc closeActivePane() =
+  let workspace = activeWorkspace()
+  if workspace == nil or workspace[].sessions.len <= 1: return
+  let paneId = workspace[].panes.active
+  let idx = workspace[].sessionIndex(paneId)
+  if idx < 0: return
+  if not workspace[].panes.close(paneId): return
+  workspace[].sessions[idx].terminal.close()
+  workspace[].sessions.delete(idx)
+  resizeTerminals()
+  let term = activeTerm()
+  if term != nil: term.damage.markAll()
+
 proc removeTerminalTab(id: TabId) =
-  if sessions.len <= 1: return
-  for i, session in sessions:
-    if session.id == id:
-      session.terminal.close()
-      sessions.delete(i)
+  if workspaces.len <= 1: return
+  for i, workspace in workspaces:
+    if workspace.id == id:
+      for session in workspace.sessions:
+        session.terminal.close()
+      workspaces.delete(i)
       discard tabs.close(id)
       let term = activeTerm()
       if term != nil: term.damage.markAll()
@@ -253,8 +351,30 @@ proc inTitleBar(y: int): bool =
 proc inTabBar(y: int): bool =
   y >= titleBarHeight and y < headerHeight
 
-proc viewportRowFromY(y: cdouble): int =
-  (int(y) - headerHeight) div rend.atlas.cellHeight
+proc localCol(area: PaneRect, x: cdouble): int =
+  max(0, (int(x) - area.x) div rend.atlas.cellWidth)
+
+proc localRow(area: PaneRect, y: cdouble): int =
+  max(0, (int(y) - area.y) div rend.atlas.cellHeight)
+
+proc activeWorkspaceDirty(): bool =
+  let wi = activeWorkspaceIndex()
+  if wi < 0: return false
+  for session in workspaces[wi].sessions:
+    if session.terminal.damage.anyDirty: return true
+  false
+
+proc drawActiveWorkspace() =
+  let wi = activeWorkspaceIndex()
+  if wi < 0: return
+  let layouts = workspaces[wi].panes.layouts(contentRect())
+  for item in layouts:
+    let idx = workspaces[wi].sessionIndex(item.id)
+    if idx < 0: continue
+    let inner = paneInnerRect(item.rect)
+    rend.drawInRect(workspaces[wi].sessions[idx].terminal, winWidth, winHeight, inner.x, inner.y, inner.w, inner.h)
+  for item in layouts:
+    rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
 
 proc loadFallbackTypefaces(): seq[Typeface] =
   for path in config.fallbackFontPaths:
@@ -278,16 +398,17 @@ proc makeAtlas(size: float, targetFont: var Font): GlyphAtlas =
 
 proc rebuildAtlas() =
   var anchors: seq[ZoomAnchor] = @[]
-  for session in sessions:
-    let absCursor = session.terminal.screen.absoluteCursorRow()
-    let cursorViewport = session.terminal.viewport.bufferToViewport(absCursor)
-    let topAbs = session.terminal.viewport.viewportToBuffer(0)
-    anchors.add ZoomAnchor(
-      topAbsRow: topAbs,
-      absRow: absCursor,
-      viewportRow: if cursorViewport >= 0: cursorViewport else: max(0, session.terminal.viewport.height - 1),
-      atBottom: session.terminal.viewport.isAtBottom,
-    )
+  for workspace in workspaces:
+    for session in workspace.sessions:
+      let absCursor = session.terminal.screen.absoluteCursorRow()
+      let cursorViewport = session.terminal.viewport.bufferToViewport(absCursor)
+      let topAbs = session.terminal.viewport.viewportToBuffer(0)
+      anchors.add ZoomAnchor(
+        topAbsRow: topAbs,
+        absRow: absCursor,
+        viewportRow: if cursorViewport >= 0: cursorViewport else: max(0, session.terminal.viewport.height - 1),
+        atBottom: session.terminal.viewport.isAtBottom,
+      )
   let atlas = makeAtlas(fontSize, font)
   let chromeAtlas = makeAtlas(config.fontSize, chromeFont)
   rend = newGpuTerminalRenderer(atlas, chromeAtlas)
@@ -311,8 +432,14 @@ proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
     if term == nil: return
     let m = castSet(mods)
 
-    if terminal.modCtrl in m and key == KEY_T:
+    if terminal.modCtrl in m and terminal.modShift in m and key == KEY_T:
       addTerminalTab()
+      return
+    if terminal.modCtrl in m and terminal.modShift in m and key == KEY_ENTER:
+      splitActivePane()
+      return
+    if terminal.modCtrl in m and terminal.modShift in m and key == KEY_W:
+      closeActivePane()
       return
     if terminal.modCtrl in m and key == KEY_TAB:
       if terminal.modShift in m: discard tabs.activatePrevious()
@@ -402,10 +529,13 @@ proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
       if term != nil: term.damage.markAll()
       return
 
-  let term = activeTerm()
-  if term == nil: return
   if int(y) < headerHeight: return
-  let col = int(x) div rend.atlas.cellWidth; let row = viewportRowFromY(y)
+  let session = focusPaneAt(int(x), int(y))
+  if session == nil: return
+  let term = session[].terminal
+  let area = activeSessionRect(session[].id)
+  if area.isNone: return
+  let col = localCol(area.get(), x); let row = localRow(area.get(), y)
   let absRow = term.viewport.viewportToBuffer(row)
   if term.inputMode.shouldIntercept(castSet(mods)):
     if button == MOUSE_BUTTON_LEFT:
@@ -437,14 +567,22 @@ proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
     )
     return
 
-  let term = activeTerm()
-  if term == nil: return
   if int(y) < headerHeight:
+    let term = activeTerm()
+    if term == nil: return
     if term.activeLink.isSome:
       term.activeLink = none(ActiveLink)
       term.damage.markAll()
     return
-  let col = int(x) div rend.atlas.cellWidth; let row = viewportRowFromY(y)
+  let wi = activeWorkspaceIndex()
+  if wi < 0: return
+  let activeId = workspaces[wi].panes.active
+  let sessionIdx = workspaces[wi].sessionIndex(activeId)
+  if sessionIdx < 0: return
+  let term = workspaces[wi].sessions[sessionIdx].terminal
+  let area = activeSessionRect(activeId)
+  if area.isNone: return
+  let col = localCol(area.get(), x); let row = localRow(area.get(), y)
   let absRow = term.viewport.viewportToBuffer(row)
   if absRow < 0: return
 
@@ -476,7 +614,9 @@ proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
       discard term.sendMouse(mouse(kind, mbLeft, row, col, castSet(0)))
 
 proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
-  let term = activeTerm()
+  var x, y: cdouble; getCursorPos(win, addr x, addr y)
+  let session = if int(y) >= headerHeight: focusPaneAt(int(x), int(y)) else: nil
+  let term = if session == nil: activeTerm() else: session[].terminal
   if term == nil: return
   let ctrlDown = (getKey(window, KEY_LEFT_CONTROL) == PRESS or getKey(window, KEY_RIGHT_CONTROL) == PRESS)
   if ctrlDown:
@@ -525,18 +665,19 @@ let perf = newPerfMonitor()
 while windowShouldClose(window) == 0:
   perf.beginFrame()
   var n = 0
-  for session in sessions:
-    let readCount = session.terminal.step()
-    if readCount > 0:
-      session.terminal.refreshViewport(stickToBottom = true)
-    n += readCount
+  for workspace in workspaces.mitems:
+    for session in workspace.sessions.mitems:
+      let readCount = session.terminal.step()
+      if readCount > 0:
+        session.terminal.refreshViewport(stickToBottom = true)
+      n += readCount
   let term = activeTerm()
   if term == nil: break
   if atlas.isDirty: rend.updateAtlasTexture()
   let tabLabelsChanged = refreshTabCwdLabels()
-  let changed = n > 0 or atlas.isDirty or term.damage.anyDirty or tabLabelsChanged
+  let changed = n > 0 or atlas.isDirty or activeWorkspaceDirty() or tabLabelsChanged
   if changed:
-    rend.draw(term, winWidth, winHeight, headerHeight)
+    drawActiveWorkspace()
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
     swapBuffers(window)
   pollEvents(); perf.endFrame()

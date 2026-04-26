@@ -405,7 +405,8 @@ proc translateOsc*(data: openArray[byte]): VtCommand =
       let idx = parseInt(asciiString(data, body, sep))
       return VtCommand(kind: cmdSetPaletteColor, paletteIndex: idx,
                        paletteColorSpec: asciiString(data, sep + 1, data.len))
-    except: return VtCommand(kind: cmdIgnored)
+    except ValueError:
+      return VtCommand(kind: cmdIgnored)
   of 10, 11, 12:
     # OSC 10/11/12 ; spec
     return VtCommand(kind: cmdSetThemeColor, themeColorItem: code,
@@ -422,7 +423,8 @@ proc translateOsc*(data: openArray[byte]): VtCommand =
       var exitCode = 0
       if sep >= 0:
         try: exitCode = parseInt(asciiString(data, sep + 1, data.len))
-        except: discard
+        except ValueError:
+          discard
       return VtCommand(kind: cmdShellCommandFinished, exitCode: exitCode)
     else: return VtCommand(kind: cmdIgnored)
   else:
