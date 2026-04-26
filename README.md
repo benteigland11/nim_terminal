@@ -1,53 +1,150 @@
 # nim_terminal
 
-A Nim terminal emulator built from the ground up as reusable
-[Cartograph](https://github.com/benteigland11/Cartograph) widgets. Every generalizable piece
-— VT parser, screen buffer, UTF-8 decoder, typed VT commands, PTY host
-— is a pure-Nim widget that can be lifted out and used in other Nim
-projects.
+A native Nim terminal emulator, assembled from 38 reusable
+[Cartograph](https://github.com/benteigland11/Cartograph) widgets.
 
 Building in the open. Expect rough edges.
 
-## Why
+<!-- DEMO GIF / asciinema cast goes here -->
 
-The long-term goal is a surface that makes it easy to attach terminal
-coding agents to a single directory — something closer to a new kind of
-IDE than a classic terminal. To get there we're pursuing full xterm-grade
-VT compliance as the first milestone. Worst case: we don't finish, and
-the Nim ecosystem picks up a handful of useful widgets along the way.
+## What this is
+
+A GPU-rendered terminal written end-to-end in Nim. Every generalizable
+piece (VT parser, screen buffer, UTF-8 decoder, glyph atlas, tile
+batcher, split-pane tree, tab set, color palette, and dozens more) is a
+self-contained widget under `cg/` that can be lifted out and dropped into
+any other Nim project.
+
+The terminal is the showcase. The widgets are the point.
+
+## What this proves
+
+- **Memory safety.** A nightly suite (Tier 1 idle baseline, Tier 2 5-min
+  soak across 5 scenarios, Tier 3 valgrind under each scenario) produces
+  a public `SUMMARY.md` with build SHAs, sample counts, slope thresholds,
+  and zero-leak verdicts. See
+  [`tests/memory/reports/`](tests/memory/reports/) and
+  [`tests/memory/README.md`](tests/memory/README.md).
+- **Composability.** 38 widgets, each independently validated, tested,
+  and installable into other projects via `cartograph install`.
+- **Performance.** GPU-accelerated rendering through a glyph atlas + tile
+  batcher. Microbenchmarks under [`benchmarks/`](benchmarks/).
+
+## Try it
+
+    git clone https://github.com/benteigland11/nim_terminal
+    cd nim_terminal
+    nim c -d:release -o:nim_terminal src/nim_terminal.nim
+    ./nim_terminal
+
+Requires Nim 2.2+, GLFW, and a working GL stack. No Cartograph install
+needed to build or run, only to lift widgets out into your own project.
 
 ## Widgets
 
-All widgets live under `cg/` and are installable/publishable via Cartograph.
-Each is pure Nim, validated, and has tests + a runnable example.
+All widgets live under `cg/` grouped by domain.
 
-| Widget                          | What it does                                                                           |
-|---------------------------------|----------------------------------------------------------------------------------------|
-| `data-vt-parser-nim`            | Paul Williams' DEC VT state machine. Bytes in, typed `VtEvent`s out.                   |
-| `data-screen-buffer-nim`        | Terminal screen grid: cursor, attrs, scroll regions, alt buffer, scrollback, resize.   |
-| `universal-utf8-decoder-nim`    | Streaming UTF-8 decoder with display-width classification (CJK/emoji/combining).       |
-| `data-vt-commands-nim`          | Typed translator from raw parser dispatches to semantic `VtCommand` variants.          |
-| `backend-pty-host-nim`          | Platform-neutral PTY orchestrator: `PtyBackend` concept + generic `PtyHost[B]`.        |
+### universal (pure utilities, no domain dependency)
+
+<details><summary>24 widgets</summary>
+
+| Widget | Purpose |
+|---|---|
+| `universal-base64-nim` | Base64 encode/decode via stdlib. |
+| `universal-benchmark-suite-nim` | Microbenchmark harness with warmup, batched runs, ns summaries. |
+| `universal-color-palette-nim` | Terminal color palette, xterm-256 mapping, RGB utilities. |
+| `universal-color-parser-nim` | Parser for X11/xterm color specs (`#RGB`, `rgb:RR/GG/BB`, ...). |
+| `universal-damage-tracker-nim` | Mark-and-sweep damage tracker over indexed linear ranges. |
+| `universal-drag-controller-nim` | Grid-based drag interaction state machine with auto-scroll. |
+| `universal-fifo-buffer-nim` | Fixed-capacity ring buffer for byte streams. |
+| `universal-glyph-atlas-nim` | Pre-renders font glyphs into a cacheable atlas. |
+| `universal-input-types-nim` | Platform-neutral keyboard/mouse event types. |
+| `universal-link-detector-nim` | Pure-Nim scanner for HTTP(S) links and file paths in text. |
+| `universal-os-launcher-nim` | Cross-platform "open URL/path in native handler". |
+| `universal-path-candidates-nim` | Resolve candidate file paths with anchoring + tilde expansion. |
+| `universal-perf-monitor-nim` | High-resolution FPS / frame-latency monitor. |
+| `universal-process-cwd-nim` | Resolve a process CWD via procfs and derive compact UI labels. |
+| `universal-resource-budget-nim` | Generic soft/hard budget evaluator for bounded systems. |
+| `universal-resource-ledger-nim` | Live/peak resource lifetime accounting (count + bytes). |
+| `universal-selection-region-nim` | Pure (row, col) selection geometry: anchor, focus, mode. |
+| `universal-shortcut-map-nim` | Framework-agnostic keyboard/mouse shortcut lookup. |
+| `universal-split-pane-tree-nim` | Pure split-pane tree with active-leaf tracking and H/V splits. |
+| `universal-tab-set-nim` | Stable-id tab state: add, activate, rename, close, reorder. |
+| `universal-tile-batcher-nim` | Single-pass OpenGL batched-quad renderer. |
+| `universal-utf8-decoder-nim` | Streaming UTF-8 decoder; handles splits, overlong, surrogates. |
+| `universal-viewport-nim` | Coordinate-mapping viewport for buffers with scrollback. |
+| `universal-windows-error-nim` | Translates Win32 error codes / HRESULTs to readable strings. |
+| `universal-windows-handle-nim` | RAII wrapper for integer Windows HANDLEs. |
+
+</details>
+
+### data (terminal-specific state and protocol)
+
+<details><summary>11 widgets</summary>
+
+| Widget | Purpose |
+|---|---|
+| `data-vt-parser-nim` | Paul Williams' DEC VT500 state machine. Bytes in, typed events out. |
+| `data-vt-commands-nim` | Translates raw CSI/ESC/OSC/C0 dispatches into semantic `VtCommand`s. |
+| `data-vt-reports-nim` | Generator for terminal response strings (DSR, DA, window state). |
+| `data-vt-diagnostics-nim` | Bounded ring buffer of recent unknown VT events / mode changes. |
+| `data-screen-buffer-nim` | Cells, cursor, attrs, scroll regions, alt buffer, scrollback, resize. |
+| `data-input-vt-encoding-nim` | Encodes input events into terminal escape sequences. |
+| `data-semantic-history-nim` | OSC 133 shell-integration state machine for command history. |
+| `data-terminal-render-attrs-nim` | Resolves SGR + colors into final per-cell render attributes. |
+| `data-terminal-theme-nim` | Color scheme / theme representation and management. |
+| `data-terminal-output-footprint-nim` | State machine for inline UIs that draw below the cursor. |
+| `data-pixel-resource-size-nim` | Byte-size estimation for 2D textures and pixel-backed resources. |
+
+</details>
+
+### backend (process and PTY orchestration)
+
+| Widget | Purpose |
+|---|---|
+| `backend-pty-host-nim` | Platform-neutral PTY orchestrator: `PtyBackend` concept + `PtyHost[B]`. |
+| `backend-pty-async-nim` | Non-blocking PTY orchestrator with a write queue. |
+
+### frontend (windowing and input)
+
+| Widget | Purpose |
+|---|---|
+| `frontend-glfw-input-nim` | Translates raw GLFW window events into terminal input types. |
+
+## Architecture
+
+Bytes from the child PTY flow up through the widget stack:
+
+    PTY ──► vt-parser ──► vt-commands ──► screen-buffer ──┐
+                                                          │
+    GLFW ──► glfw-input ──► input-vt-encoding ──► PTY     │
+                                                          ▼
+                          glyph-atlas + tile-batcher ◄─ render-attrs
+                                       │
+                                       ▼
+                                  GPU (OpenGL)
+
+`src/` is the project-specific glue that wires widgets together; it
+isn't reusable on its own.
 
 ## Project-level code
 
-Some pieces can't be widgets because they require FFI that isn't yet in
-the Nim stdlib (see [Known Issues](#known-issues)). Those live under
-`src/` as project-specific glue:
+Some pieces can't be widgets yet because they require FFI that isn't in
+the Nim stdlib. Those live under `src/` as project-specific glue:
 
     src/pty/posix_backend.nim   POSIX implementation of PtyBackend using
-                                posix_openpt / grantpt / unlockpt / ptsname
-                                / ioctl / fork / setsid / dup2 / execvp.
+                                posix_openpt / grantpt / unlockpt /
+                                ptsname / ioctl / fork / setsid / dup2 /
+                                execvp.
 
-## Known Issues
+## Known issues
 
-See [`NOTES.md`](NOTES.md) for tracked project issues — things we've
-noticed but aren't solving today. Notably:
+See [`NOTES.md`](NOTES.md) for tracked project issues. Notably:
 
 - `std/posix` is missing five PTY primitives. We have a workaround
   (project-level FFI in `src/pty/`) but ultimately those entry points
-  should land in stdlib or a shared nimble package so widgets can stay
-  pure Nim.
+  should land in stdlib or a shared nimble package so the PTY backend
+  can stay pure Nim.
 
 ## License
 
