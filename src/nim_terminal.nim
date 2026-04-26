@@ -228,6 +228,38 @@ proc sessionByPane(workspace: var TerminalWorkspace, paneId: PaneId): ptr Termin
   let idx = workspace.sessionIndex(paneId)
   if idx < 0: nil else: addr workspace.sessions[idx]
 
+proc refreshSessionCwd(session: var TerminalSession): bool =
+  when defined(windows):
+    false
+  else:
+    let cwd = processCwd(session.terminal.host.pid)
+    if cwd.isNone or cwd.get() == session.cwd:
+      return false
+    session.cwd = cwd.get()
+    true
+
+proc tabLabelForWorkspace(workspace: TerminalWorkspace): string =
+  let activeIdx = workspace.activeSessionIndex()
+  if activeIdx < 0:
+    ""
+  else:
+    cwdLabel(workspace.sessions[activeIdx].cwd)
+
+proc refreshWorkspaceTabLabel(wi: int): bool =
+  if wi < 0 or wi >= workspaces.len or workspaces[wi].sessions.len == 0:
+    return false
+  let activeIdx = workspaces[wi].activeSessionIndex()
+  if activeIdx < 0:
+    return false
+  discard refreshSessionCwd(workspaces[wi].sessions[activeIdx])
+  let label = tabLabelForWorkspace(workspaces[wi])
+  if label.len == 0:
+    return false
+  let tabIdx = tabs.indexOf(workspaces[wi].id)
+  if tabIdx < 0 or tabs.tabs[tabIdx].label == label:
+    return false
+  result = tabs.rename(workspaces[wi].id, label)
+
 proc contentHeight(): int = max(1, winHeight - headerHeight)
 
 proc paneInnerRect(area: PaneRect): PaneRect =
@@ -269,6 +301,7 @@ proc focusPaneAt(x, y: int): ptr TerminalSession =
     if oldIdx >= 0: workspaces[wi].sessions[oldIdx].terminal.damage.markAll()
     let newIdx = workspaces[wi].sessionIndex(hit.get())
     if newIdx >= 0: ensureCursorVisible(workspaces[wi].sessions[newIdx].terminal)
+    discard refreshWorkspaceTabLabel(wi)
   workspaces[wi].sessionByPane(hit.get())
 
 proc clearSelectionsExcept(workspace: var TerminalWorkspace, paneId: PaneId) =
@@ -298,19 +331,9 @@ proc chooseInitialWindowSize() =
   winHeight = min(DefaultWindowHeight, maxHeight)
 
 proc refreshTabCwdLabels(): bool =
-  when defined(windows):
-    false
-  else:
-    for wi in 0 ..< workspaces.len:
-      if workspaces[wi].sessions.len == 0: continue
-      let activeIdx = workspaces[wi].activeSessionIndex()
-      if activeIdx < 0: continue
-      let cwd = processCwd(workspaces[wi].sessions[activeIdx].terminal.host.pid)
-      if cwd.isNone or cwd.get() == workspaces[wi].sessions[activeIdx].cwd: continue
-      workspaces[wi].sessions[activeIdx].cwd = cwd.get()
-      let label = cwdLabel(cwd.get())
-      if tabs.rename(workspaces[wi].id, label):
-        result = true
+  for wi in 0 ..< workspaces.len:
+    if refreshWorkspaceTabLabel(wi):
+      result = true
 
 proc activeSessionCwd(fallback = ""): string =
   let workspace = activeWorkspace()
