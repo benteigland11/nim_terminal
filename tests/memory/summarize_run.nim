@@ -38,8 +38,14 @@ type
     verdict: string
     found: bool
 
-  Tier4Row = object
+  GpuRow = object
     liveBytes, peakBytes, liveResources, anomalies: int
+    verdict: string
+    found: bool
+
+  ChaosRow = object
+    cycles, maxTabs, maxPanes: int
+    gpuLiveBytes, gpuPeakBytes, liveResources, anomalies: int
     verdict: string
     found: bool
 
@@ -56,7 +62,8 @@ type
     tier1: Tier1Row
     tier2: seq[Tier2Row]
     tier3: seq[Tier3Row]
-    tier4: Tier4Row
+    gpu: GpuRow
+    chaos: ChaosRow
     overallPass: bool
 
 # ---------- helpers ----------
@@ -197,7 +204,7 @@ proc parseTier3(runDir: string): seq[Tier3Row] =
         discard
     result.add row
 
-proc parseTier4(logPath: string): Tier4Row =
+proc parseGpu(logPath: string): GpuRow =
   result.verdict = "FAIL"
   for ln in readLinesIfExists(logPath):
     if not ln.startsWith("[gpu]"): continue
@@ -212,6 +219,32 @@ proc parseTier4(logPath: string): Tier4Row =
       elif token.startsWith("anomalies="):
         discard parseInt(token[len("anomalies=") .. ^1], result.anomalies)
     if result.liveBytes > 0 and result.peakBytes >= result.liveBytes and
+        result.liveResources > 0 and result.anomalies == 0:
+      result.verdict = "PASS"
+    return
+
+proc parseChaos(logPath: string): ChaosRow =
+  result.verdict = "FAIL"
+  for ln in readLinesIfExists(logPath):
+    if not ln.startsWith("[chaos]"): continue
+    result.found = true
+    for token in ln.split({' ', '\t'}):
+      if token.startsWith("cycles="):
+        discard parseInt(token[len("cycles=") .. ^1], result.cycles)
+      elif token.startsWith("max_tabs="):
+        discard parseInt(token[len("max_tabs=") .. ^1], result.maxTabs)
+      elif token.startsWith("max_panes="):
+        discard parseInt(token[len("max_panes=") .. ^1], result.maxPanes)
+      elif token.startsWith("gpu_live_bytes="):
+        discard parseInt(token[len("gpu_live_bytes=") .. ^1], result.gpuLiveBytes)
+      elif token.startsWith("gpu_peak_bytes="):
+        discard parseInt(token[len("gpu_peak_bytes=") .. ^1], result.gpuPeakBytes)
+      elif token.startsWith("live_resources="):
+        discard parseInt(token[len("live_resources=") .. ^1], result.liveResources)
+      elif token.startsWith("anomalies="):
+        discard parseInt(token[len("anomalies=") .. ^1], result.anomalies)
+    if result.cycles > 0 and result.maxTabs >= 2 and result.maxPanes >= 2 and
+        result.gpuLiveBytes > 0 and result.gpuPeakBytes >= result.gpuLiveBytes and
         result.liveResources > 0 and result.anomalies == 0:
       result.verdict = "PASS"
     return
@@ -252,7 +285,8 @@ proc renderMarkdown(s: RunSummary): string =
   let pass = s.tier1.verdict == "PASS" and
              s.tier2.allIt(it.verdict == "PASS" and it.found) and
              s.tier3.allIt(it.verdict == "PASS" and it.found) and
-             s.tier4.verdict == "PASS" and s.tier4.found
+             s.gpu.verdict == "PASS" and s.gpu.found and
+             s.chaos.verdict == "PASS" and s.chaos.found
   let verdict = if pass: "PASS" else: "FAIL"
   result = "# Waymark Memory Validation — " & s.timestamp & "\n\n"
   result.add "Commit: `" & s.commitSha & "`\n"
@@ -330,14 +364,32 @@ proc renderMarkdown(s: RunSummary): string =
              "under Xvfb/software OpenGL.\n\n"
   result.add "| Live Bytes | Peak Bytes | Live Resources | Anomalies | Verdict |\n"
   result.add "|---:|---:|---:|---:|---|\n"
-  if not s.tier4.found:
+  if not s.gpu.found:
     result.add "| — | — | — | — | NOT RUN |\n\n"
   else:
-    result.add "| " & $s.tier4.liveBytes &
-               " B | " & $s.tier4.peakBytes &
-               " B | " & $s.tier4.liveResources &
-               " | " & $s.tier4.anomalies &
-               " | " & s.tier4.verdict & " |\n\n"
+    result.add "| " & $s.gpu.liveBytes &
+               " B | " & $s.gpu.peakBytes &
+               " B | " & $s.gpu.liveResources &
+               " | " & $s.gpu.anomalies &
+               " | " & s.gpu.verdict & " |\n\n"
+
+  result.add "## Tier 4b — Lifecycle Chaos\n\n"
+  result.add "Scope: opt-in Waymark harness mode cycles real tab, pane, " &
+             "zoom, resize, atlas rebuild, render, and GPU ledger paths " &
+             "under Xvfb/software OpenGL.\n\n"
+  result.add "| Cycles | Max Tabs | Max Panes | GPU Live Bytes | GPU Peak Bytes | Live Resources | Anomalies | Verdict |\n"
+  result.add "|---:|---:|---:|---:|---:|---:|---:|---|\n"
+  if not s.chaos.found:
+    result.add "| — | — | — | — | — | — | — | NOT RUN |\n\n"
+  else:
+    result.add "| " & $s.chaos.cycles &
+               " | " & $s.chaos.maxTabs &
+               " | " & $s.chaos.maxPanes &
+               " | " & $s.chaos.gpuLiveBytes & " B" &
+               " | " & $s.chaos.gpuPeakBytes & " B" &
+               " | " & $s.chaos.liveResources &
+               " | " & $s.chaos.anomalies &
+               " | " & s.chaos.verdict & " |\n\n"
 
   result.add "## Known Limits\n\n"
   result.add "- Linux-only `/proc` RSS sampler. macOS/Windows not yet supported.\n"
@@ -363,7 +415,8 @@ proc toJson(s: RunSummary): JsonNode =
   let pass = s.tier1.verdict == "PASS" and
              s.tier2.allIt(it.verdict == "PASS" and it.found) and
              s.tier3.allIt(it.verdict == "PASS" and it.found) and
-             s.tier4.verdict == "PASS" and s.tier4.found
+             s.gpu.verdict == "PASS" and s.gpu.found and
+             s.chaos.verdict == "PASS" and s.chaos.found
   result["verdict"] = %(if pass: "pass" else: "fail")
   result["tier1"] = %*{
     "idle": {
@@ -406,12 +459,23 @@ proc toJson(s: RunSummary): JsonNode =
   }
   result["tier4"] = %*{
     "gpu_resource_ledger": {
-      "found": s.tier4.found,
-      "live_bytes": s.tier4.liveBytes,
-      "peak_bytes": s.tier4.peakBytes,
-      "live_resources": s.tier4.liveResources,
-      "anomalies": s.tier4.anomalies,
-      "verdict": s.tier4.verdict,
+      "found": s.gpu.found,
+      "live_bytes": s.gpu.liveBytes,
+      "peak_bytes": s.gpu.peakBytes,
+      "live_resources": s.gpu.liveResources,
+      "anomalies": s.gpu.anomalies,
+      "verdict": s.gpu.verdict,
+    },
+    "lifecycle_chaos": {
+      "found": s.chaos.found,
+      "cycles": s.chaos.cycles,
+      "max_tabs": s.chaos.maxTabs,
+      "max_panes": s.chaos.maxPanes,
+      "gpu_live_bytes": s.chaos.gpuLiveBytes,
+      "gpu_peak_bytes": s.chaos.gpuPeakBytes,
+      "live_resources": s.chaos.liveResources,
+      "anomalies": s.chaos.anomalies,
+      "verdict": s.chaos.verdict,
     }
   }
 
@@ -431,7 +495,8 @@ proc main() =
   s.tier1 = parseTier1(runDir / "tier1_idle.log")
   s.tier2 = parseTier2(runDir / "tier2_soak.log")
   s.tier3 = parseTier3(runDir)
-  s.tier4 = parseTier4(runDir / "tier4_gpu.log")
+  s.gpu = parseGpu(runDir / "tier4_gpu.log")
+  s.chaos = parseChaos(runDir / "tier4_lifecycle_chaos.log")
 
   let md = renderMarkdown(s)
   writeFile(runDir / "SUMMARY.md", md)

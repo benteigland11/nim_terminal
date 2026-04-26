@@ -8,6 +8,7 @@
 #   4. Tier 2 soak:         all 5 scenarios, 5 min each, slope < 100 KB/min
 #   5. Tier 3 valgrind:     all 5 scenarios, 12s each, zero definite leaks
 #   6. Tier 4 GPU ledger:   renderer-owned textures/buffers are reported
+#   7. Lifecycle chaos:     tab/pane/zoom/resize/rebuild paths are cycled
 #
 # Output:
 #   - Live progress to stdout (and the verdict file's tail)
@@ -227,6 +228,13 @@ done
 
 run_phase "Tier 4: GPU resource ledger" "tier4_gpu.log" \
   nim c -r tests/memory/test_gpu_resources.nim
+
+run_phase "Tier 4: lifecycle chaos" "tier4_lifecycle_chaos.log" \
+  env WAYMARK_LIFECYCLE_CHAOS_CYCLES=16 \
+      LIBGL_ALWAYS_SOFTWARE=1 \
+  timeout 30 \
+  xvfb-run -a --server-args="-screen 0 1280x800x24" \
+  ./nim_terminal
 
 # ---------- finalize ----------
 

@@ -10,6 +10,7 @@ captured in [`reports/MEMORY.md`](reports/MEMORY.md).
 | 2 — workload soak | Allocation growth under load | 5 min × 5 scenarios nightly | nightly | **harness shipped, soak runs nightly** |
 | 3 — Valgrind | CPU-side definite/indirect leaks | ~12s smoke / ~30min full | weekly + on-demand | **shipped** (smoke; full sweep nightly) |
 | 4 — GPU ledger | Texture / VBO orphans | ~5s | every PR | **shipped** |
+| 4b — lifecycle chaos | Tab/pane/zoom/resize/rebuild leaks | ~10s | nightly + release | **shipped** |
 
 ## Running locally
 
@@ -96,6 +97,8 @@ silence leaks originating in our own code. See
 
 ```bash
 nim c -r tests/memory/test_gpu_resources.nim
+WAYMARK_LIFECYCLE_CHAOS_CYCLES=16 LIBGL_ALWAYS_SOFTWARE=1 \
+  timeout 30 xvfb-run -a --server-args='-screen 0 1280x800x24' ./nim_terminal
 ```
 
 Spawns Waymark under `xvfb-run` with `WAYMARK_GPU_SNAPSHOT_PATH` set,
@@ -103,6 +106,10 @@ then asserts that renderer-owned textures and the tile-batcher buffer are
 reported with nonzero live bytes and zero ledger anomalies. This is not a
 vendor VRAM profiler; it proves our OpenGL lifecycle instrumentation can
 account for resources that RSS and Valgrind do not directly see.
+
+The lifecycle chaos phase runs Waymark's opt-in harness mode with
+`WAYMARK_LIFECYCLE_CHAOS_CYCLES`, cycling real tab, pane, zoom, resize,
+atlas rebuild, render, and GPU ledger paths without pixel-click automation.
 
 ## Reports
 
@@ -137,6 +144,7 @@ Phases in order:
 3. **Tier 2** soak — all 5 scenarios at `SOAK_DURATION_MS` each (default 5 min)
 4. **Tier 3** valgrind — all 5 scenarios at `VG_DURATION`s each (default 20s)
 5. **Tier 4** GPU resource ledger — live texture/buffer accounting
+6. **Tier 4b** lifecycle chaos — tab/pane/zoom/resize/rebuild cycles
 
 The runner never aborts on a single phase failure — it collects every
 result, then exits nonzero if anything failed. Logs and a public

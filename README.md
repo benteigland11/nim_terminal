@@ -1,4 +1,4 @@
-# nim_terminal
+# Waymark
 
 A native Nim terminal emulator, assembled from 38 reusable
 [Cartograph](https://github.com/benteigland11/Cartograph) widgets.
@@ -42,11 +42,25 @@ needed to build or run, only to lift widgets out into your own project.
 
 ## Widgets
 
-All widgets live under `cg/` grouped by domain.
+All widgets live under `cg/`. The seven below form the spine of the
+terminal, in the order data flows through them. The full catalog is
+grouped by domain underneath.
 
-### universal (pure utilities, no domain dependency)
+### Core
 
-<details><summary>24 widgets</summary>
+| Widget | Role |
+|---|---|
+| `data-vt-parser-nim` | DEC VT500 state machine. The heart. |
+| `data-vt-commands-nim` | Raw dispatches to semantic `VtCommand`s. |
+| `data-screen-buffer-nim` | Cells, cursor, attrs, scrollback, alt buffer. |
+| `universal-utf8-decoder-nim` | Streaming UTF-8 with display-width classification. |
+| `backend-pty-async-nim` | Non-blocking PTY orchestrator. |
+| `universal-glyph-atlas-nim` | Pre-rendered font glyphs in a cacheable atlas. |
+| `universal-tile-batcher-nim` | Single-pass batched-quad GPU renderer. |
+
+### All widgets, by domain
+
+<details><summary><b>universal</b> (24) — pure utilities, no domain dependency</summary>
 
 | Widget | Purpose |
 |---|---|
@@ -78,9 +92,7 @@ All widgets live under `cg/` grouped by domain.
 
 </details>
 
-### data (terminal-specific state and protocol)
-
-<details><summary>11 widgets</summary>
+<details><summary><b>data</b> (11) — terminal-specific state and protocol</summary>
 
 | Widget | Purpose |
 |---|---|
@@ -98,18 +110,22 @@ All widgets live under `cg/` grouped by domain.
 
 </details>
 
-### backend (process and PTY orchestration)
+<details><summary><b>backend</b> (2) — process and PTY orchestration</summary>
 
 | Widget | Purpose |
 |---|---|
 | `backend-pty-host-nim` | Platform-neutral PTY orchestrator: `PtyBackend` concept + `PtyHost[B]`. |
 | `backend-pty-async-nim` | Non-blocking PTY orchestrator with a write queue. |
 
-### frontend (windowing and input)
+</details>
+
+<details><summary><b>frontend</b> (1) — windowing and input</summary>
 
 | Widget | Purpose |
 |---|---|
 | `frontend-glfw-input-nim` | Translates raw GLFW window events into terminal input types. |
+
+</details>
 
 ## Architecture
 
