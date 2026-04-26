@@ -1,6 +1,6 @@
 # Waymark
 
-A native Nim terminal emulator, assembled from 43 reusable
+A native Nim terminal emulator, assembled from 44 reusable
 [Cartograph](https://github.com/benteigland11/Cartograph) widgets.
 
 Building in the open. Expect rough edges.
@@ -27,7 +27,7 @@ The terminal is the showcase. The widgets are the point.
   and zero-leak verdicts. See
   [`tests/memory/reports/SUMMARY.md`](tests/memory/reports/SUMMARY.md) and
   [`tests/memory/README.md`](tests/memory/README.md).
-- **Composability.** 43 widgets, each independently validated, tested,
+- **Composability.** 44 widgets, each independently validated, tested,
   and installable into other projects via `cartograph install`.
 - **Performance.** GPU-accelerated rendering through a glyph atlas + tile
   batcher. Microbenchmarks under [`benchmarks/`](benchmarks/).
@@ -103,12 +103,13 @@ grouped by domain underneath.
 
 ### All widgets, by domain
 
-<details><summary><b>universal</b> (25) — pure utilities, no domain dependency</summary>
+<details><summary><b>universal</b> (26) — pure utilities, no domain dependency</summary>
 
 | Widget | Purpose |
 |---|---|
 | `universal-base64-nim` | Base64 encode/decode via stdlib. |
 | `universal-benchmark-suite-nim` | Microbenchmark harness with warmup, batched runs, ns summaries. |
+| `universal-clipboard-provider-nim` | Dependency-free clipboard provider contract with fallback and copy/paste policy checks. |
 | `universal-color-palette-nim` | Terminal color palette, xterm-256 mapping, RGB utilities. |
 | `universal-color-parser-nim` | Parser for X11/xterm color specs (`#RGB`, `rgb:RR/GG/BB`, ...). |
 | `universal-damage-tracker-nim` | Mark-and-sweep damage tracker over indexed linear ranges. |
