@@ -272,10 +272,10 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
   r.addRect(tabAreaWidth, titleBarHeight + 2, plusWidth, tabBarHeight - 3, winWidth, winHeight, inactiveBg)
   r.finishBatch()
 
-  let logoX = 10
-  let logoH = max(14, min(titleBarHeight - 8, 24))
+  let logoX = 8
+  let logoH = max(18, min(titleBarHeight - 4, 30))
   let logoW = max(14, int(float32(logoH) * r.logoAspect))
-  let logoY = max(3, (titleBarHeight - logoH) div 2)
+  let logoY = max(2, (titleBarHeight - logoH) div 2)
   if r.logoTexId != 0:
     r.batcher.textureId = r.logoTexId
     r.batcher.beginBatch()

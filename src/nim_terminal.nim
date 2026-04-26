@@ -28,7 +28,7 @@ const
   DefaultWindowTitle = "Waymark - Built with Nim"
   ConfigPath = "nim_terminal.cfg"
   DefaultFontPath = "resources/JetBrainsMono-Medium.otf"
-  DefaultLogoPath = "logo.png"
+  DefaultLogoPath = "logo.svg"
   DefaultFontSize = 20.0
   DefaultTitleBarHeight = 30
   DefaultTabBarHeight = 28
