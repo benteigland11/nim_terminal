@@ -55,6 +55,11 @@ and a working OpenGL stack. On Windows, Visual Studio Build Tools or a
 MinGW toolchain must be available to Nim. No Cartograph install is needed
 to build or run, only to lift widgets out into your own project.
 
+The first terminal starts in `[shell] start_directory` from
+`nim_terminal.cfg`, which defaults to `~`. New tabs and panes inherit the
+active terminal's current directory. Leave `[shell] program` unset to use
+the platform default shell.
+
 ## Widgets
 
 All widgets live under `cg/`. The seven below form the spine of the
@@ -125,12 +130,13 @@ grouped by domain underneath.
 
 </details>
 
-<details><summary><b>backend</b> (2) — process and PTY orchestration</summary>
+<details><summary><b>backend</b> (3) — process and PTY orchestration</summary>
 
 | Widget | Purpose |
 |---|---|
 | `backend-pty-host-nim` | Platform-neutral PTY orchestrator: `PtyBackend` concept + `PtyHost[B]`. |
 | `backend-pty-async-nim` | Non-blocking PTY orchestrator with a write queue. |
+| `backend-posix-pty-nim` | POSIX PTY child launch environment defaults and diagnostics helpers. |
 
 </details>
 
@@ -160,22 +166,17 @@ isn't reusable on its own.
 
 ## Project-level code
 
-Some pieces can't be widgets yet because they require FFI that isn't in
-the Nim stdlib. Those live under `src/` as project-specific glue:
-
-    src/pty/posix_backend.nim   POSIX implementation of PtyBackend using
-                                posix_openpt / grantpt / unlockpt /
-                                ptsname / ioctl / fork / setsid / dup2 /
-                                execvp.
+`src/pty/` only selects and configures platform backends. Windows ConPTY
+lives in `cg/`; POSIX still needs local FFI for PTY allocation, while its
+child launch environment contract lives in `cg/backend_posix_pty_nim`.
 
 ## Known issues
 
 See [`NOTES.md`](NOTES.md) for tracked project issues. Notably:
 
-- `std/posix` is missing five PTY primitives. We have a workaround
-  (project-level FFI in `src/pty/`) but ultimately those entry points
-  should land in stdlib or a shared nimble package so the PTY backend
-  can stay pure Nim.
+- `std/posix` is missing five PTY primitives, so the POSIX backend keeps a
+  small local FFI shim. Those entry points should ultimately land in stdlib
+  or a shared nimble package.
 
 ## License
 

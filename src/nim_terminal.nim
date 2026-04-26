@@ -72,6 +72,7 @@ type
   TerminalConfig = object
     title: string
     shellProgram: string
+    startDirectory: string
     fontPath: string
     fontSize: float
     fallbackFontPaths: seq[string]
@@ -88,6 +89,7 @@ var
   config = TerminalConfig(
     title: DefaultWindowTitle,
     shellProgram: when defined(windows): "cmd.exe" else: getEnv("SHELL", "/bin/sh"),
+    startDirectory: "~",
     fontPath: DefaultFontPath,
     fontSize: DefaultFontSize,
     fallbackFontPaths: @DefaultFallbackFontPaths,
@@ -121,6 +123,7 @@ var
   dragStartWinY: cint = 0
   fallbackTypefaces: seq[Typeface] = @[]
   gpuSnapshotPath = getEnv("WAYMARK_GPU_SNAPSHOT_PATH", "")
+  screenSnapshotPath = getEnv("WAYMARK_SCREEN_SNAPSHOT_PATH", "")
   lifecycleChaosCycles = 0
   keyTextFallback = false
   inputDebug = false
@@ -159,6 +162,9 @@ proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
     let shell = dict.getSectionValue("shell", "program", result.shellProgram).strip()
     if shell.len > 0:
       result.shellProgram = shell
+    let startDirectory = dict.getSectionValue("shell", "start_directory", result.startDirectory).strip()
+    if startDirectory.len > 0:
+      result.startDirectory = startDirectory
 
     result.fontSize = max(4.0, parseFloatOr(dict.getSectionValue("font", "size", $result.fontSize), result.fontSize))
     let fontCandidate = dict.getSectionValue("font", "primary", result.fontPath)
@@ -307,10 +313,10 @@ proc refreshTabCwdLabels(): bool =
 proc activeSessionCwd(fallback = ""): string =
   let workspace = activeWorkspace()
   if workspace == nil:
-    return if fallback.len > 0: fallback else: getCurrentDir()
+    return if fallback.len > 0: fallback else: config.startDirectory
   let idx = workspace[].activeSessionIndex()
   if idx < 0:
-    return if fallback.len > 0: fallback else: getCurrentDir()
+    return if fallback.len > 0: fallback else: config.startDirectory
   when not defined(windows):
     let live = processCwd(workspace[].sessions[idx].terminal.host.pid)
     if live.isSome:
@@ -341,6 +347,9 @@ proc validSessionCwd(candidate: string): string =
     if dirExists("C:\\"):
       return "C:\\"
   ""
+
+proc startupSessionCwd(): string =
+  validSessionCwd(config.startDirectory)
 
 proc shellArgsFor(cwd: string): seq[string] =
   when defined(windows):
@@ -410,6 +419,15 @@ proc paneBudgetAllows(workspace: TerminalWorkspace, requested = 1): bool =
 
 proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
   let sessionCwd = validSessionCwd(cwd)
+  if screenSnapshotPath.len > 0:
+    try:
+      writeFile(screenSnapshotPath & ".launch",
+        "program=" & config.shellProgram & "\n" &
+        "cwd=" & sessionCwd & "\n" &
+        "cols=" & $paneCols(area) & "\n" &
+        "rows=" & $paneRows(area) & "\n")
+    except CatchableError:
+      discard
   let term = newTerminal(
     config.shellProgram,
     shellArgsFor(sessionCwd),
@@ -423,7 +441,11 @@ proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
   TerminalSession(id: paneId, terminal: term, cwd: sessionCwd)
 
 proc addTerminalTab() =
-  let cwd = validSessionCwd(activeSessionCwd())
+  let cwd =
+    if workspaces.len == 0:
+      startupSessionCwd()
+    else:
+      validSessionCwd(activeSessionCwd())
   let label = cwdLabel(cwd)
   let id = tabs.addTab(label)
   var workspace = TerminalWorkspace(id: id, panes: pane_tree.newSplitPaneTree(), sessions: @[])
@@ -592,6 +614,20 @@ proc writeGpuSnapshot() =
   if gpuSnapshotPath.len == 0 or rend == nil: return
   try:
     writeFile(gpuSnapshotPath, $snapshotToJson(rend.gpuSnapshot()))
+  except CatchableError:
+    discard
+
+proc writeScreenSnapshot(term: Terminal) =
+  if screenSnapshotPath.len == 0 or term == nil: return
+  try:
+    var lines: seq[string] = @[]
+    lines.add "closed=" & $term.host.closed
+    lines.add "eof=" & $term.host.eof
+    lines.add "cursor=" & $term.screen.cursor.row & "," & $term.screen.cursor.col
+    lines.add "rows=" & $term.screen.rows & " cols=" & $term.screen.cols
+    for i in 0 ..< min(term.screen.rows, 20):
+      lines.add $i & ": " & term.screen.lineText(i)
+    writeFile(screenSnapshotPath, lines.join("\n"))
   except CatchableError:
     discard
 
@@ -899,10 +935,7 @@ config = loadTerminalConfig()
 fontSize = config.fontSize
 lifecycleChaosCycles = parseIntOr(getEnv("WAYMARK_LIFECYCLE_CHAOS_CYCLES", "0"), 0)
 keyTextFallback =
-  when defined(windows):
-    getEnv("WAYMARK_KEY_TEXT_FALLBACK", "1") != "0"
-  else:
-    getEnv("WAYMARK_KEY_TEXT_FALLBACK", "0") == "1"
+  getEnv("WAYMARK_KEY_TEXT_FALLBACK", "0") == "1"
 inputDebug = getEnv("WAYMARK_INPUT_DEBUG", "0") == "1"
 
 if init() == 0: quit("Failed to init GLFW")
@@ -911,6 +944,7 @@ chooseInitialWindowSize()
 window = createWindow(cint(winWidth), cint(winHeight), cstring(config.title), nil, nil)
 if window == nil: quit("Failed to create window")
 setWindowSizeLimits(window, cint(MinWindowWidth), cint(MinWindowHeight), DONT_CARE, DONT_CARE)
+focusWindow(window)
 makeContextCurrent(window); loadExtensions()
 var fbWidth, fbHeight: cint
 getFramebufferSize(window, addr fbWidth, addr fbHeight)
@@ -963,6 +997,7 @@ while windowShouldClose(window) == 0:
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
     swapBuffers(window)
     writeGpuSnapshot()
+    writeScreenSnapshot(term)
   pollEvents(); perf.endFrame()
   if perf.shouldReport(2.0):
     let s = perf.takeReport()
