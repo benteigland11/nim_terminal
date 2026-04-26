@@ -39,6 +39,14 @@ func scrollToBottom*(v: var Viewport) =
 
 func isAtBottom*(v: Viewport): bool = v.scrollOffset == 0
 
+func scrollToLiveEnd*(v: var Viewport) =
+  ## Return the viewport to the live edge of the buffer.
+  v.scrollToBottom()
+
+func isAtLiveEnd*(v: Viewport): bool =
+  ## True when the viewport is following the newest rows in the buffer.
+  v.isAtBottom
+
 func updateBufferHeight*(v: var Viewport, totalRows: int, stickToBottom: bool = true) =
   ## Update total buffer size. If `stickToBottom` is true and we were
   ## at the bottom, stay at the bottom.

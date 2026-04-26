@@ -23,7 +23,7 @@ The terminal is the showcase. The widgets are the point.
   soak across 5 scenarios, Tier 3 valgrind under each scenario) produces
   a public `SUMMARY.md` with build SHAs, sample counts, slope thresholds,
   and zero-leak verdicts. See
-  [`tests/memory/reports/`](tests/memory/reports/) and
+  [`tests/memory/reports/SUMMARY.md`](tests/memory/reports/SUMMARY.md) and
   [`tests/memory/README.md`](tests/memory/README.md).
 - **Composability.** 38 widgets, each independently validated, tested,
   and installable into other projects via `cartograph install`.

@@ -474,9 +474,35 @@ proc drain*(t: Terminal, maxBytes: int = 1_000_000): int =
   while total < maxBytes: (let n = t.step(); if n == 0: break; if n < 0: continue; total += n)
   discard t.flush(); total
 
-proc sendKey*(t: Terminal, ev: KeyEvent): int = (let bytes = encodeKeyEvent(ev, t.inputMode); if bytes.len == 0: 0 else: t.async.send(bytes))
-proc sendMouse*(t: Terminal, ev: MouseEvent): int = (let bytes = encodeMouseEvent(ev, t.inputMode); if bytes.len == 0: 0 else: t.async.send(bytes))
-proc sendPaste*(t: Terminal, text: string): int = (let bytes = encodePaste(text, t.inputMode); if bytes.len == 0: 0 else: t.async.send(bytes))
+proc returnToLiveInput*(t: Terminal): bool =
+  ## Move a scrolled-back viewport to the live edge before sending child input.
+  if t.viewport.isAtLiveEnd:
+    return false
+  t.viewport.scrollToLiveEnd()
+  t.selection.clear()
+  t.damage.markAll()
+  true
+
+proc sendKey*(t: Terminal, ev: KeyEvent): int =
+  let bytes = encodeKeyEvent(ev, t.inputMode)
+  if bytes.len == 0:
+    return 0
+  discard t.returnToLiveInput()
+  t.async.send(bytes)
+
+proc sendMouse*(t: Terminal, ev: MouseEvent): int =
+  let bytes = encodeMouseEvent(ev, t.inputMode)
+  if bytes.len == 0:
+    return 0
+  discard t.returnToLiveInput()
+  t.async.send(bytes)
+
+proc sendPaste*(t: Terminal, text: string): int =
+  let bytes = encodePaste(text, t.inputMode)
+  if bytes.len == 0:
+    return 0
+  discard t.returnToLiveInput()
+  t.async.send(bytes)
 proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusReporting: 0 else: t.sendReport(reportFocus(gained)))
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.sendReport(reportClipboard(selector, encoded)))
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)

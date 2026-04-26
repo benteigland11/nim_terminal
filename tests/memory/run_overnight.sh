@@ -14,6 +14,7 @@
 #   - Live progress to stdout (and the verdict file's tail)
 #   - Per-phase logs in tests/memory/reports/overnight-<ts>/
 #   - Final summary in tests/memory/reports/overnight-<ts>/SUMMARY.md
+#   - Latest public summary copied to tests/memory/reports/SUMMARY.md
 #
 # Exit code:
 #   0 — every phase passed
@@ -34,6 +35,7 @@ RUN_DIR="tests/memory/reports/overnight-$TS"
 mkdir -p "$RUN_DIR"
 PHASES="$RUN_DIR/PHASES.md"   # bash-generated audit trail
 SUMMARY="$RUN_DIR/SUMMARY.md" # rich public artifact (Nim summarizer)
+LATEST_SUMMARY="tests/memory/reports/SUMMARY.md"
 
 SOAK_DURATION_MS="${SOAK_DURATION_MS:-300000}"   # 5 min default
 SOAK_SLOPE_KB_MIN="${SOAK_SLOPE_KB_MIN:-100}"
@@ -135,6 +137,9 @@ write_public_summary() {
   if ! ./tests/memory/summarize_run "$RUN_DIR" "$SOAK_DURATION_MS" "$VG_DURATION"; then
     echo "[overnight] FAIL: summarize_run exited nonzero — public SUMMARY.md may be missing or wrong"
     PHASE_RESULTS+=("FAIL|Summarize run|n/a|build_summarizer.log")
+  elif [[ -f "$SUMMARY" ]]; then
+    cp "$SUMMARY" "$LATEST_SUMMARY"
+    echo "[summarize] updated $LATEST_SUMMARY"
   fi
 }
 

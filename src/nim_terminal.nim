@@ -14,6 +14,7 @@ import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
 from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toMouseButton, toPrintableRune
 import ../cg/universal_perf_monitor_nim/src/perf_monitor_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
+import ../cg/frontend_glfw_window_nim/src/glfw_window_lib
 import ../cg/universal_os_launcher_nim/src/os_launcher_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
 import ../cg/universal_process_cwd_nim/src/process_cwd_lib
@@ -124,6 +125,7 @@ var
   fallbackTypefaces: seq[Typeface] = @[]
   gpuSnapshotPath = getEnv("WAYMARK_GPU_SNAPSHOT_PATH", "")
   screenSnapshotPath = getEnv("WAYMARK_SCREEN_SNAPSHOT_PATH", "")
+  resizeSnapshotPath = getEnv("WAYMARK_RESIZE_SNAPSHOT_PATH", "")
   lifecycleChaosCycles = 0
   keyTextFallback = false
   inputDebug = false
@@ -521,6 +523,11 @@ proc activeWorkspaceDirty(): bool =
 proc drawActiveWorkspace() =
   let wi = activeWorkspaceIndex()
   if wi < 0: return
+  let activeIdx = workspaces[wi].activeSessionIndex()
+  if activeIdx < 0: return
+  let bg = workspaces[wi].sessions[activeIdx].terminal.screen.theme.background
+  glClearColor(bg.r.float32 / 255.0, bg.g.float32 / 255.0, bg.b.float32 / 255.0, 1.0)
+  glClear(GL_COLOR_BUFFER_BIT)
   let layouts = workspaces[wi].panes.layouts(contentRect())
   for item in layouts:
     let idx = workspaces[wi].sessionIndex(item.id)
@@ -921,11 +928,65 @@ proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
     elif yoffset < 0: term.viewport.scrollDown(3)
   term.refreshViewport(false); term.damage.markAll()
 
+proc resizeToFramebuffer(win: Window, fallbackWidth, fallbackHeight: cint) =
+  var fbWidth, fbHeight: cint
+  var windowWidth, windowHeight: cint
+  getFramebufferSize(win, addr fbWidth, addr fbHeight)
+  getWindowSize(win, addr windowWidth, addr windowHeight)
+  let report = chooseDrawableSize(
+    framebuffer = size2d(int(fbWidth), int(fbHeight)),
+    window = size2d(int(windowWidth), int(windowHeight)),
+    fallback = size2d(int(fallbackWidth), int(fallbackHeight)),
+  )
+  if not report.chosen.isPositive:
+    return
+  let actualWidth = cint(report.chosen.width)
+  let actualHeight = cint(report.chosen.height)
+  let changedSize = report.changedFrom(size2d(winWidth, winHeight))
+  if changedSize:
+    winWidth = report.chosen.width
+    winHeight = report.chosen.height
+    if rend != nil and rend.atlas != nil:
+      resizeTerminals()
+  glViewport(0, 0, actualWidth, actualHeight)
+  if resizeSnapshotPath.len > 0:
+    try:
+      let content = contentRect()
+      let layouts = activePaneLayouts()
+      let firstPane =
+        if layouts.len > 0: layouts[0].rect
+        else: pane_tree.rect(0, 0, 0, 0)
+      let inner = paneInnerRect(firstPane)
+      writeFile(resizeSnapshotPath,
+        formatSizeDiagnostics(report) &
+        "content=" & $content.w & "x" & $content.h & "\n" &
+        "pane=" & $firstPane.w & "x" & $firstPane.h & "\n" &
+        "inner=" & $inner.w & "x" & $inner.h & "\n" &
+        "grid=" & $paneCols(firstPane) & "x" & $paneRows(firstPane) & "\n")
+    except CatchableError:
+      discard
+
 proc onResize(win: Window, width, height: cint) {.cdecl.} =
-  winWidth = int(width); winHeight = int(height)
-  if rend != nil and rend.atlas != nil:
-    resizeTerminals()
-    glViewport(0, 0, width, height)
+  resizeToFramebuffer(win, width, height)
+
+proc syncFramebufferSize(): bool =
+  if window == nil:
+    return false
+  var fbWidth, fbHeight: cint
+  var windowWidth, windowHeight: cint
+  getFramebufferSize(window, addr fbWidth, addr fbHeight)
+  getWindowSize(window, addr windowWidth, addr windowHeight)
+  let report = chooseDrawableSize(
+    framebuffer = size2d(int(fbWidth), int(fbHeight)),
+    window = size2d(int(windowWidth), int(windowHeight)),
+    fallback = size2d(0, 0),
+  )
+  if not report.chosen.isPositive:
+    return false
+  if not report.changedFrom(size2d(winWidth, winHeight)):
+    return false
+  resizeToFramebuffer(window, cint(report.chosen.width), cint(report.chosen.height))
+  true
 
 # ---------------------------------------------------------------------------
 # Main
@@ -964,6 +1025,7 @@ addTerminalTab()
 discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
 discard window.setMouseButtonCallback(onMouseButton); discard window.setCursorPosCallback(onCursorPos)
 discard window.setScrollCallback(onScroll); discard window.setFramebufferSizeCallback(onResize)
+discard window.setWindowSizeCallback(onResize)
 
 onResize(window, cint(winWidth), cint(winHeight))
 writeGpuSnapshot()
@@ -980,6 +1042,7 @@ if lifecycleChaosCycles > 0:
 let perf = newPerfMonitor()
 while windowShouldClose(window) == 0:
   perf.beginFrame()
+  let resized = syncFramebufferSize()
   var n = 0
   for workspace in workspaces.mitems:
     for session in workspace.sessions.mitems:
@@ -991,7 +1054,7 @@ while windowShouldClose(window) == 0:
   if term == nil: break
   if atlas.isDirty: rend.updateAtlasTexture()
   let tabLabelsChanged = refreshTabCwdLabels()
-  let changed = n > 0 or atlas.isDirty or activeWorkspaceDirty() or tabLabelsChanged
+  let changed = resized or n > 0 or atlas.isDirty or activeWorkspaceDirty() or tabLabelsChanged
   if changed:
     drawActiveWorkspace()
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)

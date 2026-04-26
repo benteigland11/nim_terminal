@@ -2,7 +2,7 @@
 
 Four tiers, each catching a different leak class. Cheaper tiers run on
 every PR; slower tiers run nightly or on demand. The current state is
-captured in [`reports/MEMORY.md`](reports/MEMORY.md).
+captured in [`reports/SUMMARY.md`](reports/SUMMARY.md).
 
 | Tier | What it catches | Cost | Cadence | Status |
 |------|-----------------|------|---------|--------|
@@ -113,16 +113,16 @@ atlas rebuild, render, and GPU ledger paths without pixel-click automation.
 
 ## Reports
 
-`reports/MEMORY.md` is the rolling public summary — current baselines,
-soak slopes, last Valgrind run. That file is the artifact the Nim
-community will look at.
+`reports/SUMMARY.md` is the latest public memory-validation receipt —
+current baselines, soak slopes, Valgrind verdicts, GPU resource ledger,
+and lifecycle chaos. That file is the stable artifact to link publicly.
 
 Each invocation of `run_overnight.sh` also writes a fresh dated directory
 under `reports/overnight-<TS>/` containing:
 
 | File | Purpose |
 |---|---|
-| `SUMMARY.md` | Public-facing per-tier verdict tables. **The thing you link to.** |
+| `SUMMARY.md` | Public-facing per-tier verdict tables for that run. |
 | `results.json` | Machine-readable receipt for CI / future comparison. |
 | `PHASES.md` | Audit trail — pass/fail per phase with timings. |
 | `tier{1,2,3,4}_*.log` | Raw test output per phase. |
@@ -148,7 +148,9 @@ Phases in order:
 
 The runner never aborts on a single phase failure — it collects every
 result, then exits nonzero if anything failed. Logs and a public
-`SUMMARY.md` are written to `tests/memory/reports/overnight-<TS>/`.
+`SUMMARY.md` are written to `tests/memory/reports/overnight-<TS>/`, and
+the latest successful summarizer output is copied to
+`tests/memory/reports/SUMMARY.md`.
 
 ### Pre-push — fast checks only (~30s)
 

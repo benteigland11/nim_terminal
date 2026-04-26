@@ -9,6 +9,7 @@ suite "universal viewport":
     check v.totalRows == 24
     check v.scrollOffset == 0
     check v.isAtBottom == true
+    check v.isAtLiveEnd == true
     check v.viewportToBuffer(0) == 0
     check v.viewportToBuffer(23) == 23
 
@@ -18,12 +19,22 @@ suite "universal viewport":
     v.scrollUp(10)
     check v.scrollOffset == 10
     check v.isAtBottom == false
+    check v.isAtLiveEnd == false
     
     # Bottom row of viewport (index 23) should be buffer row 89
     # (100 - 1) - 10 = 89
     check v.viewportToBuffer(23) == 89
     # Top row (index 0) should be 89 - 23 = 66
     check v.viewportToBuffer(0) == 66
+
+  test "live end helpers alias bottom-following behavior":
+    var v = newViewport(4)
+    v.updateBufferHeight(12)
+    v.scrollUp(3)
+    check v.isAtLiveEnd == false
+    v.scrollToLiveEnd()
+    check v.isAtLiveEnd == true
+    check v.scrollOffset == 0
 
   test "stick to bottom behavior":
     var v = newViewport(24)
