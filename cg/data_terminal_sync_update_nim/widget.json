@@ -1,19 +1,18 @@
 {
   "meta": {
-    "id": "data-input-vt-encoding-nim",
-    "name": "Input Vt Encoding",
-    "version": "1.3.0",
+    "id": "data-terminal-sync-update-nim",
+    "name": "Terminal Sync Update",
+    "version": "1.0.0",
     "domain": "data",
     "tags": [
       "terminal",
-      "input",
-      "keyboard",
-      "mouse",
-      "encoding",
-      "xterm"
+      "synchronization",
+      "rendering",
+      "state-machine",
+      "tui"
     ]
   },
-  "description": "Translates high-level input events (keyboard, mouse) into terminal escape sequences.",
+  "description": "Small state machine for synchronized terminal update mode. Tracks begin/end transitions, duplicate enters/exits, whether content changed while updates were active, and whether the caller should defer or present a frame.",
   "tech_stack": {
     "language": "nim",
     "dependencies": []
@@ -26,7 +25,7 @@
   },
   "validation": {
     "engine_version": 3,
-    "validated_at": "2026-04-27T00:45:05.562480+00:00",
+    "validated_at": "2026-04-27T00:44:53.043884+00:00",
     "runtime": "nim 2.2.10"
   }
 }

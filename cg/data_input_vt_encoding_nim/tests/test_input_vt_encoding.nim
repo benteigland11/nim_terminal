@@ -1,4 +1,4 @@
-import std/[unittest, strutils]
+import std/unittest
 import ../src/input_vt_encoding_lib
 
 suite "input vt encoding":
@@ -35,6 +35,19 @@ suite "input vt encoding":
     let move = encodeMouseEvent(mouse(meMove, mbLeft, 1, 2), mode)
     check move.len > 0
     check trackingWantsMotion(mode)
+
+  test "alternate scroll requests wheel routing":
+    var mode = newInputMode()
+    check not mode.shouldSendWheel()
+    mode.alternateScroll = true
+    check mode.shouldSendWheel()
+    check mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = true)
+    check not mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = false)
+
+  test "mouse tracking requests wheel routing":
+    var mode = newInputMode()
+    mode.mouseMode = mmX11
+    check mode.shouldSendWheel()
 
   test "SGR coordinate encoding composes with button-event tracking":
     var mode = newInputMode()

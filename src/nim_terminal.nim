@@ -219,6 +219,14 @@ proc activeTerm(): Terminal =
   let idx = workspace[].activeSessionIndex()
   if idx < 0: nil else: workspace[].sessions[idx].terminal
 
+proc activeWorkspaceSyncUpdateActive(): bool =
+  let workspace = activeWorkspace()
+  if workspace == nil: return false
+  for session in workspace[].sessions:
+    if session.terminal != nil and session.terminal.synchronizedUpdateActive():
+      return true
+  false
+
 proc ensureCursorVisible(term: Terminal) =
   if term == nil: return
   term.viewport.ensureVisible(term.screen.absoluteCursorRow(), ZoomContextRowsAbove)
@@ -946,10 +954,33 @@ proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
     if yoffset > 0: fontSize += 1.0
     elif yoffset < 0: fontSize = max(4.0, fontSize - 1.0)
     rebuildAtlas()
+  elif term.inputMode.shouldSendWheel():
+    let paneId =
+      if session == nil:
+        let workspace = activeWorkspace()
+        if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
+      else:
+        session[].id
+    let area = activeSessionRect(paneId)
+    let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
+    let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
+    if term.inputMode.shouldSendWheelAsCursorKeys(term.screen.usingAlt):
+      let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+      for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+        discard term.sendKey(key(keyCode))
+    else:
+      let button = if yoffset > 0: mbWheelUp else: mbWheelDown
+      for _ in 0 ..< max(1, int(abs(yoffset))):
+        discard term.sendMouse(mouse(mePress, button, row, col))
   else:
     if yoffset > 0: term.viewport.scrollUp(3)
     elif yoffset < 0: term.viewport.scrollDown(3)
   term.refreshViewport(false); term.damage.markAll()
+
+proc onWindowFocus(win: Window, focused: cint) {.cdecl.} =
+  let term = activeTerm()
+  if term == nil: return
+  discard term.sendFocus(focused != 0)
 
 proc resizeToFramebuffer(win: Window, fallbackWidth, fallbackHeight: cint) =
   var fbWidth, fbHeight: cint
@@ -1049,6 +1080,7 @@ discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
 discard window.setMouseButtonCallback(onMouseButton); discard window.setCursorPosCallback(onCursorPos)
 discard window.setScrollCallback(onScroll); discard window.setFramebufferSizeCallback(onResize)
 discard window.setWindowSizeCallback(onResize)
+discard window.setWindowFocusCallback(onWindowFocus)
 
 onResize(window, cint(winWidth), cint(winHeight))
 writeGpuSnapshot()
@@ -1077,7 +1109,8 @@ while windowShouldClose(window) == 0:
   if term == nil: break
   if atlas.isDirty: rend.updateAtlasTexture()
   let tabLabelsChanged = refreshTabCwdLabels()
-  let changed = resized or n > 0 or atlas.isDirty or activeWorkspaceDirty() or tabLabelsChanged
+  let blockedBySyncUpdate = activeWorkspaceSyncUpdateActive()
+  let changed = (resized or n > 0 or atlas.isDirty or activeWorkspaceDirty() or tabLabelsChanged) and not blockedBySyncUpdate
   if changed:
     drawActiveWorkspace()
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)

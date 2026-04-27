@@ -50,6 +50,7 @@ proc newMockTerminal*(rows, cols: int): Terminal =
     diagnostics: newVtDiagnostics(16),
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
+    syncUpdate: newSyncUpdateState(),
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
@@ -208,8 +209,25 @@ suite "terminal pipeline":
 
   test "DECRQM reports unsupported modern modes instead of timing out":
     let t = newMockTerminal(5, 20)
-    t.feed("\e[?2026$p")
+    t.feed("\e[?9999$p")
     check t.async.queueLen > 0
+
+  test "synchronized update mode defers presentation state":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e[?2026h")
+    check t.synchronizedUpdateActive()
+    t.feed("hello")
+    check t.syncUpdate.dirtyWhileActive
+    t.feed("\e[?2026l")
+    check not t.synchronizedUpdateActive()
+    check t.damage.anyDirty
+
+  test "alternate scroll mode is tracked":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e[?1007h")
+    check t.inputMode.alternateScroll
+    t.feed("\e[?1007l")
+    check not t.inputMode.alternateScroll
 
   test "OSC 52 ignores malformed base64 without hiding callback failures":
     let t = newMockTerminal(5, 20)

@@ -21,6 +21,7 @@ import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/data_semantic_history_nim/src/semantic_history_lib
 import ../cg/universal_link_detector_nim/src/link_detector_lib
 import ../cg/data_terminal_output_footprint_nim/src/terminal_output_footprint_lib
+import ../cg/data_terminal_sync_update_nim/src/terminal_sync_update_lib
 import ../cg/data_vt_diagnostics_nim/src/vt_diagnostics_lib as vt_diag
 
 # OS-Specific Backend Selection
@@ -38,7 +39,8 @@ export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        damage_tracker_lib, selection_region_lib, vt_commands_lib, vt_reports_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
        drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib,
-       semantic_history_lib, link_detector_lib, terminal_output_footprint_lib
+       semantic_history_lib, link_detector_lib, terminal_output_footprint_lib,
+       terminal_sync_update_lib
 export vt_diag
 
 type
@@ -66,6 +68,7 @@ type
     diagnostics*: vt_diag.VtDiagnostics
     activeLink*: Option[ActiveLink]
     outputFootprint*: OutputFootprint
+    syncUpdate*: SyncUpdateState
     # DCS accumulation
     dcsActive: bool
     dcsParams: seq[VtParam]
@@ -116,6 +119,7 @@ proc newTerminal*(
     diagnostics: vt_diag.newVtDiagnostics(diagnosticsCapacity),
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
+    syncUpdate: newSyncUpdateState(),
     dcsActive: false,
   )
 
@@ -201,6 +205,7 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
     of 1002: t.inputMode.mouseMode = if set: mmButtonEvent else: mmNone
     of 1003: t.inputMode.mouseMode = if set: mmAnyEvent else: mmNone
     of 1006: t.inputMode.sgrMouse = set
+    of 1007: t.inputMode.alternateScroll = set
     of 1004: t.inputMode.focusReporting = set
     of 1048:
       if set:
@@ -220,6 +225,10 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
         t.screen.restoreCursor()
         t.applyScreenTransition(transition)
     of 2004: t.inputMode.bracketedPaste = set
+    of 2026:
+      let transition = t.syncUpdate.setActive(set)
+      if transition.exited and transition.shouldPresent:
+        t.damage.markAll()
     else: discard
   else:
     case code
@@ -239,7 +248,9 @@ func modeStatus(t: Terminal, code: int, private: bool): ModeStatus =
       modeSupport(1003, if t.inputMode.mouseMode == mmAnyEvent: msSet else: msReset),
       modeSupport(1004, if t.inputMode.focusReporting: msSet else: msReset),
       modeSupport(1006, if t.inputMode.sgrMouse or t.inputMode.mouseMode == mmSgr: msSet else: msReset),
+      modeSupport(1007, if t.inputMode.alternateScroll: msSet else: msReset),
       modeSupport(2004, if t.inputMode.bracketedPaste: msSet else: msReset),
+      modeSupport(2026, if t.syncUpdate.active: msSet else: msReset),
     ]
     modeStatusFrom(modes, code, privateMode = true)
   else:
@@ -425,6 +436,8 @@ proc apply*(t: Terminal, cmd: VtCommand) =
     t.recordDiagnostic(vt_diag.vekUnknownCsi, "unknown", $char(cmd.rawFinal))
 
 proc feedBytes*(t: Terminal, data: openArray[byte]) =
+  if data.len > 0:
+    t.syncUpdate.markDirty()
   proc vtEmit(ev: VtEvent) =
     case ev.kind
     of vePrint: (t.decoder.feed([ev.byteVal]) do (rune: uint32, width: int): t.apply(VtCommand(kind: cmdPrint, rune: rune, width: width)))
@@ -505,6 +518,7 @@ proc sendPaste*(t: Terminal, text: string): int =
   t.async.send(bytes)
 proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusReporting: 0 else: t.sendReport(reportFocus(gained)))
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.sendReport(reportClipboard(selector, encoded)))
+func synchronizedUpdateActive*(t: Terminal): bool = t.syncUpdate.shouldDeferPresent()
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())
 proc resizeView*(t: Terminal, cols, rows: int) = (t.screen.resizePreserveBottom(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.drag.height = rows; t.refreshViewport())

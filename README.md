@@ -1,6 +1,6 @@
 # Waymark
 
-A native Nim terminal emulator, assembled from 44 reusable
+A native Nim terminal emulator, assembled from 45 reusable
 [Cartograph](https://github.com/benteigland11/Cartograph) widgets.
 
 Building in the open. Expect rough edges.
@@ -27,7 +27,7 @@ The terminal is the showcase. The widgets are the point.
   and zero-leak verdicts. See
   [`tests/memory/reports/SUMMARY.md`](tests/memory/reports/SUMMARY.md) and
   [`tests/memory/README.md`](tests/memory/README.md).
-- **Composability.** 44 widgets, each independently validated, tested,
+- **Composability.** 45 widgets, each independently validated, tested,
   and installable into other projects via `cartograph install`.
 - **Performance.** GPU-accelerated rendering through a glyph atlas + tile
   batcher. Microbenchmarks under [`benchmarks/`](benchmarks/).
@@ -136,7 +136,7 @@ grouped by domain underneath.
 
 </details>
 
-<details><summary><b>data</b> (11) — terminal-specific state and protocol</summary>
+<details><summary><b>data</b> (12) — terminal-specific state and protocol</summary>
 
 | Widget | Purpose |
 |---|---|
@@ -150,6 +150,7 @@ grouped by domain underneath.
 | `data-terminal-render-attrs-nim` | Resolves SGR + colors into final per-cell render attributes. |
 | `data-terminal-theme-nim` | Color scheme / theme representation and management. |
 | `data-terminal-output-footprint-nim` | State machine for inline UIs that draw below the cursor. |
+| `data-terminal-sync-update-nim` | State machine for synchronized TUI redraw windows. |
 | `data-pixel-resource-size-nim` | Byte-size estimation for 2D textures and pixel-backed resources. |
 
 </details>

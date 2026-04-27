@@ -26,6 +26,7 @@ type
     keypadApp*: bool      ## DECKPAM (Application Keypad)
     mouseMode*: MouseMode ## Active mouse protocol
     sgrMouse*: bool       ## \e[?1006h (SGR mouse coordinate encoding)
+    alternateScroll*: bool ## \e[?1007h (wheel events may route to child app)
     bracketedPaste*: bool ## \e[?2004h (Bracketed Paste Mode)
     focusReporting*: bool ## \e[?1004h (Focus Reporting Mode)
 
@@ -170,7 +171,7 @@ func encodeMouseInto(buf: var seq[byte], ev: MouseEvent, mode: MouseMode) =
 # Public API
 # ---------------------------------------------------------------------------
 
-proc encodeKeyEvent*(ev: KeyEvent, mode: InputMode = newInputMode()): seq[byte] =
+func encodeKeyEvent*(ev: KeyEvent, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]
   case ev.code
   of kNone: return
@@ -218,7 +219,7 @@ proc encodeKeyEvent*(ev: KeyEvent, mode: InputMode = newInputMode()): seq[byte] 
     if mode.keypadApp: result.add Esc; result.add byte('O'); result.add byte('M')
     else: (if modAlt in ev.mods: result.add Esc); result.add Cr
 
-proc encodeMouseEvent*(ev: MouseEvent, mode: InputMode = newInputMode()): seq[byte] =
+func encodeMouseEvent*(ev: MouseEvent, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]
   if mode.mouseMode == mmNone: return
   if mode.mouseMode == mmX11 and (ev.kind == meMove or ev.kind == meDrag): return
@@ -232,7 +233,18 @@ func trackingWantsMotion*(mode: InputMode): bool =
 func trackingWantsDrag*(mode: InputMode): bool =
   mode.mouseMode == mmButtonEvent or mode.mouseMode == mmAnyEvent or mode.mouseMode == mmSgr
 
-proc encodePaste*(s: string, mode: InputMode = newInputMode()): seq[byte] =
+func shouldSendWheel*(mode: InputMode): bool =
+  ## Mouse wheel input belongs to the child when mouse tracking is enabled.
+  ## Alternate-scroll mode also asks terminals to translate wheel events into
+  ## application input for full-screen terminal programs.
+  mode.mouseMode != mmNone or mode.alternateScroll
+
+func shouldSendWheelAsCursorKeys*(mode: InputMode, usingAlternateScreen: bool): bool =
+  ## Xterm alternate-scroll behavior sends wheel input as cursor keys when
+  ## mouse tracking is not otherwise active.
+  mode.mouseMode == mmNone and mode.alternateScroll and usingAlternateScreen
+
+func encodePaste*(s: string, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]
   if mode.bracketedPaste:
     result.add Esc; result.add byte('['); result.add byte('2'); result.add byte('0'); result.add byte('0'); result.add byte('~')
