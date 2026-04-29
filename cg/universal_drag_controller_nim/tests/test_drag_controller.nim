@@ -21,11 +21,17 @@ suite "drag controller":
     var c = newDragController(24)
     c.update(10, 10, true)
     check c.state == dsActive
+    check c.autoscrollDelta == 0
+    check c.focusViewportRow == 10
     
     # Drag below viewport
     c.update(25, 10, true)
     check c.state == dsOutsideBottom
+    check c.autoscrollDelta == 1
+    check c.focusViewportRow == 23
     
     # Drag above viewport
     c.update(-1, 10, true)
     check c.state == dsOutsideTop
+    check c.autoscrollDelta == -1
+    check c.focusViewportRow == 0

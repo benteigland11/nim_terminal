@@ -21,6 +21,7 @@ suite "glfw input translator":
   test "toPrintableRune maps unshifted printable keys":
     check toPrintableRune(KEY_A, 0).get() == uint32('a')
     check toPrintableRune(KEY_5, 0).get() == uint32('5')
+    check toPrintableRune(KEY_MINUS, 0).get() == uint32('-')
     check toPrintableRune(KEY_SLASH, 0).get() == uint32('/')
 
   test "toPrintableRune maps shifted printable keys":

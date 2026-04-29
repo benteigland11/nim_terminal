@@ -239,6 +239,17 @@ suite "Erase":
     check s.trimmedLine(0) == ""
     check s.trimmedLine(1) == ""
 
+  test "ED scrollback purge keeps visible screen":
+    let s = newScreen(4, 2, scrollback = 10)
+    s.writeString("one"); s.carriageReturn(); s.linefeed()
+    s.writeString("two"); s.carriageReturn(); s.linefeed()
+    check s.scrollbackLen == 1
+
+    s.eraseInDisplay(emScrollback)
+
+    check s.scrollbackLen == 0
+    check s.trimmedLine(0) == "two"
+
 suite "Insert/delete":
   test "insertChars shifts right and blanks":
     let s = newScreen(6, 1)
@@ -306,6 +317,23 @@ suite "Alternate screen":
 
     s.useAlternateScreen(false)
     check s.totalRows == 3
+
+  test "alt buffer retains its own scrollback while active":
+    let s = newScreen(4, 2, scrollback = 10)
+    s.altScrollbackEnabled = true
+    s.useAlternateScreen(true)
+    s.cursorTo(0, 0)
+
+    s.writeString("one"); s.carriageReturn(); s.linefeed()
+    s.writeString("two"); s.carriageReturn(); s.linefeed()
+
+    check s.totalRows == 3
+    check s.absoluteLineText(0).strip() == "one"
+    check s.absoluteLineText(1).strip() == "two"
+    check s.absoluteCursorRow() == 2
+
+    s.useAlternateScreen(false)
+    check s.totalRows == 2
 
   test "absolute cursor row follows active screen coordinate space":
     let s = newScreen(4, 2, scrollback = 10)

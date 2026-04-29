@@ -16,3 +16,10 @@ suite "POSIX PTY launch environment":
   test "child probe payload is stable":
     check childProbePayload("/tmp/example", "xterm-256color", "truecolor", "/dev/pts/1") ==
       "cwd=/tmp/example\nterm=xterm-256color\ncolorterm=truecolor\ntty=/dev/pts/1\n"
+
+  test "inherited fd policy preserves stdio only":
+    check not shouldCloseInheritedFd(0)
+    check not shouldCloseInheritedFd(1)
+    check not shouldCloseInheritedFd(2)
+    check shouldCloseInheritedFd(3)
+    check not shouldCloseInheritedFd(7, [0, 1, 2, 7])

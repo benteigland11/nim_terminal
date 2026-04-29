@@ -8,21 +8,25 @@
 ##
 ## Run: nim c -r --path:../../cg/backend_pty_host_nim/src test_posix_backend.nim
 
-import std/[unittest, strutils, posix]
+import std/[unittest, strutils, os, posix]
 import ../../cg/backend_pty_host_nim/src/pty_host_lib
 import posix_backend
 
 suite "POSIX PTY backend":
 
+  proc collectOutput(p: PtyHost[PosixBackend], attempts = 50): string =
+    for _ in 0 ..< attempts:
+      let chunk = p.readString(256)
+      if chunk.len > 0:
+        result.add chunk
+        if result.len > 4096: break
+      else:
+        sleep(10)
+
   test "echo emits its argument to the master":
     let backend = newPosixBackend()
     let p = spawn(backend, "/bin/echo", ["hello", "pty"])
-    var collected = ""
-    while true:
-      let chunk = p.readString(256)
-      if chunk.len == 0: break
-      collected.add chunk
-      if collected.len > 4096: break
+    let collected = collectOutput(p)
     let status = p.waitExit()
     p.close()
     check status == 0
@@ -42,12 +46,7 @@ suite "POSIX PTY backend":
     let n = p.writeString("ping\n")
     check n == 5
     discard p.writeString("\x04")  # Ctrl-D, EOF to cat.
-    var collected = ""
-    while true:
-      let chunk = p.readString(256)
-      if chunk.len == 0: break
-      collected.add chunk
-      if collected.len > 4096: break
+    let collected = collectOutput(p)
     discard p.waitExit()
     p.close()
     check "ping" in collected

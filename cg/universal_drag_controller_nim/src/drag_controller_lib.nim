@@ -54,3 +54,28 @@ func update*(c: var DragController, row, col: int, isDown: bool) =
 
 func row*(c: DragController): int = c.currY
 func col*(c: DragController): int = c.currX
+
+func autoscrollDelta*(c: DragController): int =
+  ## Return the viewport scroll direction requested by the current drag state.
+  ## Negative means scroll toward earlier rows, positive means scroll toward
+  ## later rows, and zero means no autoscroll is requested.
+  case c.state
+  of dsOutsideTop:
+    -1
+  of dsOutsideBottom:
+    1
+  else:
+    0
+
+func focusViewportRow*(c: DragController): int =
+  ## Return the visible row that should receive drag focus after any requested
+  ## autoscroll has been applied.
+  if c.height <= 0:
+    return 0
+  case c.state
+  of dsOutsideTop:
+    0
+  of dsOutsideBottom:
+    c.height - 1
+  else:
+    min(max(c.currY, 0), c.height - 1)

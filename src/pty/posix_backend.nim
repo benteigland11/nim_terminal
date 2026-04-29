@@ -39,6 +39,11 @@ proc newPosixBackend*(): PosixBackend =
 proc raisePtyErrno(op: string) =
   raise newException(PtyError, op & " failed: " & $strerror(errno))
 
+proc closeInheritedChildFds(maxFd = 1024) =
+  for fd in 0 .. maxFd:
+    if shouldCloseInheritedFd(fd):
+      discard close(cint(fd))
+
 proc ptyOpen*(b: PosixBackend): tuple[handle: int, slaveId: string] =
   let master = posix_openpt(O_RDWR or O_NOCTTY or O_NONBLOCK)
   if master == -1:
@@ -78,6 +83,7 @@ proc ptyForkExec*(b: PosixBackend, slaveId, program: string,
     if slave > 2:
       discard close(slave)
     applyPosixPtyLaunchEnv(b.launchEnv, cwd, slaveId)
+    closeInheritedChildFds()
     var argv = @[program]
     for arg in args:
       argv.add arg
@@ -110,7 +116,12 @@ proc ptyWrite*(b: PosixBackend, handle: int, data: openArray[byte]): int =
   raisePtyErrno("write")
 
 proc ptySignal*(b: PosixBackend, pid, signum: int) =
-  discard posix.kill(Pid(pid), cint(signum))
+  if pid <= 0:
+    return
+  # Children call setsid(), so pid is also the process-group id. Signal the
+  # whole group so closing a pane terminates foreground descendants too.
+  if posix.kill(Pid(-pid), cint(signum)) == -1:
+    discard posix.kill(Pid(pid), cint(signum))
 
 proc ptyWait*(b: PosixBackend, pid: int): int =
   var status: cint = 0

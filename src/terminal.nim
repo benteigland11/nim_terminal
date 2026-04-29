@@ -140,6 +140,7 @@ func toScreenErase(m: vt_commands_lib.EraseMode): screen_buffer_lib.EraseMode =
   of vt_commands_lib.emToEnd:   screen_buffer_lib.emToEnd
   of vt_commands_lib.emToStart: screen_buffer_lib.emToStart
   of vt_commands_lib.emAll:     screen_buffer_lib.emAll
+  of vt_commands_lib.emScrollback: screen_buffer_lib.emScrollback
 
 func toPaletteColor(c: color_parser_lib.RgbColor): screen_buffer_lib.PaletteColor =
   screen_buffer_lib.PaletteColor(r: c.r, g: c.g, b: c.b)
@@ -532,4 +533,9 @@ proc kill*(t: Terminal, signum: int = -1) =
   t.host.kill(s)
 
 proc waitExit*(t: Terminal): int = t.host.waitExit()
-proc close*(t: Terminal) = t.host.close()
+proc close*(t: Terminal) =
+  if t == nil or t.host == nil or t.host.closed:
+    return
+  t.kill()
+  t.host.close()
+  discard t.waitExit()

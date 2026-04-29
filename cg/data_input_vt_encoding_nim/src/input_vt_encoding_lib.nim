@@ -233,16 +233,17 @@ func trackingWantsMotion*(mode: InputMode): bool =
 func trackingWantsDrag*(mode: InputMode): bool =
   mode.mouseMode == mmButtonEvent or mode.mouseMode == mmAnyEvent or mode.mouseMode == mmSgr
 
-func shouldSendWheel*(mode: InputMode): bool =
+func shouldSendWheel*(mode: InputMode, usingAlternateScreen = false): bool =
   ## Mouse wheel input belongs to the child when mouse tracking is enabled.
   ## Alternate-scroll mode also asks terminals to translate wheel events into
-  ## application input for full-screen terminal programs.
-  mode.mouseMode != mmNone or mode.alternateScroll
+  ## application input for full-screen terminal programs. In alternate screen,
+  ## no mouse protocol still falls back to cursor keys for app-owned scrolling.
+  mode.mouseMode != mmNone or mode.alternateScroll or usingAlternateScreen
 
 func shouldSendWheelAsCursorKeys*(mode: InputMode, usingAlternateScreen: bool): bool =
   ## Xterm alternate-scroll behavior sends wheel input as cursor keys when
   ## mouse tracking is not otherwise active.
-  mode.mouseMode == mmNone and mode.alternateScroll and usingAlternateScreen
+  mode.mouseMode == mmNone and usingAlternateScreen
 
 func encodePaste*(s: string, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]

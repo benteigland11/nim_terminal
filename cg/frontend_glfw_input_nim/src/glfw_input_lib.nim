@@ -82,15 +82,26 @@ func toPrintableRune*(glfwKey: cint, glfwMods: cint): Option[uint32] =
       else: none(uint32)
     else:
       some(uint32(ord('0') + (glfwKey - KEY_0)))
-  of KEY_APOSTROPHE: some(uint32(if shifted: '"' else: '\''))
-  of KEY_COMMA: some(uint32(if shifted: '<' else: ','))
-  of KEY_MINUS: some(uint32(if shifted: '_' else: '-'))
-  of KEY_PERIOD: some(uint32(if shifted: '>' else: '.'))
-  of KEY_SLASH: some(uint32(if shifted: '?' else: '/'))
-  of KEY_SEMICOLON: some(uint32(if shifted: ':' else: ';'))
-  of KEY_EQUAL: some(uint32(if shifted: '+' else: '='))
-  of KEY_LEFT_BRACKET: some(uint32(if shifted: '{' else: '['))
-  of KEY_BACKSLASH: some(uint32(if shifted: '|' else: '\\'))
-  of KEY_RIGHT_BRACKET: some(uint32(if shifted: '}' else: ']'))
-  of KEY_GRAVE_ACCENT: some(uint32(if shifted: '~' else: '`'))
+  of KEY_APOSTROPHE:
+    some(uint32(if shifted: '"' else: '\''))
+  of KEY_COMMA:
+    some(uint32(if shifted: '<' else: ','))
+  of KEY_MINUS:
+    some(uint32(if shifted: '_' else: '-'))
+  of KEY_PERIOD:
+    some(uint32(if shifted: '>' else: '.'))
+  of KEY_SLASH:
+    some(uint32(if shifted: '?' else: '/'))
+  of KEY_SEMICOLON:
+    some(uint32(if shifted: ':' else: ';'))
+  of KEY_EQUAL:
+    some(uint32(if shifted: '+' else: '='))
+  of KEY_LEFT_BRACKET:
+    some(uint32(if shifted: '{' else: '['))
+  of KEY_BACKSLASH:
+    some(uint32(if shifted: '|' else: '\\'))
+  of KEY_RIGHT_BRACKET:
+    some(uint32(if shifted: '}' else: ']'))
+  of KEY_GRAVE_ACCENT:
+    some(uint32(if shifted: '~' else: '`'))
   else: none(uint32)

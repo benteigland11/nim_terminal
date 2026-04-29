@@ -44,6 +44,11 @@ suite "input vt encoding":
     check mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = true)
     check not mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = false)
 
+  test "alternate screen routes wheel as cursor keys without mouse tracking":
+    let mode = newInputMode()
+    check mode.shouldSendWheel(usingAlternateScreen = true)
+    check mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = true)
+
   test "mouse tracking requests wheel routing":
     var mode = newInputMode()
     mode.mouseMode = mmX11

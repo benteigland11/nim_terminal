@@ -50,6 +50,9 @@ suite "CSI erase":
   test "CSI 2 J → emAll":
     check translateCsi(@[p(2)], @[], byte('J')).eraseMode == emAll
 
+  test "CSI 3 J → emScrollback":
+    check translateCsi(@[p(3)], @[], byte('J')).eraseMode == emScrollback
+
   test "CSI K defaults to line-to-end":
     let c = translateCsi(@[], @[], byte('K'))
     check c.kind == cmdEraseInLine
