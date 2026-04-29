@@ -359,12 +359,24 @@ proc scrollUp*(s: Screen, count: int = 1) =
   if n <= 0: return
   let g = if s.usingAlt: addr s.altGrid else: addr s.grid
   let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
-  if s.scrollTop == 0 and s.scrollBottom == s.rows - 1:
+  if s.usingAlt and s.altScrollbackEnabled:
     for i in 0 ..< n:
-      if s.usingAlt and s.altScrollbackEnabled:
-        addScrollbackRow(s.altScrollback, s.altScrollbackSoftWrap, g[][i], wraps[][i], s.scrollbackCap)
-      elif not s.usingAlt:
-        addScrollbackRow(s.scrollback, s.scrollbackSoftWrap, g[][i], wraps[][i], s.scrollbackCap)
+      addScrollbackRow(
+        s.altScrollback,
+        s.altScrollbackSoftWrap,
+        g[][s.scrollTop + i],
+        wraps[][s.scrollTop + i],
+        s.scrollbackCap,
+      )
+  elif not s.usingAlt and s.scrollTop == 0:
+    for i in 0 ..< n:
+      addScrollbackRow(
+        s.scrollback,
+        s.scrollbackSoftWrap,
+        g[][s.scrollTop + i],
+        wraps[][s.scrollTop + i],
+        s.scrollbackCap,
+      )
   for r in s.scrollTop .. (s.scrollBottom - n): g[][r] = g[][r + n]
   for r in s.scrollTop .. (s.scrollBottom - n): wraps[][r] = wraps[][r + n]
   let attrs = defaultAttrs()

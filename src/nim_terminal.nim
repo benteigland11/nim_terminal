@@ -88,6 +88,8 @@ type
     glyphAtlasSize: int
     altScreenScrollback: AltScreenScrollbackMode
     altWheelPolicy: AltWheelPolicy
+    normalWheelPolicy: NormalWheelPolicy
+    meaningfulHistoryRows: int
 
 var
   config = TerminalConfig(
@@ -106,7 +108,9 @@ var
     diagnosticsCapacity: DefaultDiagnosticsCapacity,
     glyphAtlasSize: DefaultGlyphAtlasSize,
     altScreenScrollback: assPassive,
-    altWheelPolicy: awpApp,
+    altWheelPolicy: awpTerminal,
+    normalWheelPolicy: nwpTerminal,
+    meaningfulHistoryRows: 3,
   )
   tabs = newTabSet()
   workspaces: seq[TerminalWorkspace] = @[]
@@ -195,11 +199,25 @@ proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
       result.altScreenScrollback,
     )
     result.altWheelPolicy = parseAltWheelPolicy(
-      dict.getSectionValue("scroll", "wheel_in_alt_screen", "app").strip().toLowerAscii(),
+      dict.getSectionValue("scroll", "wheel_in_alt_screen", "terminal").strip().toLowerAscii(),
       result.altWheelPolicy,
     )
+    result.normalWheelPolicy = parseNormalWheelPolicy(
+      dict.getSectionValue("scroll", "wheel_in_normal_screen", "terminal").strip().toLowerAscii(),
+      result.normalWheelPolicy,
+    )
+    result.meaningfulHistoryRows = max(1, parseIntOr(
+      dict.getSectionValue("scroll", "meaningful_history_rows", $result.meaningfulHistoryRows),
+      result.meaningfulHistoryRows,
+    ))
   except CatchableError as e:
     echo "Config warning: ", e.msg
+
+func toChildWheelEncoding(kind: ScrollInputKind): ChildWheelEncoding =
+  case kind
+  of sikMouseWheel: cweMouseWheel
+  of sikCursorKeys: cweCursorKeys
+  of sikNone: cweNone
 
 func castSet(s: cint): set[terminal.Modifier] =
   if (s and MOD_SHIFT) != 0: result.incl terminal.modShift
@@ -682,6 +700,22 @@ proc writeScreenSnapshot(term: Terminal) =
     lines.add "eof=" & $term.host.eof
     lines.add "cursor=" & $term.screen.cursor.row & "," & $term.screen.cursor.col
     lines.add "rows=" & $term.screen.rows & " cols=" & $term.screen.cols
+    lines.add "using_alt=" & $term.screen.usingAlt
+    lines.add "scroll_region=" & $term.screen.scrollTop & "," & $term.screen.scrollBottom
+    lines.add "total_rows=" & $term.screen.totalRows & " viewport_max_scroll=" & $term.viewport.maxScroll
+    let mode = term.inputMode.snapshot(term.screen.usingAlt)
+    lines.add "input_mouse_mode=" & $mode.mouseMode
+    lines.add "input_sgr_mouse=" & $mode.sgrMouse
+    lines.add "input_alternate_scroll=" & $mode.alternateScroll
+    lines.add "input_bracketed_paste=" & $mode.bracketedPaste
+    lines.add "input_focus_reporting=" & $mode.focusReporting
+    lines.add "input_cursor_app=" & $mode.cursorApp
+    lines.add "input_scroll_kind=" & $mode.scrollInputKind
+    lines.add "normal_tui_likely=" & $(
+      (not term.screen.usingAlt) and
+      mode.mouseMode == mmNone and
+      (mode.cursorApp or mode.focusReporting)
+    )
     for i in 0 ..< min(term.screen.rows, 20):
       lines.add $i & ": " & term.screen.lineText(i)
     writeFile(screenSnapshotPath, lines.join("\n"))
@@ -981,19 +1015,31 @@ proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
   let term = if session == nil: activeTerm() else: session[].terminal
   if term == nil: return
   let ctrlDown = (getKey(window, KEY_LEFT_CONTROL) == PRESS or getKey(window, KEY_RIGHT_CONTROL) == PRESS)
+  let shiftDown = (getKey(window, KEY_LEFT_SHIFT) == PRESS or getKey(window, KEY_RIGHT_SHIFT) == PRESS)
   if ctrlDown:
     if yoffset > 0: fontSize += 1.0
     elif yoffset < 0: fontSize = max(4.0, fontSize - 1.0)
     rebuildAtlas()
   else:
+    let scrollKind = term.inputMode.scrollInputKind(term.screen.usingAlt)
+    let normalTuiLikely =
+      (not term.screen.usingAlt) and
+      term.inputMode.mouseMode == mmNone and
+      (term.inputMode.cursorApp or term.inputMode.focusReporting)
     let action = decideWheelAction(ScrollPolicyInput(
       usingAltScreen: term.screen.usingAlt,
       childWantsWheel: term.inputMode.shouldSendWheel(term.screen.usingAlt),
+      childWheelEncoding: toChildWheelEncoding(scrollKind),
       viewportHasHistory: term.viewport.maxScroll > 0,
+      viewportHasMeaningfulHistory: term.viewport.hasMeaningfulHistory(config.meaningfulHistoryRows),
       viewportAtLiveEnd: term.viewport.isAtLiveEnd,
       scrollingTowardHistory: yoffset > 0,
+      normalScreenTuiLikely: normalTuiLikely,
+      forceTerminalScroll: shiftDown,
+      forceChildScroll: false,
       altScrollbackMode: config.altScreenScrollback,
       altWheelPolicy: config.altWheelPolicy,
+      normalWheelPolicy: config.normalWheelPolicy,
     ))
     case action
     of saScrollViewport:
@@ -1009,14 +1055,37 @@ proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
       let area = activeSessionRect(paneId)
       let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
       let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
-      if term.inputMode.shouldSendWheelAsCursorKeys(term.screen.usingAlt):
+      case scrollKind
+      of sikCursorKeys:
         let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
         for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
           discard term.sendKey(key(keyCode))
-      else:
+      of sikMouseWheel:
         let button = if yoffset > 0: mbWheelUp else: mbWheelDown
         for _ in 0 ..< max(1, int(abs(yoffset))):
           discard term.sendMouse(mouse(mePress, button, row, col))
+      of sikNone:
+        discard
+    of saRouteMouseWheel:
+      let paneId =
+        if session == nil:
+          let workspace = activeWorkspace()
+          if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
+        else:
+          session[].id
+      let area = activeSessionRect(paneId)
+      let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
+      let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
+      let button = if yoffset > 0: mbWheelUp else: mbWheelDown
+      for _ in 0 ..< max(1, int(abs(yoffset))):
+        discard term.sendMouse(mouse(mePress, button, row, col))
+    of saRouteCursorKeys:
+      let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+      for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+        discard term.sendKey(key(keyCode))
+    of saRoutePageKeys:
+      let keyCode = if yoffset > 0: kPageUp else: kPageDown
+      discard term.sendKey(key(keyCode))
     of saIgnore:
       discard
   term.refreshViewport(false); term.damage.markAll()

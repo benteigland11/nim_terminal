@@ -36,6 +36,17 @@ suite "universal viewport":
     check v.isAtLiveEnd == true
     check v.scrollOffset == 0
 
+  test "meaningful history ignores tiny incidental scrollback":
+    var v = newViewport(10)
+    v.updateBufferHeight(12)
+    check v.maxScroll == 2
+    check v.hasMeaningfulHistory() == false
+
+    v.updateBufferHeight(13)
+    check v.maxScroll == 3
+    check v.hasMeaningfulHistory() == true
+    check v.hasMeaningfulHistory(5) == false
+
   test "stick to bottom behavior":
     var v = newViewport(24)
     v.updateBufferHeight(50)

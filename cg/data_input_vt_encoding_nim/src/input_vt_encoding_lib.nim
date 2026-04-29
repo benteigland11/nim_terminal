@@ -30,6 +30,22 @@ type
     bracketedPaste*: bool ## \e[?2004h (Bracketed Paste Mode)
     focusReporting*: bool ## \e[?1004h (Focus Reporting Mode)
 
+  ScrollInputKind* = enum
+    sikNone
+    sikMouseWheel
+    sikCursorKeys
+
+  InputModeSnapshot* = object
+    cursorApp*: bool
+    keypadApp*: bool
+    mouseMode*: MouseMode
+    sgrMouse*: bool
+    alternateScroll*: bool
+    bracketedPaste*: bool
+    focusReporting*: bool
+    usingAlternateScreen*: bool
+    scrollInputKind*: ScrollInputKind
+
 func newInputMode*(): InputMode = InputMode(mouseMode: mmNone)
 
 # ---------------------------------------------------------------------------
@@ -233,17 +249,38 @@ func trackingWantsMotion*(mode: InputMode): bool =
 func trackingWantsDrag*(mode: InputMode): bool =
   mode.mouseMode == mmButtonEvent or mode.mouseMode == mmAnyEvent or mode.mouseMode == mmSgr
 
+func scrollInputKind*(mode: InputMode, usingAlternateScreen = false): ScrollInputKind =
+  ## Select the concrete child-facing encoding for a wheel gesture.
+  if mode.mouseMode != mmNone:
+    return sikMouseWheel
+  if usingAlternateScreen and mode.alternateScroll:
+    return sikCursorKeys
+  if usingAlternateScreen:
+    return sikCursorKeys
+  sikNone
+
 func shouldSendWheel*(mode: InputMode, usingAlternateScreen = false): bool =
-  ## Mouse wheel input belongs to the child when mouse tracking is enabled.
-  ## Alternate-scroll mode also asks terminals to translate wheel events into
-  ## application input for full-screen terminal programs. In alternate screen,
-  ## no mouse protocol still falls back to cursor keys for app-owned scrolling.
-  mode.mouseMode != mmNone or mode.alternateScroll or usingAlternateScreen
+  ## True only when the current mode has a concrete child-facing wheel
+  ## encoding. This avoids routing wheel input to a silent no-op.
+  mode.scrollInputKind(usingAlternateScreen) != sikNone
 
 func shouldSendWheelAsCursorKeys*(mode: InputMode, usingAlternateScreen: bool): bool =
   ## Xterm alternate-scroll behavior sends wheel input as cursor keys when
   ## mouse tracking is not otherwise active.
-  mode.mouseMode == mmNone and usingAlternateScreen
+  mode.scrollInputKind(usingAlternateScreen) == sikCursorKeys
+
+func snapshot*(mode: InputMode, usingAlternateScreen = false): InputModeSnapshot =
+  InputModeSnapshot(
+    cursorApp: mode.cursorApp,
+    keypadApp: mode.keypadApp,
+    mouseMode: mode.mouseMode,
+    sgrMouse: mode.sgrMouse,
+    alternateScroll: mode.alternateScroll,
+    bracketedPaste: mode.bracketedPaste,
+    focusReporting: mode.focusReporting,
+    usingAlternateScreen: usingAlternateScreen,
+    scrollInputKind: mode.scrollInputKind(usingAlternateScreen),
+  )
 
 func encodePaste*(s: string, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]

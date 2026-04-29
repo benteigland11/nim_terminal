@@ -26,6 +26,11 @@ func maxScroll*(v: Viewport): int =
   ## Maximum valid scrollOffset.
   max(0, v.totalRows - v.height)
 
+func hasMeaningfulHistory*(v: Viewport, minRows: int = 3): bool =
+  ## True when the viewport has enough retained rows that wheel input can
+  ## reasonably scroll terminal-owned history instead of incidental churn.
+  v.maxScroll >= max(1, minRows)
+
 func scrollUp*(v: var Viewport, count: int = 1) =
   ## Scroll up (towards history).
   v.scrollOffset = min(v.maxScroll, v.scrollOffset + count)

@@ -117,6 +117,27 @@ suite "Scrolling":
     check s.trimmedLine(0) == "A"
     check s.trimmedLine(3) == "D"
 
+  test "top-anchored primary scroll region contributes to scrollback":
+    let s = newScreen(8, 4, scrollback = 10)
+    s.cursorTo(0, 0)
+    s.writeString("old")
+    s.cursorTo(1, 0)
+    s.writeString("new")
+    s.cursorTo(2, 0)
+    s.writeString("view")
+    s.cursorTo(3, 0)
+    s.writeString("prompt")
+
+    s.setScrollRegion(0, 1)
+    s.cursorTo(1, 0)
+    s.linefeed()
+
+    check s.scrollbackLen == 1
+    check s.scrollbackText(0).strip() == "old"
+    check s.trimmedLine(0) == "new"
+    check s.trimmedLine(2) == "view"
+    check s.trimmedLine(3) == "prompt"
+
 suite "Resize":
   test "resizePreserveBottom grows above visible content":
     let s = newScreen(4, 3)
@@ -334,6 +355,29 @@ suite "Alternate screen":
 
     s.useAlternateScreen(false)
     check s.totalRows == 2
+
+  test "alt buffer retains rows scrolled out of a scroll region":
+    let s = newScreen(8, 4, scrollback = 10)
+    s.altScrollbackEnabled = true
+    s.useAlternateScreen(true)
+    s.cursorTo(0, 0)
+    s.writeString("header")
+    s.cursorTo(1, 0)
+    s.writeString("doc one")
+    s.cursorTo(2, 0)
+    s.writeString("doc two")
+    s.cursorTo(3, 0)
+    s.writeString("footer")
+
+    s.setScrollRegion(1, 2)
+    s.cursorTo(2, 0)
+    s.linefeed()
+
+    check s.totalRows == 5
+    check s.absoluteLineText(0).strip() == "doc one"
+    check s.absoluteLineText(1).strip() == "header"
+    check s.absoluteLineText(2).strip() == "doc two"
+    check s.absoluteLineText(4).strip() == "footer"
 
   test "absolute cursor row follows active screen coordinate space":
     let s = newScreen(4, 2, scrollback = 10)
