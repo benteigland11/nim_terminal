@@ -80,6 +80,11 @@ type
   ScreenMode* = enum
     smAutoWrap
     smInsert
+    smOrigin
+
+  ScreenCharset* = enum
+    scsAscii
+    scsDecSpecialGraphics
 
   ScreenContextTransition* = object
     changed*: bool
@@ -99,6 +104,11 @@ type
     value*: int
     subParams*: seq[int]
 
+  SavedScreenState = object
+    cursor: Cursor
+    charset: ScreenCharset
+    modes: set[ScreenMode]
+
   Screen* = ref object
     cols*, rows*: int
     grid: seq[seq[Cell]]
@@ -106,8 +116,8 @@ type
     rowSoftWrap: seq[bool]
     altRowSoftWrap: seq[bool]
     cursor*: Cursor
-    savedCursor: Option[Cursor]
-    savedCursorAlt: Option[Cursor]
+    savedCursor: Option[SavedScreenState]
+    savedCursorAlt: Option[SavedScreenState]
     scrollTop*, scrollBottom*: int
     tabStops: seq[bool]
     modes*: set[ScreenMode]
@@ -118,6 +128,7 @@ type
     scrollbackCap*: int
     altScrollbackEnabled*: bool
     usingAlt*: bool
+    charset*: ScreenCharset
     title*: string
     iconName*: string
     theme*: TerminalTheme
@@ -198,6 +209,7 @@ func newScreen*(
     scrollbackCap: scrollback,
     altScrollbackEnabled: false,
     usingAlt: false,
+    charset: scsAscii,
     title: "",
     iconName: "",
     theme: defaultTheme(),
@@ -426,6 +438,13 @@ proc applyPrivateMode*(s: Screen, code: int, set: bool): bool =
   ##
   ## Returns true when the mode was handled by this widget.
   case code
+  of 6:
+    if set: s.modes.incl smOrigin
+    else: s.modes.excl smOrigin
+    s.cursor.row = if set: s.scrollTop else: 0
+    s.cursor.col = 0
+    s.cursor.pendingWrap = false
+    true
   of 7:
     if set: s.modes.incl smAutoWrap
     else: s.modes.excl smAutoWrap
@@ -439,7 +458,7 @@ proc applyPrivateMode*(s: Screen, code: int, set: bool): bool =
 proc reset*(s: Screen) =
   s.cursor = newCursor(); s.scrollTop = 0; s.scrollBottom = s.rows - 1
   s.tabStops = makeTabStops(s.cols, DefaultTabWidth); s.modes = {smAutoWrap}
-  s.usingAlt = false; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.altScrollback.setLen(0); s.altScrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
+  s.usingAlt = false; s.charset = scsAscii; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.altScrollback.setLen(0); s.altScrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
   s.theme = defaultTheme(); let attrs = defaultAttrs()
   for r in 0 ..< s.rows:
     s.grid[r] = makeRow(s.cols, attrs)
@@ -757,7 +776,12 @@ proc resizePreserveBottom*(s: Screen, cols, rows: int, preserveCursorRowWhenShor
   s.scrollBottom = rows - 1
   s.tabStops = makeTabStops(cols, DefaultTabWidth)
 
-proc cursorTo*(s: Screen, row, col: int) = (s.cursor.row = max(0, min(s.rows-1, row)); s.cursor.col = max(0, min(s.cols-1, col)); s.cursor.pendingWrap = false)
+proc cursorTo*(s: Screen, row, col: int) =
+  let top = if smOrigin in s.modes: s.scrollTop else: 0
+  let bottom = if smOrigin in s.modes: s.scrollBottom else: s.rows - 1
+  s.cursor.row = max(top, min(bottom, top + row))
+  s.cursor.col = max(0, min(s.cols - 1, col))
+  s.cursor.pendingWrap = false
 proc cursorUp*(s: Screen, count: int = 1) = (s.cursor.row = max(s.scrollTop, s.cursor.row - count); s.cursor.pendingWrap = false)
 proc cursorDown*(s: Screen, count: int = 1) = (s.cursor.row = min(s.scrollBottom, s.cursor.row + count); s.cursor.pendingWrap = false)
 proc cursorForward*(s: Screen, count: int = 1) = (s.cursor.col = min(s.cols - 1, s.cursor.col + count); s.cursor.pendingWrap = false)
@@ -785,7 +809,31 @@ proc tab*(s: Screen) =
   for c in (s.cursor.col + 1) ..< s.cols: (if s.tabStops[c]: (s.cursor.col = c; return))
   s.cursor.col = s.cols - 1
 
+func decSpecialGraphic(cp: uint32): uint32 =
+  case cp
+  of uint32('j'): 0x2518'u32 # lower-right corner
+  of uint32('k'): 0x2510'u32 # upper-right corner
+  of uint32('l'): 0x250C'u32 # upper-left corner
+  of uint32('m'): 0x2514'u32 # lower-left corner
+  of uint32('n'): 0x253C'u32 # crossing lines
+  of uint32('q'): 0x2500'u32 # horizontal line
+  of uint32('t'): 0x251C'u32 # left tee
+  of uint32('u'): 0x2524'u32 # right tee
+  of uint32('v'): 0x2534'u32 # bottom tee
+  of uint32('w'): 0x252C'u32 # top tee
+  of uint32('x'): 0x2502'u32 # vertical line
+  else: cp
+
+func translateCharset(s: Screen, cp: uint32): uint32 =
+  case s.charset
+  of scsAscii: cp
+  of scsDecSpecialGraphics: decSpecialGraphic(cp)
+
+proc setCharset*(s: Screen, charset: ScreenCharset) =
+  s.charset = charset
+
 proc writeRune*(s: Screen, cp: uint32, width: int) =
+  let mapped = s.translateCharset(cp)
   if s.cursor.pendingWrap:
     s.setSoftWrap(s.cursor.row, true)
     s.carriageReturn()
@@ -798,12 +846,36 @@ proc writeRune*(s: Screen, cp: uint32, width: int) =
   if smInsert in s.modes:
     let g = if s.usingAlt: addr s.altGrid else: addr s.grid
     for c in countdown(s.cols - 1, s.cursor.col + width): g[][s.cursor.row][c] = g[][s.cursor.row][c - width]
-  s.setCell(s.cursor.row, s.cursor.col, Cell(rune: cp, width: uint8(width), attrs: s.cursor.attrs))
+  s.setCell(s.cursor.row, s.cursor.col, Cell(rune: mapped, width: uint8(width), attrs: s.cursor.attrs))
   for i in 1 ..< width: (if s.cursor.col + i < s.cols: s.setCell(s.cursor.row, s.cursor.col + i, Cell(rune: 0, width: 0, attrs: s.cursor.attrs)))
   if s.cursor.col + width >= s.cols:
     if smAutoWrap in s.modes: s.cursor.pendingWrap = true; s.cursor.col = s.cols - 1
     else: s.cursor.col = s.cols - 1
   else: s.cursor.col += width
+
+func previousGraphicCell(s: Screen): Cell =
+  let g = if s.usingAlt: s.altGrid else: s.grid
+  var row = s.cursor.row
+  var col = s.cursor.col - 1
+  while row >= 0:
+    while col >= 0:
+      let cell = g[row][col]
+      if cell.width > 0 and cell.rune != 0:
+        return cell
+      dec col
+    dec row
+    col = s.cols - 1
+  emptyCell()
+
+proc repeatPreviousChar*(s: Screen, count: int) =
+  let cell = s.previousGraphicCell()
+  if cell.rune == 0:
+    return
+  let savedAttrs = s.cursor.attrs
+  s.cursor.attrs = cell.attrs
+  for _ in 0 ..< max(0, count):
+    s.writeRune(cell.rune, int(cell.width))
+  s.cursor.attrs = savedAttrs
 
 proc writeChar*(s: Screen, c: char) = s.writeRune(uint32(c), 1)
 func sgr*(v: int, sub: seq[int] = @[]): SgrParam = SgrParam(value: v, subParams: sub)
@@ -839,6 +911,17 @@ proc eraseInDisplay*(s: Screen, mode: EraseMode) =
     else:
       s.scrollback.setLen(0)
       s.scrollbackSoftWrap.setLen(0)
+
+proc screenAlignmentTest*(s: Screen) =
+  ## DECALN fills the active display with E characters using default attrs.
+  let g = if s.usingAlt: addr s.altGrid else: addr s.grid
+  let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
+  let attrs = defaultAttrs()
+  for r in 0 ..< s.rows:
+    for c in 0 ..< s.cols:
+      g[][r][c] = Cell(rune: uint32('E'), width: 1, attrs: attrs)
+    wraps[][r] = false
+  s.cursor.pendingWrap = false
 
 proc insertLines*(s: Screen, count: int) = (if s.cursor.row >= s.scrollTop and s.cursor.row <= s.scrollBottom: (let ot = s.scrollTop; s.scrollTop = s.cursor.row; s.scrollDown(count); s.scrollTop = ot))
 proc deleteLines*(s: Screen, count: int) = (if s.cursor.row >= s.scrollTop and s.cursor.row <= s.scrollBottom: (let ot = s.scrollTop; s.scrollTop = s.cursor.row; s.scrollUp(count); s.scrollTop = ot))
@@ -1002,5 +1085,22 @@ proc setTabStop*(s: Screen) = (if s.cursor.col < s.cols: s.tabStops[s.cursor.col
 proc clearTabStop*(s: Screen) = (if s.cursor.col < s.cols: s.tabStops[s.cursor.col] = false)
 proc clearAllTabStops*(s: Screen) = (for i in 0 ..< s.cols: s.tabStops[i] = false)
 proc setScrollRegion*(s: Screen, t, b: int) = (s.scrollTop = max(0, min(s.rows - 1, t)); s.scrollBottom = max(s.scrollTop, min(s.rows - 1, b)))
-proc saveCursor*(s: Screen) = (if s.usingAlt: s.savedCursorAlt = some(s.cursor) else: s.savedCursor = some(s.cursor))
-proc restoreCursor*(s: Screen) = (let saved = if s.usingAlt: s.savedCursorAlt else: s.savedCursor; if saved.isSome: (s.cursor = saved.get; s.cursor.pendingWrap = false))
+func savedState(s: Screen): SavedScreenState =
+  SavedScreenState(cursor: s.cursor, charset: s.charset, modes: s.modes)
+
+proc applySavedState(s: Screen, saved: SavedScreenState) =
+  s.cursor = saved.cursor
+  s.cursor.pendingWrap = false
+  s.charset = saved.charset
+  s.modes = saved.modes
+
+proc saveCursor*(s: Screen) =
+  if s.usingAlt:
+    s.savedCursorAlt = some(s.savedState())
+  else:
+    s.savedCursor = some(s.savedState())
+
+proc restoreCursor*(s: Screen) =
+  let saved = if s.usingAlt: s.savedCursorAlt else: s.savedCursor
+  if saved.isSome:
+    s.applySavedState(saved.get())

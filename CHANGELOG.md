@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added a reusable VT compliance suite widget and an 88-vector Waymark adapter test.
+- Preserved the visible top row when output arrives while the user is scrolled back.
+- Added DECOM origin-mode handling and hardened VT report / scroll-region semantics.
+
 ## v0.1.1
 
 - Fixed PTY lifecycle cleanup so child processes are shut down more reliably.

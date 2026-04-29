@@ -1,6 +1,6 @@
 # Waymark
 
-A native Nim terminal emulator, assembled from 45 reusable
+A native Nim terminal emulator, assembled from 47 reusable
 [Cartograph](https://github.com/benteigland11/Cartograph) widgets.
 
 Building in the open. Expect rough edges.
@@ -27,7 +27,7 @@ The terminal is the showcase. The widgets are the point.
   and zero-leak verdicts. See
   [`tests/memory/reports/SUMMARY.md`](tests/memory/reports/SUMMARY.md) and
   [`tests/memory/README.md`](tests/memory/README.md).
-- **Composability.** 45 widgets, each independently validated, tested,
+- **Composability.** 47 widgets, each independently validated, tested,
   and installable into other projects via `cartograph install`.
 - **Performance.** GPU-accelerated rendering through a glyph atlas + tile
   batcher. Microbenchmarks under [`benchmarks/`](benchmarks/).
@@ -154,7 +154,7 @@ grouped by domain underneath.
 
 </details>
 
-<details><summary><b>data</b> (13) — terminal-specific state and protocol</summary>
+<details><summary><b>data</b> (14) — terminal-specific state and protocol</summary>
 
 | Widget | Purpose |
 |---|---|
@@ -162,6 +162,7 @@ grouped by domain underneath.
 | `data-vt-commands-nim` | Translates raw CSI/ESC/OSC/C0 dispatches into semantic `VtCommand`s. |
 | `data-vt-reports-nim` | Generator for terminal response strings (DSR, DA, window state). |
 | `data-vt-diagnostics-nim` | Bounded ring buffer of recent unknown VT events / mode changes. |
+| `data-vt-compliance-suite-nim` | Declarative VT vector format and golden-state comparison harness. |
 | `data-screen-buffer-nim` | Cells, cursor, attrs, scroll regions, alt buffer, scrollback, resize. |
 | `data-input-vt-encoding-nim` | Encodes input events into terminal escape sequences. |
 | `data-semantic-history-nim` | OSC 133 shell-integration state machine for command history. |

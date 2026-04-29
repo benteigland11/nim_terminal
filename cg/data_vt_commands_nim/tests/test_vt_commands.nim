@@ -67,11 +67,27 @@ suite "CSI scroll/insert/delete":
     let c = translateCsi(@[p(2)], @[], byte('@'))
     check c.kind == cmdInsertChars and c.count == 2
 
+  test "CSI b repeats preceding graphic character":
+    let c = translateCsi(@[p(3)], @[], byte('b'))
+    check c.kind == cmdRepeatPreviousChar
+    check c.count == 3
+
   test "CSI r without params sets region from top to end":
     let c = translateCsi(@[], @[], byte('r'))
     check c.kind == cmdSetScrollRegion
     check c.regionTop == 0
     check c.regionBottom == DefaultScrollRegionBottom
+
+  test "CSI r with defaulted params resets region from top to end":
+    let c = translateCsi(@[p(-1)], @[], byte('r'))
+    check c.kind == cmdSetScrollRegion
+    check c.regionTop == 0
+    check c.regionBottom == DefaultScrollRegionBottom
+
+    let z = translateCsi(@[p(0), p(0)], @[], byte('r'))
+    check z.kind == cmdSetScrollRegion
+    check z.regionTop == 0
+    check z.regionBottom == DefaultScrollRegionBottom
 
   test "CSI 5;20 r sets region (4, 19)":
     let c = translateCsi(@[p(5), p(20)], @[], byte('r'))
@@ -136,6 +152,11 @@ suite "CSI modes":
     check c.privateMode
     check c.modeCode == 2026
 
+  test "secondary device attributes marker is translated":
+    let c = translateCsi(@[], @[byte('>')], byte('c'))
+    check c.kind == cmdRequestDeviceAttributes
+    check c.requestPrivate
+
   test "DECSCUSR cursor style is translated":
     let c = translateCsi(@[p(5)], @[byte(' ')], byte('q'))
     check c.kind == cmdSetCursorStyle
@@ -159,8 +180,20 @@ suite "ESC sequences":
   test "ESC c → reset":
     check translateEsc(@[], byte('c')).kind == cmdReset
 
+  test "DECALN screen alignment test is translated":
+    check translateEsc(@[byte('#')], byte('8')).kind == cmdScreenAlignmentTest
+
+  test "G0 charset selections are translated":
+    let ascii = translateEsc(@[byte('(')], byte('B'))
+    check ascii.kind == cmdSelectCharset
+    check ascii.charsetFinal == byte('B')
+
+    let dec = translateEsc(@[byte('(')], byte('0'))
+    check dec.kind == cmdSelectCharset
+    check dec.charsetFinal == byte('0')
+
   test "ESC with intermediate falls through to unknown":
-    check translateEsc(@[byte('(')], byte('B')).kind == cmdUnknown
+    check translateEsc(@[byte('(')], byte('A')).kind == cmdUnknown
 
 suite "C0 execute":
   test "BS, HT, LF, CR, BEL map to named commands":

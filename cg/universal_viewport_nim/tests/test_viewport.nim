@@ -55,6 +55,42 @@ suite "universal viewport":
     check v.isAtBottom == true
     check v.scrollOffset == 0
 
+  test "history growth preserves scrolled-back top row":
+    var v = newViewport(5)
+    v.updateBufferHeight(20)
+    v.scrollUp(8)
+    let topBefore = v.viewportToBuffer(0)
+    let bottomBefore = v.viewportToBuffer(4)
+
+    v.updateBufferHeight(24, stickToBottom = true)
+
+    check v.isAtBottom == false
+    check v.viewportToBuffer(0) == topBefore
+    check v.viewportToBuffer(4) == bottomBefore
+    check v.scrollOffset == 12
+
+  test "history growth at live end remains pinned":
+    var v = newViewport(5)
+    v.updateBufferHeight(20)
+    check v.isAtBottom
+
+    v.updateBufferHeight(24, stickToBottom = true)
+
+    check v.isAtBottom
+    check v.viewportToBuffer(4) == 23
+
+  test "history trim clamps preserved top row cleanly":
+    var v = newViewport(5)
+    v.updateBufferHeight(20)
+    v.scrollUp(15)
+    check v.viewportToBuffer(0) == 0
+
+    v.updateBufferHeight(4, stickToBottom = true)
+
+    check v.scrollOffset == 0
+    check v.viewportToBuffer(0) == -1
+    check v.viewportToBuffer(4) == 3
+
   test "clamping":
     var v = newViewport(24)
     v.updateBufferHeight(30)

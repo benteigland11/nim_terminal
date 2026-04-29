@@ -54,11 +54,17 @@ func isAtLiveEnd*(v: Viewport): bool =
 
 func updateBufferHeight*(v: var Viewport, totalRows: int, stickToBottom: bool = true) =
   ## Update total buffer size. If `stickToBottom` is true and we were
-  ## at the bottom, stay at the bottom.
+  ## at the bottom, stay at the bottom. Otherwise preserve the absolute
+  ## top row when possible so new output does not move a scrolled-back view.
   let wasAtBottom = v.isAtBottom
+  let oldBottom = v.totalRows - 1 - v.scrollOffset
+  let oldTop = oldBottom - (v.height - 1)
   v.totalRows = totalRows
   if stickToBottom and wasAtBottom:
     v.scrollToBottom()
+  elif oldTop >= 0:
+    let desiredOffset = v.totalRows - v.height - oldTop
+    v.scrollOffset = max(0, min(v.maxScroll, desiredOffset))
   else:
     # Ensure offset is still valid
     v.scrollOffset = min(v.maxScroll, v.scrollOffset)

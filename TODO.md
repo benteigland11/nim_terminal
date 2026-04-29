@@ -10,4 +10,4 @@ These are personal notes for possible future Waymark work, not a release roadmap
 - Add foreground-command fallback tab titles.
 - Make `Ctrl+Shift+W` close the active tab when that tab has only one pane.
 - Expand Windows packaging and testing.
-- Add vttest-style compatibility coverage.
+- Expand VT compliance coverage toward vttest-style compatibility.

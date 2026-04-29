@@ -64,6 +64,27 @@ suite "Writing and cursor":
     check s.cursor.row == 0
     check s.trimmedLine(1) == ""
 
+  test "DEC special graphics charset maps box drawing runes":
+    let s = newScreen(8, 1)
+    s.setCharset(scsDecSpecialGraphics)
+    s.writeString("lqkx")
+    s.setCharset(scsAscii)
+    s.writeString("q")
+
+    check s.cellAt(0, 0).rune == 0x250C'u32
+    check s.cellAt(0, 1).rune == 0x2500'u32
+    check s.cellAt(0, 2).rune == 0x2510'u32
+    check s.cellAt(0, 3).rune == 0x2502'u32
+    check s.cellAt(0, 4).rune == uint32('q')
+
+  test "repeatPreviousChar repeats the preceding graphic cell":
+    let s = newScreen(8, 1)
+    s.writeString("A")
+    s.repeatPreviousChar(3)
+
+    check s.trimmedLine(0) == "AAAA"
+    check s.cursor.col == 4
+
   test "private screen modes update screen-owned cursor and wrap state":
     let s = newScreen(4, 2)
     check s.applyPrivateMode(25, false)
@@ -75,6 +96,27 @@ suite "Writing and cursor":
     check s.applyPrivateMode(7, true)
     check smAutoWrap in s.modes
     check not s.applyPrivateMode(1000, true)
+
+  test "origin mode makes cursor addressing relative to scroll region":
+    let s = newScreen(10, 6)
+    s.setScrollRegion(2, 4)
+
+    check s.applyPrivateMode(6, true)
+    check smOrigin in s.modes
+    check s.cursor.row == 2
+    check s.cursor.col == 0
+
+    s.cursorTo(0, 3)
+    check s.cursor.row == 2
+    check s.cursor.col == 3
+
+    s.cursorTo(9, 0)
+    check s.cursor.row == 4
+
+    check s.applyPrivateMode(6, false)
+    check smOrigin notin s.modes
+    check s.cursor.row == 0
+    check s.cursor.col == 0
 
 suite "Scrolling":
   test "linefeed at bottom scrolls region up":
@@ -426,6 +468,36 @@ suite "Save / restore cursor":
     check afBold in s.cursor.attrs.flags
     check s.cursor.attrs.fg.kind == ckIndexed
     check s.cursor.attrs.fg.index == 1
+
+  test "save/restore round-trips charset and origin/wrap modes":
+    let s = newScreen(10, 4)
+    s.setScrollRegion(1, 3)
+    discard s.applyPrivateMode(6, true)
+    discard s.applyPrivateMode(7, false)
+    s.setCharset(scsDecSpecialGraphics)
+    s.saveCursor()
+
+    discard s.applyPrivateMode(6, false)
+    discard s.applyPrivateMode(7, true)
+    s.setCharset(scsAscii)
+    s.restoreCursor()
+    s.writeString("q")
+
+    check smOrigin in s.modes
+    check smAutoWrap notin s.modes
+    check s.cellAt(1, 0).rune == 0x2500'u32
+
+suite "Screen reset/alignment":
+  test "screen alignment test fills active display with default E cells":
+    let s = newScreen(5, 2)
+    s.applySgr([sgr(31)])
+    s.writeString("abc")
+
+    s.screenAlignmentTest()
+
+    check s.trimmedLine(0) == "EEEEE"
+    check s.trimmedLine(1) == "EEEEE"
+    check s.cellAt(0, 0).attrs.fg.kind == ckDefault
 
 suite "SGR":
   test "empty SGR resets attributes":

@@ -69,6 +69,7 @@ type
     activeLink*: Option[ActiveLink]
     outputFootprint*: OutputFootprint
     syncUpdate*: SyncUpdateState
+    reports*: seq[string]
     # DCS accumulation
     dcsActive: bool
     dcsParams: seq[VtParam]
@@ -260,6 +261,7 @@ func modeStatus(t: Terminal, code: int, private: bool): ModeStatus =
 
 proc sendReport(t: Terminal, report: string): int =
   if report.len == 0: return 0
+  t.reports.add report
   t.async.send(report.toOpenArrayByte(0, report.high))
 
 proc recordDiagnostic(t: Terminal, kind: vt_diag.VtEventKind, name, detail: string) =
@@ -335,6 +337,7 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdDeleteLines: (t.screen.deleteLines(cmd.count); t.trackOutputFootprint(rowBefore, t.screen.scrollBottom); t.damage.markAll())
   of cmdInsertChars: (t.screen.insertChars(cmd.count); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
   of cmdDeleteChars: (t.screen.deleteChars(cmd.count); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
+  of cmdRepeatPreviousChar: (t.screen.repeatPreviousChar(cmd.count); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
   of cmdScrollUp:    (t.screen.scrollUp(cmd.count); t.trackOutputFootprint(t.screen.scrollTop, t.screen.scrollBottom); t.damage.markAll())
   of cmdScrollDown:  (t.screen.scrollDown(cmd.count); t.trackOutputFootprint(t.screen.scrollTop, t.screen.scrollBottom); t.damage.markAll())
   of cmdSaveCursor:     t.screen.saveCursor()
@@ -414,6 +417,13 @@ proc apply*(t: Terminal, cmd: VtCommand) =
       of 12: t.screen.theme.cursor = c
       else: discard
       t.damage.markAll()
+  of cmdScreenAlignmentTest:
+    t.screen.screenAlignmentTest()
+    t.damage.markAll()
+  of cmdSelectCharset:
+    case cmd.charsetFinal
+    of byte('0'): t.screen.setCharset(scsDecSpecialGraphics)
+    else: t.screen.setCharset(scsAscii)
   of cmdShellPromptStart:
     t.finishOutputFootprint(force = t.history.phase == sphOutput)
     t.history.markPromptStart(t.absoluteCursorRow())

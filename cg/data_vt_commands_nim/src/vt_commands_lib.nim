@@ -80,6 +80,7 @@ type
     cmdDeleteLines
     cmdInsertChars
     cmdDeleteChars
+    cmdRepeatPreviousChar ## REP / CSI Ps b
     cmdScrollUp
     cmdScrollDown
     cmdSaveCursor
@@ -101,6 +102,8 @@ type
     cmdHyperlink          ## OSC 8
     cmdRequestStateString ## DECRQSS / DCS $ q Pt ST
     cmdDcsPassthrough     ## DCS hook + put + unhook accumulated
+    cmdScreenAlignmentTest ## DECALN / ESC # 8
+    cmdSelectCharset      ## ESC ( B / ESC ( 0
     cmdClipboardRequest   ## OSC 52
     cmdSetPaletteColor    ## OSC 4
     cmdSetThemeColor      ## OSC 10 (fg), 11 (bg), 12 (cursor)
@@ -134,7 +137,7 @@ type
        cmdCursorNextLine, cmdCursorPrevLine,
        cmdInsertLines, cmdDeleteLines,
        cmdInsertChars, cmdDeleteChars, cmdEraseChars,
-       cmdScrollUp, cmdScrollDown:
+       cmdRepeatPreviousChar, cmdScrollUp, cmdScrollDown:
       count*: int
     of cmdCursorTo:
       row*, col*: int
@@ -170,6 +173,8 @@ type
       themeColorSpec*: string
     of cmdShellCommandFinished:
       exitCode*: int
+    of cmdSelectCharset:
+      charsetFinal*: byte
     else:
       discard
 
@@ -232,6 +237,7 @@ func translateCsi*(
   ## `intermediates` carries any `< = > ?` private-marker bytes that
   ## preceded the parameters, plus `SPACE !` etc. that may follow them.
   let isPrivate = hasPrivateMarker(intermediates, '?')
+  let isSecondary = hasPrivateMarker(intermediates, '>')
   let n = countFrom(params)
   case char(final)
   of 'A': return cmdN(cmdCursorUp, n)
@@ -255,6 +261,7 @@ func translateCsi*(
   of 'L': return cmdN(cmdInsertLines, n)
   of 'M': return cmdN(cmdDeleteLines, n)
   of 'P': return cmdN(cmdDeleteChars, n)
+  of 'b': return cmdN(cmdRepeatPreviousChar, n)
   of 'S': return cmdN(cmdScrollUp, n)
   of 'T': return cmdN(cmdScrollDown, n)
   of 'X': return cmdN(cmdEraseChars, n)
@@ -268,8 +275,11 @@ func translateCsi*(
     for p in params: copy.add p
     return VtCommand(kind: cmdSetSgr, sgrParams: copy)
   of 'r':
-    let top = max(0, paramOr(params, 0, 1) - 1)
-    let bot = paramOr(params, 1, 0)
+    let defaultTop = paramOr(params, 0, 0) <= 0
+    let defaultBottom = params.len <= 1 or paramOr(params, 1, 0) <= 0
+    let resetRegion = params.len == 0 or (defaultTop and defaultBottom)
+    let top = if resetRegion: 0 else: max(0, paramOr(params, 0, 1) - 1)
+    let bot = if resetRegion: 0 else: paramOr(params, 1, 0)
     let bottom = if bot <= 0: DefaultScrollRegionBottom else: bot - 1
     return VtCommand(kind: cmdSetScrollRegion,
                      regionTop: top, regionBottom: bottom)
@@ -310,7 +320,7 @@ func translateCsi*(
   of 'c':
     var copy: seq[DispatchParam] = @[]
     for p in params: copy.add p
-    return VtCommand(kind: cmdRequestDeviceAttributes, requestArgs: copy, requestPrivate: isPrivate)
+    return VtCommand(kind: cmdRequestDeviceAttributes, requestArgs: copy, requestPrivate: isPrivate or isSecondary)
   of 't':
     var copy: seq[DispatchParam] = @[]
     for p in params: copy.add p
@@ -352,6 +362,11 @@ func translateDcs*(
 # ---------------------------------------------------------------------------
 
 func translateEsc*(intermediates: openArray[byte], final: byte): VtCommand =
+  if intermediates.len == 1 and intermediates[0] == byte('#') and final == byte('8'):
+    return cmd(cmdScreenAlignmentTest)
+  if intermediates.len == 1 and intermediates[0] == byte('(') and
+      (final == byte('B') or final == byte('0')):
+    return VtCommand(kind: cmdSelectCharset, charsetFinal: final)
   if intermediates.len == 0:
     case char(final)
     of '7': return cmd(cmdSaveCursor)

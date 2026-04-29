@@ -1,0 +1,881 @@
+[
+  {
+    "name": "Plain text layout",
+    "input": "hello\r\nworld",
+    "expect": {
+      "lines": {
+        "0": "hello",
+        "1": "world"
+      }
+    }
+  },
+  {
+    "name": "CSI cursor positioning (CUP)",
+    "input": "\u001b[2;3HX",
+    "expect": {
+      "cursor": [1, 3],
+      "cells": {
+        "1,2": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "Erase in Display (ED 2) - Full",
+    "input": "abc\u001b[2J",
+    "expect": {
+      "lines": {
+        "0": ""
+      }
+    }
+  },
+  {
+    "name": "Reverse Index (RI)",
+    "input": "line 1\r\nline 2\u001bM",
+    "expect": {
+      "cursor": [0, 6]
+    }
+  },
+  {
+    "name": "SGR Bold (SGR 1)",
+    "input": "\u001b[1mBOLD",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 66, "bold": true }
+      }
+    }
+  },
+  {
+    "name": "SGR Indexed FG (SGR 31)",
+    "input": "\u001b[31mRED",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 82, "fg": "1" }
+      }
+    }
+  },
+  {
+    "name": "SGR Selective Reset (Bold Off, Red stays)",
+    "input": "\u001b[1;31mB\u001b[22mR",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 66, "bold": true, "fg": "1" },
+        "0,1": { "rune": 82, "bold": false, "fg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Scrolling Region (DECSTBM) + LF",
+    "input": "1\r\n2\r\n3\r\n4\r\n\u001b[2;3r\u001b[3;1H\n",
+    "expect": {
+      "lines": {
+        "0": "1",
+        "1": "3",
+        "2": "",
+        "3": "4"
+      }
+    }
+  },
+  {
+    "name": "LF outside scroll region (Should not scroll region)",
+    "input": "\u001b[1;2r\u001b[3;1H\n",
+    "expect": {
+      "cursor": [3, 0]
+    }
+  },
+  {
+    "name": "Save/Restore Cursor (DECSC/DECRC)",
+    "input": "ABC\u001b7\r\nDEF\u001b8X",
+    "expect": {
+      "lines": {
+        "0": "ABCX"
+      }
+    }
+  },
+  {
+    "name": "Wide character (Emoji) layout",
+    "input": "🦀X",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 129408 },
+        "0,1": { "rune": 0 },
+        "0,2": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "Pending Wrap at end of line",
+    "input": "12345678901234567890",
+    "expect": {
+      "cursor": [0, 19]
+    }
+  },
+  {
+    "name": "Wrap occurs on next character",
+    "input": "12345678901234567890X",
+    "expect": {
+      "cursor": [1, 1],
+      "lines": {
+        "0": "12345678901234567890",
+        "1": "X"
+      }
+    }
+  },
+  {
+    "name": "Cursor relative movement clamps at top-left",
+    "input": "\u001b[5;5HX\u001b[10A\u001b[10DY",
+    "expect": {
+      "cursor": [0, 1],
+      "cells": {
+        "4,4": { "rune": 88 },
+        "0,0": { "rune": 89 }
+      }
+    }
+  },
+  {
+    "name": "Cursor next and previous line reset column",
+    "input": "abc\u001b[2EX\u001b[FY",
+    "expect": {
+      "cursor": [1, 1],
+      "lines": {
+        "0": "abc",
+        "1": "Y",
+        "2": "X"
+      }
+    }
+  },
+  {
+    "name": "Horizontal tab advances to next default stop",
+    "input": "A\tB",
+    "expect": {
+      "cursor": [0, 9],
+      "cells": {
+        "0,0": { "rune": 65 },
+        "0,8": { "rune": 66 }
+      }
+    }
+  },
+  {
+    "name": "Tab clear removes current stop",
+    "input": "\u001b[9G\u001b[0g\u001b[1GA\tB",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65 },
+        "0,16": { "rune": 66 }
+      }
+    }
+  },
+  {
+    "name": "Erase in Line to end",
+    "input": "abcdef\u001b[1;3H\u001b[K",
+    "expect": {
+      "lines": {
+        "0": "ab"
+      }
+    }
+  },
+  {
+    "name": "Erase in Line to start",
+    "input": "abcdef\u001b[1;3H\u001b[1K",
+    "expect": {
+      "lines": {
+        "0": "   def"
+      }
+    }
+  },
+  {
+    "name": "Erase characters preserves cursor",
+    "input": "abcdef\u001b[1;3H\u001b[2X",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "ab  ef"
+      }
+    }
+  },
+  {
+    "name": "Insert characters shifts right",
+    "input": "abcdef\u001b[1;3H\u001b[2@",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "ab  cdef"
+      }
+    }
+  },
+  {
+    "name": "Delete characters shifts left",
+    "input": "abcdef\u001b[1;3H\u001b[2P",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "abef"
+      }
+    }
+  },
+  {
+    "name": "Insert line within scroll region",
+    "input": "A\r\nB\r\nC\r\nD\u001b[2;4r\u001b[3;1H\u001b[L",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "B",
+        "2": "",
+        "3": "C"
+      }
+    }
+  },
+  {
+    "name": "Delete line within scroll region",
+    "input": "A\r\nB\r\nC\r\nD\u001b[2;4r\u001b[2;1H\u001b[M",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "C",
+        "2": "D",
+        "3": ""
+      }
+    }
+  },
+  {
+    "name": "Scroll region reset restores full-screen scrolling",
+    "input": "A\r\nB\r\nC\r\nD\u001b[2;3r\u001b[r\u001b[10;1H\n",
+    "expect": {
+      "cursor": [9, 0],
+      "lines": {
+        "0": "B",
+        "1": "C",
+        "2": "D",
+        "3": ""
+      }
+    }
+  },
+  {
+    "name": "Reverse index inside scroll region shifts region down",
+    "input": "A\r\nB\r\nC\r\nD\u001b[2;4r\u001b[2;1H\u001bM",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "",
+        "2": "B",
+        "3": "C"
+      }
+    }
+  },
+  {
+    "name": "SGR truecolor foreground semicolon form",
+    "input": "\u001b[38;2;1;2;3mX",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 88, "fg": "#010203" }
+      }
+    }
+  },
+  {
+    "name": "SGR truecolor foreground colon form",
+    "input": "\u001b[38:2::4:5:6mX",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 88, "fg": "#040506" }
+      }
+    }
+  },
+  {
+    "name": "SGR inverse swaps foreground and background at render state",
+    "input": "\u001b[31;44mA\u001b[7mB\u001b[27mC",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65, "fg": "1", "bg": "4" },
+        "0,1": { "rune": 66, "fg": "1", "bg": "4" },
+        "0,2": { "rune": 67, "fg": "1", "bg": "4" }
+      }
+    }
+  },
+  {
+    "name": "Autowrap disabled overwrites final column",
+    "input": "\u001b[?7l12345678901234567890X",
+    "expect": {
+      "cursor": [0, 19],
+      "autowrap": false,
+      "lines": {
+        "0": "1234567890123456789X"
+      }
+    }
+  },
+  {
+    "name": "Autowrap re-enabled wraps on next character",
+    "input": "\u001b[?7l\u001b[?7h12345678901234567890X",
+    "expect": {
+      "cursor": [1, 1],
+      "autowrap": true,
+      "lines": {
+        "0": "12345678901234567890",
+        "1": "X"
+      }
+    }
+  },
+  {
+    "name": "Scroll up command moves scroll region content up",
+    "input": "A\r\nB\r\nC\r\nD\u001b[2;4r\u001b[S",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "C",
+        "2": "D",
+        "3": ""
+      }
+    }
+  },
+  {
+    "name": "Scroll down command moves scroll region content down",
+    "input": "A\r\nB\r\nC\r\nD\u001b[2;4r\u001b[T",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "",
+        "2": "B",
+        "3": "C"
+      }
+    }
+  },
+  {
+    "name": "Erase display to end keeps prior rows",
+    "input": "A\r\nB\r\nC\u001b[2;1H\u001b[J",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "",
+        "2": ""
+      }
+    }
+  },
+  {
+    "name": "Erase display to start keeps later rows",
+    "input": "A\r\nB\r\nC\u001b[2;1H\u001b[1J",
+    "expect": {
+      "lines": {
+        "0": "",
+        "1": "",
+        "2": "C"
+      }
+    }
+  },
+  {
+    "name": "Erase scrollback leaves visible screen",
+    "input": "A\r\nB\r\nC\u001b[3J",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "B",
+        "2": "C"
+      }
+    }
+  },
+  {
+    "name": "Cursor visibility mode toggles",
+    "input": "\u001b[?25lA\u001b[?25h",
+    "expect": {
+      "cursorVisible": true,
+      "lines": {
+        "0": "A"
+      }
+    }
+  },
+  {
+    "name": "Alternate screen enter and leave restores primary",
+    "input": "main\u001b[?1049hALT\u001b[?1049lX",
+    "expect": {
+      "usingAlt": false,
+      "lines": {
+        "0": "mainX"
+      }
+    }
+  },
+  {
+    "name": "Alternate screen mode remains active",
+    "input": "main\u001b[?1047hALT",
+    "expect": {
+      "usingAlt": true,
+      "lines": {
+        "0": "ALT"
+      }
+    }
+  },
+  {
+    "name": "OSC title and icon name",
+    "input": "\u001b]0;Window Title\u0007\u001b]1;Icon Name\u0007",
+    "expect": {
+      "title": "Window Title",
+      "iconName": "Icon Name"
+    }
+  },
+  {
+    "name": "OSC title via ST terminator",
+    "input": "\u001b]2;ST Title\u001b\\",
+    "expect": {
+      "title": "ST Title"
+    }
+  },
+  {
+    "name": "Mouse and input private modes compose",
+    "input": "\u001b[?1000h\u001b[?1006h\u001b[?1007h\u001b[?2004h\u001b[?1004h",
+    "expect": {
+      "mouseMode": "mmX11",
+      "sgrMouse": true,
+      "alternateScroll": true,
+      "bracketedPaste": true,
+      "focusReporting": true
+    }
+  },
+  {
+    "name": "Mouse and input private modes reset",
+    "input": "\u001b[?1000h\u001b[?1006h\u001b[?1007h\u001b[?2004h\u001b[?1004h\u001b[?1000l\u001b[?1006l\u001b[?1007l\u001b[?2004l\u001b[?1004l",
+    "expect": {
+      "mouseMode": "mmNone",
+      "sgrMouse": false,
+      "alternateScroll": false,
+      "bracketedPaste": false,
+      "focusReporting": false
+    }
+  },
+  {
+    "name": "Clear all tab stops tabs to right margin",
+    "input": "\u001b[3gA\tB",
+    "expect": {
+      "cursor": [0, 19],
+      "cells": {
+        "0,0": { "rune": 65 },
+        "0,19": { "rune": 66 }
+      }
+    }
+  },
+  {
+    "name": "OSC 4 palette color update",
+    "input": "\u001b]4;1;#010203\u0007",
+    "expect": {
+      "palette": {
+        "1": "#010203"
+      }
+    }
+  },
+  {
+    "name": "OSC 10 11 12 theme color updates",
+    "input": "\u001b]10;#111213\u0007\u001b]11;#212223\u0007\u001b]12;#313233\u0007",
+    "expect": {
+      "theme": {
+        "foreground": "#111213",
+        "background": "#212223",
+        "cursor": "#313233"
+      }
+    }
+  },
+  {
+    "name": "OSC 52 valid clipboard request",
+    "input": "\u001b]52;c;aGVsbG8=\u0007",
+    "expect": {
+      "clipboardRequests": [
+        { "selector": "c", "text": "hello" }
+      ]
+    }
+  },
+  {
+    "name": "OSC 52 malformed clipboard is ignored",
+    "input": "\u001b]52;c;%%%notbase64%%%\u0007",
+    "expect": {
+      "clipboardRequests": []
+    }
+  },
+  {
+    "name": "DSR terminal status report",
+    "input": "\u001b[5n",
+    "expect": {
+      "reports": ["\u001b[0n"]
+    }
+  },
+  {
+    "name": "DSR cursor position report",
+    "input": "\u001b[3;4H\u001b[6n",
+    "expect": {
+      "reports": ["\u001b[3;4R"]
+    }
+  },
+  {
+    "name": "Primary device attributes report",
+    "input": "\u001b[c",
+    "expect": {
+      "reports": ["\u001b[?62;1;2;3;6;8c"]
+    }
+  },
+  {
+    "name": "Secondary device attributes report",
+    "input": "\u001b[>c",
+    "expect": {
+      "reports": ["\u001b[>0;1;0c"]
+    }
+  },
+  {
+    "name": "Window size text-area report",
+    "input": "\u001b[18t",
+    "expect": {
+      "reports": ["\u001b[8;10;20t"]
+    }
+  },
+  {
+    "name": "Window title report",
+    "input": "\u001b]0;Report Title\u0007\u001b[21t",
+    "expect": {
+      "reports": ["\u001b[lReport Title\u001b\\"]
+    }
+  },
+  {
+    "name": "DECRQM cursor visibility set report",
+    "input": "\u001b[?25h\u001b[?25$p",
+    "expect": {
+      "reports": ["\u001b[?25;1$y"]
+    }
+  },
+  {
+    "name": "DECRQM autowrap reset report",
+    "input": "\u001b[?7l\u001b[?7$p",
+    "expect": {
+      "reports": ["\u001b[?7;2$y"]
+    }
+  },
+  {
+    "name": "DECRQSS SGR report",
+    "input": "\u001b[1;31m\u001bP$qm\u001b\\",
+    "expect": {
+      "reports": ["\u001bP1$r1;31m\u001b\\"]
+    }
+  },
+  {
+    "name": "DECRQSS scroll region report",
+    "input": "\u001b[2;4r\u001bP$qr\u001b\\",
+    "expect": {
+      "reports": ["\u001bP1$r2;4r\u001b\\"]
+    }
+  },
+  {
+    "name": "DECRQSS cursor style report",
+    "input": "\u001b[6 q\u001bP$q q\u001b\\",
+    "expect": {
+      "reports": ["\u001bP1$r5 q\u001b\\"]
+    }
+  },
+  {
+    "name": "Alternate screen 1047 enter and leave restores primary",
+    "input": "main\u001b[?1047hALT\u001b[?1047lX",
+    "expect": {
+      "usingAlt": false,
+      "lines": {
+        "0": "maiX"
+      }
+    }
+  },
+  {
+    "name": "Save and restore cursor private mode 1048",
+    "input": "ABC\u001b[?1048h\r\nDEF\u001b[?1048lX",
+    "expect": {
+      "lines": {
+        "0": "ABCX"
+      }
+    }
+  },
+  {
+    "name": "Origin mode makes CUP relative to scroll region",
+    "input": "\u001b[3;5r\u001b[?6h\u001b[1;1HX",
+    "expect": {
+      "cursor": [2, 1],
+      "cells": {
+        "2,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "Origin mode clamps CUP inside scroll region",
+    "input": "\u001b[3;5r\u001b[?6h\u001b[10;1HX",
+    "expect": {
+      "cursor": [4, 1],
+      "cells": {
+        "4,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "Origin mode reset returns CUP to absolute screen",
+    "input": "\u001b[3;5r\u001b[?6h\u001b[?6l\u001b[1;1HX",
+    "expect": {
+      "cursor": [0, 1],
+      "cells": {
+        "0,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "DECALN screen alignment fills display",
+    "input": "abc\u001b#8",
+    "expect": {
+      "lines": {
+        "0": "EEEEEEEEEEEEEEEEEEEE",
+        "9": "EEEEEEEEEEEEEEEEEEEE"
+      },
+      "cells": {
+        "0,0": { "rune": 69 },
+        "9,19": { "rune": 69 }
+      }
+    }
+  },
+  {
+    "name": "CUP defaults to home",
+    "input": "abc\u001b[HX",
+    "expect": {
+      "cursor": [0, 1],
+      "lines": {
+        "0": "Xbc"
+      }
+    }
+  },
+  {
+    "name": "HVP aliases CUP",
+    "input": "\u001b[2;4fX",
+    "expect": {
+      "cursor": [1, 4],
+      "cells": {
+        "1,3": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "NEL moves to next line and column zero",
+    "input": "abc\u001bEX",
+    "expect": {
+      "cursor": [1, 1],
+      "lines": {
+        "0": "abc",
+        "1": "X"
+      }
+    }
+  },
+  {
+    "name": "Carriage return overwrites same line",
+    "input": "abc\rX",
+    "expect": {
+      "cursor": [0, 1],
+      "lines": {
+        "0": "Xbc"
+      }
+    }
+  },
+  {
+    "name": "Backspace moves left without erasing",
+    "input": "abc\bX",
+    "expect": {
+      "cursor": [0, 3],
+      "lines": {
+        "0": "abX"
+      }
+    }
+  },
+  {
+    "name": "Insert mode printable characters shift right",
+    "input": "abcdef\u001b[1;3H\u001b[4hX\u001b[4lY",
+    "expect": {
+      "cursor": [0, 4],
+      "lines": {
+        "0": "abXYdef"
+      }
+    }
+  },
+  {
+    "name": "RIS resets screen state",
+    "input": "abc\u001b[?25l\u001b[?7l\u001b]0;Title\u0007\u001bcX",
+    "expect": {
+      "cursor": [0, 1],
+      "cursorVisible": true,
+      "autowrap": true,
+      "title": "",
+      "lines": {
+        "0": "X"
+      }
+    }
+  },
+  {
+    "name": "SGR reset foreground and background",
+    "input": "\u001b[31;44mA\u001b[39;49mB",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65, "fg": "1", "bg": "4" },
+        "0,1": { "rune": 66 }
+      }
+    }
+  },
+  {
+    "name": "SGR bright foreground and background",
+    "input": "\u001b[91;104mX",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 88, "fg": "9", "bg": "12" }
+      }
+    }
+  },
+  {
+    "name": "SGR 256-color background semicolon form",
+    "input": "\u001b[48;5;123mX",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 88, "bg": "123" }
+      }
+    }
+  },
+  {
+    "name": "REP repeats preceding graphic character",
+    "input": "A\u001b[3b",
+    "expect": {
+      "cursor": [0, 4],
+      "lines": {
+        "0": "AAAA"
+      }
+    }
+  },
+  {
+    "name": "DEC special graphics charset draws box runes",
+    "input": "\u001b(0lqkx\u001b(Bq",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 9484 },
+        "0,1": { "rune": 9472 },
+        "0,2": { "rune": 9488 },
+        "0,3": { "rune": 9474 },
+        "0,4": { "rune": 113 }
+      }
+    }
+  },
+  {
+    "name": "DEC special graphics charset resets on RIS",
+    "input": "\u001b(0q\u001bcq",
+    "expect": {
+      "cursor": [0, 1],
+      "cells": {
+        "0,0": { "rune": 113 }
+      }
+    }
+  },
+  {
+    "name": "Selective erase in line behaves as line erase without protected cells",
+    "input": "abcdef\u001b[1;3H\u001b[?K",
+    "expect": {
+      "lines": {
+        "0": "ab"
+      }
+    }
+  },
+  {
+    "name": "Selective erase in display behaves as display erase without protected cells",
+    "input": "abc\r\nxyz\u001b[1;2H\u001b[?J",
+    "expect": {
+      "lines": {
+        "0": "a",
+        "1": ""
+      }
+    }
+  },
+  {
+    "name": "OSC 8 hyperlink wrapper does not corrupt printed text",
+    "input": "\u001b]8;id=1;https://example.invalid\u001b\\Link\u001b]8;;\u001b\\",
+    "expect": {
+      "lines": {
+        "0": "Link"
+      }
+    }
+  },
+  {
+    "name": "Unknown DCS passthrough does not corrupt following text",
+    "input": "\u001bP1;2+zpayload\u001b\\OK",
+    "expect": {
+      "lines": {
+        "0": "OK"
+      }
+    }
+  },
+  {
+    "name": "SGR rich attributes persist on written cells",
+    "input": "\u001b[2;3;4;7;8;9;53mX",
+    "expect": {
+      "cells": {
+        "0,0": {
+          "rune": 88,
+          "dim": true,
+          "italic": true,
+          "underline": true,
+          "inverse": true,
+          "hidden": true,
+          "strike": true,
+          "overline": true
+        }
+      }
+    }
+  },
+  {
+    "name": "SGR selective attribute resets",
+    "input": "\u001b[2;3;4;7;8;9;53mA\u001b[22;23;24;27;28;29;55mB",
+    "expect": {
+      "cells": {
+        "0,0": {
+          "rune": 65,
+          "dim": true,
+          "italic": true,
+          "underline": true,
+          "inverse": true,
+          "hidden": true,
+          "strike": true,
+          "overline": true
+        },
+        "0,1": {
+          "rune": 66,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "hidden": false,
+          "strike": false,
+          "overline": false
+        }
+      }
+    }
+  },
+  {
+    "name": "DECSC restores DEC special graphics charset",
+    "input": "\u001b(0q\u001b7\u001b(Bq\u001b8q",
+    "expect": {
+      "cursor": [0, 2],
+      "cells": {
+        "0,0": { "rune": 9472 },
+        "0,1": { "rune": 9472 }
+      }
+    }
+  },
+  {
+    "name": "DECSC restores origin and autowrap modes",
+    "input": "\u001b[2;4r\u001b[?6h\u001b[?7l\u001b7\u001b[?6l\u001b[?7h\u001b8\u001b[1;1HX",
+    "expect": {
+      "cursor": [1, 1],
+      "autowrap": false,
+      "cells": {
+        "1,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "DECRQM insert mode set report",
+    "input": "\u001b[4h\u001b[4$p",
+    "expect": {
+      "reports": ["\u001b[4;1$y"]
+    }
+  },
+  {
+    "name": "DECRQM unknown private mode report",
+    "input": "\u001b[?9999$p",
+    "expect": {
+      "reports": ["\u001b[?9999;0$y"]
+    }
+  }
+]
