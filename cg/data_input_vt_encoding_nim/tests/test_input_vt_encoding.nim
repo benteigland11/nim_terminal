@@ -40,14 +40,31 @@ suite "input vt encoding":
     var mode = newInputMode()
     check not mode.shouldSendWheel()
     mode.alternateScroll = true
-    check mode.shouldSendWheel()
+    check not mode.shouldSendWheel()
+    check mode.shouldSendWheel(usingAlternateScreen = true)
     check mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = true)
     check not mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = false)
+
+  test "alternate screen routes wheel as cursor keys without mouse tracking":
+    let mode = newInputMode()
+    check mode.shouldSendWheel(usingAlternateScreen = true)
+    check mode.shouldSendWheelAsCursorKeys(usingAlternateScreen = true)
 
   test "mouse tracking requests wheel routing":
     var mode = newInputMode()
     mode.mouseMode = mmX11
     check mode.shouldSendWheel()
+    check mode.scrollInputKind(usingAlternateScreen = true) == sikMouseWheel
+
+  test "input mode snapshot reports active scroll encoding":
+    var mode = newInputMode()
+    mode.cursorApp = true
+    mode.bracketedPaste = true
+    let snap = mode.snapshot(usingAlternateScreen = true)
+    check snap.cursorApp
+    check snap.bracketedPaste
+    check snap.usingAlternateScreen
+    check snap.scrollInputKind == sikCursorKeys
 
   test "SGR coordinate encoding composes with button-event tracking":
     var mode = newInputMode()

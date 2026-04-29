@@ -83,9 +83,26 @@ the running process instead of being intercepted by the app.
 Click a pane to focus it. Each tab remembers its last focused pane, and the
 tab label follows that pane's current directory.
 
+## TUI scrollback notes
+
+Some full-screen TUIs use the terminal alternate screen and mouse tracking.
+Waymark defaults to child-owned scrolling in that mode so apps like Codex,
+Claude, editors, and dashboards receive wheel input naturally.
+
+Alternate-screen history can still be retained by policy:
+
+```ini
+[scroll]
+alternate_screen_scrollback = passive  # off, passive, always
+wheel_in_alt_screen = app              # app, terminal, smart
+```
+
+Use `terminal` or `always` when you want Waymark to prefer its retained
+viewport history over the child app's own scroll handling.
+
 ## Widgets
 
-All widgets live under `cg/`. The seven below form the spine of the
+All widgets live under `cg/`. The eight below form the spine of the
 terminal, in the order data flows through them. The full catalog is
 grouped by domain underneath.
 
@@ -96,6 +113,7 @@ grouped by domain underneath.
 | `data-vt-parser-nim` | DEC VT500 state machine. The heart. |
 | `data-vt-commands-nim` | Raw dispatches to semantic `VtCommand`s. |
 | `data-screen-buffer-nim` | Cells, cursor, attrs, scrollback, alt buffer. |
+| `data-terminal-scroll-policy-nim` | Wheel routing policy for normal and alternate screen modes. |
 | `universal-utf8-decoder-nim` | Streaming UTF-8 with display-width classification. |
 | `backend-pty-async-nim` | Non-blocking PTY orchestrator. |
 | `universal-glyph-atlas-nim` | Pre-rendered font glyphs in a cacheable atlas. |
@@ -136,7 +154,7 @@ grouped by domain underneath.
 
 </details>
 
-<details><summary><b>data</b> (12) — terminal-specific state and protocol</summary>
+<details><summary><b>data</b> (13) — terminal-specific state and protocol</summary>
 
 | Widget | Purpose |
 |---|---|
@@ -150,6 +168,7 @@ grouped by domain underneath.
 | `data-terminal-render-attrs-nim` | Resolves SGR + colors into final per-cell render attributes. |
 | `data-terminal-theme-nim` | Color scheme / theme representation and management. |
 | `data-terminal-output-footprint-nim` | State machine for inline UIs that draw below the cursor. |
+| `data-terminal-scroll-policy-nim` | Wheel routing policy for normal and alternate screen modes. |
 | `data-terminal-sync-update-nim` | State machine for synchronized TUI redraw windows. |
 | `data-pixel-resource-size-nim` | Byte-size estimation for 2D textures and pixel-backed resources. |
 

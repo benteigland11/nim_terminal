@@ -53,6 +53,7 @@ type
     emToEnd
     emToStart
     emAll
+    emScrollback
 
   VtCommandKind* = enum
     cmdPrint              ## already-decoded printable rune
@@ -184,6 +185,7 @@ func eraseModeFrom(params: openArray[DispatchParam]): EraseMode =
   case paramOr(params, 0, 0)
   of 1: emToStart
   of 2: emAll
+  of 3: emScrollback
   else: emToEnd
 
 func countFrom(params: openArray[DispatchParam]): int =

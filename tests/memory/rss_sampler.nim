@@ -4,7 +4,7 @@
 ## samples RSS from `/proc/<pid>/status`, and exposes small statistics
 ## helpers used by the idle baseline and soak harnesses.
 
-import std/[os, osproc, strutils, strtabs, times, math, options, sequtils]
+import std/[os, osproc, strutils, strtabs, times, math, options, sequtils, posix]
 
 type
   Sample* = object
@@ -112,7 +112,11 @@ proc spawnTerminal*(binary: string; cfg: string = ""; extraEnv: seq[(string, str
 
 proc shutdown*(h: var RunHandle; graceMs: int = 500) =
   ## Try a polite SIGTERM, escalate to SIGKILL if still alive.
+  ## Signals the tracked nim_terminal child directly: xvfb-run's terminate
+  ## doesn't always propagate to the app, leaving it reparented to PID 1.
   if h.process == nil: return
+  if h.pid > 0 and dirExists("/proc/" & $h.pid):
+    discard kill(Pid(h.pid), SIGTERM)
   if h.process.running:
     h.process.terminate()
     let deadline = epochTime() + graceMs / 1000
@@ -120,6 +124,8 @@ proc shutdown*(h: var RunHandle; graceMs: int = 500) =
       sleep(20)
     if h.process.running:
       h.process.kill()
+  if h.pid > 0 and dirExists("/proc/" & $h.pid):
+    discard kill(Pid(h.pid), SIGKILL)
   discard h.process.waitForExit()
   h.process.close()
   h.process = nil

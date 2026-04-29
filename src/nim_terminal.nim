@@ -23,6 +23,7 @@ import ../cg/universal_split_pane_tree_nim/src/split_pane_tree_lib as pane_tree
 import ../cg/universal_resource_budget_nim/src/resource_budget_lib
 import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
 import ../cg/backend_system_clipboard_nim/src/system_clipboard_lib
+import ../cg/data_terminal_scroll_policy_nim/src/terminal_scroll_policy_lib
 
 const
   DefaultWindowTitle = "Waymark - Built with Nim"
@@ -85,6 +86,10 @@ type
     maxPanes: int
     diagnosticsCapacity: int
     glyphAtlasSize: int
+    altScreenScrollback: AltScreenScrollbackMode
+    altWheelPolicy: AltWheelPolicy
+    normalWheelPolicy: NormalWheelPolicy
+    meaningfulHistoryRows: int
 
 var
   config = TerminalConfig(
@@ -102,6 +107,10 @@ var
     maxPanes: DefaultMaxPanes,
     diagnosticsCapacity: DefaultDiagnosticsCapacity,
     glyphAtlasSize: DefaultGlyphAtlasSize,
+    altScreenScrollback: assPassive,
+    altWheelPolicy: awpTerminal,
+    normalWheelPolicy: nwpTerminal,
+    meaningfulHistoryRows: 3,
   )
   tabs = newTabSet()
   workspaces: seq[TerminalWorkspace] = @[]
@@ -185,8 +194,30 @@ proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
     result.diagnosticsCapacity = max(0, parseIntOr(dict.getSectionValue("diagnostics", "capacity", $result.diagnosticsCapacity), result.diagnosticsCapacity))
     let requestedAtlas = max(256, parseIntOr(dict.getSectionValue("resources", "glyph_atlas_size", $result.glyphAtlasSize), result.glyphAtlasSize))
     result.glyphAtlasSize = int(recommendedCap(resourceLimit("glyph_atlas", DefaultGlyphAtlasSize, MaxGlyphAtlasSize), requestedAtlas.int64))
+    result.altScreenScrollback = parseAltScreenScrollbackMode(
+      dict.getSectionValue("scroll", "alternate_screen_scrollback", "passive").strip().toLowerAscii(),
+      result.altScreenScrollback,
+    )
+    result.altWheelPolicy = parseAltWheelPolicy(
+      dict.getSectionValue("scroll", "wheel_in_alt_screen", "terminal").strip().toLowerAscii(),
+      result.altWheelPolicy,
+    )
+    result.normalWheelPolicy = parseNormalWheelPolicy(
+      dict.getSectionValue("scroll", "wheel_in_normal_screen", "terminal").strip().toLowerAscii(),
+      result.normalWheelPolicy,
+    )
+    result.meaningfulHistoryRows = max(1, parseIntOr(
+      dict.getSectionValue("scroll", "meaningful_history_rows", $result.meaningfulHistoryRows),
+      result.meaningfulHistoryRows,
+    ))
   except CatchableError as e:
     echo "Config warning: ", e.msg
+
+func toChildWheelEncoding(kind: ScrollInputKind): ChildWheelEncoding =
+  case kind
+  of sikMouseWheel: cweMouseWheel
+  of sikCursorKeys: cweCursorKeys
+  of sikNone: cweNone
 
 func castSet(s: cint): set[terminal.Modifier] =
   if (s and MOD_SHIFT) != 0: result.incl terminal.modShift
@@ -226,11 +257,6 @@ proc activeWorkspaceSyncUpdateActive(): bool =
     if session.terminal != nil and session.terminal.synchronizedUpdateActive():
       return true
   false
-
-proc ensureCursorVisible(term: Terminal) =
-  if term == nil: return
-  term.viewport.ensureVisible(term.screen.absoluteCursorRow(), ZoomContextRowsAbove)
-  term.damage.markAll()
 
 proc sessionByPane(workspace: var TerminalWorkspace, paneId: PaneId): ptr TerminalSession =
   let idx = workspace.sessionIndex(paneId)
@@ -308,9 +334,16 @@ proc focusPaneAt(x, y: int): ptr TerminalSession =
     let oldIdx = workspaces[wi].sessionIndex(previous)
     if oldIdx >= 0: workspaces[wi].sessions[oldIdx].terminal.damage.markAll()
     let newIdx = workspaces[wi].sessionIndex(hit.get())
-    if newIdx >= 0: ensureCursorVisible(workspaces[wi].sessions[newIdx].terminal)
+    if newIdx >= 0: workspaces[wi].sessions[newIdx].terminal.damage.markAll()
     discard refreshWorkspaceTabLabel(wi)
   workspaces[wi].sessionByPane(hit.get())
+
+proc focusPaneAt(x, y: int, changed: var bool): ptr TerminalSession =
+  let wi = activeWorkspaceIndex()
+  if wi < 0: return nil
+  let previous = workspaces[wi].panes.active
+  result = focusPaneAt(x, y)
+  changed = result != nil and previous != workspaces[wi].panes.active
 
 proc clearSelectionsExcept(workspace: var TerminalWorkspace, paneId: PaneId) =
   for session in workspace.sessions.mitems:
@@ -470,6 +503,7 @@ proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
     scrollback = config.scrollback,
     diagnosticsCapacity = config.diagnosticsCapacity,
   )
+  term.screen.altScrollbackEnabled = altScrollbackEnabled(config.altScreenScrollback)
   applyConfiguredTheme(term)
   TerminalSession(id: paneId, terminal: term, cwd: sessionCwd)
 
@@ -543,6 +577,9 @@ proc localCol(area: PaneRect, x: cdouble): int =
 
 proc localRow(area: PaneRect, y: cdouble): int =
   max(0, (int(y) - area.y) div rend.atlas.cellHeight)
+
+proc rawLocalRow(area: PaneRect, y: cdouble): int =
+  (int(y) - area.y) div rend.atlas.cellHeight
 
 proc activeWorkspaceDirty(): bool =
   let wi = activeWorkspaceIndex()
@@ -663,6 +700,22 @@ proc writeScreenSnapshot(term: Terminal) =
     lines.add "eof=" & $term.host.eof
     lines.add "cursor=" & $term.screen.cursor.row & "," & $term.screen.cursor.col
     lines.add "rows=" & $term.screen.rows & " cols=" & $term.screen.cols
+    lines.add "using_alt=" & $term.screen.usingAlt
+    lines.add "scroll_region=" & $term.screen.scrollTop & "," & $term.screen.scrollBottom
+    lines.add "total_rows=" & $term.screen.totalRows & " viewport_max_scroll=" & $term.viewport.maxScroll
+    let mode = term.inputMode.snapshot(term.screen.usingAlt)
+    lines.add "input_mouse_mode=" & $mode.mouseMode
+    lines.add "input_sgr_mouse=" & $mode.sgrMouse
+    lines.add "input_alternate_scroll=" & $mode.alternateScroll
+    lines.add "input_bracketed_paste=" & $mode.bracketedPaste
+    lines.add "input_focus_reporting=" & $mode.focusReporting
+    lines.add "input_cursor_app=" & $mode.cursorApp
+    lines.add "input_scroll_kind=" & $mode.scrollInputKind
+    lines.add "normal_tui_likely=" & $(
+      (not term.screen.usingAlt) and
+      mode.mouseMode == mmNone and
+      (mode.cursorApp or mode.focusReporting)
+    )
     for i in 0 ..< min(term.screen.rows, 20):
       lines.add $i & ": " & term.screen.lineText(i)
     writeFile(screenSnapshotPath, lines.join("\n"))
@@ -858,13 +911,17 @@ proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
       return
 
   if int(y) < headerHeight: return
-  let session = focusPaneAt(int(x), int(y))
+  var paneFocusChanged = false
+  let session = focusPaneAt(int(x), int(y), paneFocusChanged)
   if session == nil: return
+  if paneFocusChanged and button == MOUSE_BUTTON_LEFT and action == PRESS:
+    return
   let term = session[].terminal
   let area = activeSessionRect(session[].id)
   if area.isNone: return
   let col = localCol(area.get(), x); let row = localRow(area.get(), y)
-  let absRow = term.viewport.viewportToBuffer(row)
+  let bufferRow = term.viewport.viewportToBuffer(row)
+  if bufferRow < 0: return
   if term.inputMode.shouldIntercept(castSet(mods)):
     if button == MOUSE_BUTTON_LEFT:
       let isDown = action == PRESS
@@ -874,11 +931,11 @@ proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
         launchUri(term.activeLink.get().link.text)
         return
 
-      term.drag.update(absRow, col, isDown)
+      term.drag.update(row, col, isDown)
       if isDown:
         let wi = activeWorkspaceIndex()
         if wi >= 0: clearSelectionsExcept(workspaces[wi], session[].id)
-        term.selection.start(point(absRow, col))
+        term.selection.start(point(bufferRow, col))
       term.damage.markAll()
   else:
     let tmb = toMouseButton(button).int
@@ -898,31 +955,39 @@ proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
     )
     return
 
-  if int(y) < headerHeight:
-    let term = activeTerm()
-    if term == nil: return
-    if term.activeLink.isSome:
-      term.activeLink = none(ActiveLink)
-      term.damage.markAll()
-    return
   let wi = activeWorkspaceIndex()
   if wi < 0: return
   let activeId = workspaces[wi].panes.active
   let sessionIdx = workspaces[wi].sessionIndex(activeId)
   if sessionIdx < 0: return
   let term = workspaces[wi].sessions[sessionIdx].terminal
+  if int(y) < headerHeight and term.drag.state == dsIdle:
+    if term.activeLink.isSome:
+      term.activeLink = none(ActiveLink)
+      term.damage.markAll()
+    return
   let area = activeSessionRect(activeId)
   if area.isNone: return
-  let col = localCol(area.get(), x); let row = localRow(area.get(), y)
-  let absRow = term.viewport.viewportToBuffer(row)
-  if absRow < 0: return
+  let col = localCol(area.get(), x)
+  let row = localRow(area.get(), y)
+  let rawRow = rawLocalRow(area.get(), y)
 
   if term.drag.state != dsIdle:
-    term.drag.update(absRow, col, true); term.selection.update(point(absRow, col))
-    if term.drag.state == dsOutsideTop: term.viewport.scrollUp(1)
-    elif term.drag.state == dsOutsideBottom: term.viewport.scrollDown(1)
-    term.refreshViewport(false); term.damage.markAll()
+    term.drag.update(rawRow, col, true)
+    let delta = term.drag.autoscrollDelta()
+    if delta < 0:
+      term.viewport.scrollUp(1)
+    elif delta > 0:
+      term.viewport.scrollDown(1)
+    term.refreshViewport(false)
+    let focusRow = term.drag.focusViewportRow()
+    let focusBufferRow = term.viewport.viewportToBuffer(focusRow)
+    if focusBufferRow >= 0:
+      term.selection.update(point(focusBufferRow, col))
+    term.damage.markAll()
   else:
+    let absRow = term.viewport.viewportToBuffer(row)
+    if absRow < 0: return
     # Update active link hover state
     let lineStr = term.screen.absoluteLineText(absRow)
     let links = detectLinks(lineStr)
@@ -950,31 +1015,79 @@ proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
   let term = if session == nil: activeTerm() else: session[].terminal
   if term == nil: return
   let ctrlDown = (getKey(window, KEY_LEFT_CONTROL) == PRESS or getKey(window, KEY_RIGHT_CONTROL) == PRESS)
+  let shiftDown = (getKey(window, KEY_LEFT_SHIFT) == PRESS or getKey(window, KEY_RIGHT_SHIFT) == PRESS)
   if ctrlDown:
     if yoffset > 0: fontSize += 1.0
     elif yoffset < 0: fontSize = max(4.0, fontSize - 1.0)
     rebuildAtlas()
-  elif term.inputMode.shouldSendWheel():
-    let paneId =
-      if session == nil:
-        let workspace = activeWorkspace()
-        if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
-      else:
-        session[].id
-    let area = activeSessionRect(paneId)
-    let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
-    let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
-    if term.inputMode.shouldSendWheelAsCursorKeys(term.screen.usingAlt):
-      let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
-      for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
-        discard term.sendKey(key(keyCode))
-    else:
+  else:
+    let scrollKind = term.inputMode.scrollInputKind(term.screen.usingAlt)
+    let normalTuiLikely =
+      (not term.screen.usingAlt) and
+      term.inputMode.mouseMode == mmNone and
+      (term.inputMode.cursorApp or term.inputMode.focusReporting)
+    let action = decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: term.screen.usingAlt,
+      childWantsWheel: term.inputMode.shouldSendWheel(term.screen.usingAlt),
+      childWheelEncoding: toChildWheelEncoding(scrollKind),
+      viewportHasHistory: term.viewport.maxScroll > 0,
+      viewportHasMeaningfulHistory: term.viewport.hasMeaningfulHistory(config.meaningfulHistoryRows),
+      viewportAtLiveEnd: term.viewport.isAtLiveEnd,
+      scrollingTowardHistory: yoffset > 0,
+      normalScreenTuiLikely: normalTuiLikely,
+      forceTerminalScroll: shiftDown,
+      forceChildScroll: false,
+      altScrollbackMode: config.altScreenScrollback,
+      altWheelPolicy: config.altWheelPolicy,
+      normalWheelPolicy: config.normalWheelPolicy,
+    ))
+    case action
+    of saScrollViewport:
+      if yoffset > 0: term.viewport.scrollUp(3)
+      elif yoffset < 0: term.viewport.scrollDown(3)
+    of saRouteToChild:
+      let paneId =
+        if session == nil:
+          let workspace = activeWorkspace()
+          if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
+        else:
+          session[].id
+      let area = activeSessionRect(paneId)
+      let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
+      let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
+      case scrollKind
+      of sikCursorKeys:
+        let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+        for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+          discard term.sendKey(key(keyCode))
+      of sikMouseWheel:
+        let button = if yoffset > 0: mbWheelUp else: mbWheelDown
+        for _ in 0 ..< max(1, int(abs(yoffset))):
+          discard term.sendMouse(mouse(mePress, button, row, col))
+      of sikNone:
+        discard
+    of saRouteMouseWheel:
+      let paneId =
+        if session == nil:
+          let workspace = activeWorkspace()
+          if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
+        else:
+          session[].id
+      let area = activeSessionRect(paneId)
+      let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
+      let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
       let button = if yoffset > 0: mbWheelUp else: mbWheelDown
       for _ in 0 ..< max(1, int(abs(yoffset))):
         discard term.sendMouse(mouse(mePress, button, row, col))
-  else:
-    if yoffset > 0: term.viewport.scrollUp(3)
-    elif yoffset < 0: term.viewport.scrollDown(3)
+    of saRouteCursorKeys:
+      let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+      for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+        discard term.sendKey(key(keyCode))
+    of saRoutePageKeys:
+      let keyCode = if yoffset > 0: kPageUp else: kPageDown
+      discard term.sendKey(key(keyCode))
+    of saIgnore:
+      discard
   term.refreshViewport(false); term.damage.markAll()
 
 proc onWindowFocus(win: Window, focused: cint) {.cdecl.} =

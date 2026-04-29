@@ -93,6 +93,7 @@ type
     emToEnd
     emToStart
     emAll
+    emScrollback
 
   SgrParam* = object
     value*: int
@@ -112,7 +113,10 @@ type
     modes*: set[ScreenMode]
     scrollback*: seq[seq[Cell]]
     scrollbackSoftWrap: seq[bool]
+    altScrollback: seq[seq[Cell]]
+    altScrollbackSoftWrap: seq[bool]
     scrollbackCap*: int
+    altScrollbackEnabled*: bool
     usingAlt*: bool
     title*: string
     iconName*: string
@@ -189,7 +193,10 @@ func newScreen*(
     modes: {smAutoWrap},
     scrollback: @[],
     scrollbackSoftWrap: @[],
+    altScrollback: @[],
+    altScrollbackSoftWrap: @[],
     scrollbackCap: scrollback,
+    altScrollbackEnabled: false,
     usingAlt: false,
     title: "",
     iconName: "",
@@ -205,19 +212,21 @@ func cellAt*(s: Screen, row, col: int): Cell =
   (if s.usingAlt: s.altGrid else: s.grid)[row][col]
 
 func totalRows*(s: Screen): int =
-  if s.usingAlt: s.rows else: s.scrollback.len + s.rows
+  if s.usingAlt: s.altScrollback.len + s.rows else: s.scrollback.len + s.rows
 
 func absoluteCursorRow*(s: Screen): int =
   ## Returns the cursor row in the same absolute coordinate space used by
   ## absoluteRowAt. Alternate-screen coordinates do not include primary
   ## scrollback.
-  if s.usingAlt: s.cursor.row else: s.scrollback.len + s.cursor.row
+  if s.usingAlt: s.altScrollback.len + s.cursor.row else: s.scrollback.len + s.cursor.row
 
 func absoluteRowAt*(s: Screen, absRow: int): seq[Cell] =
   if absRow < 0: return @[]
   if s.usingAlt:
-    if absRow >= s.rows: return @[]
-    return s.altGrid[absRow]
+    if absRow < s.altScrollback.len: return s.altScrollback[absRow]
+    let gr = absRow - s.altScrollback.len
+    if gr >= s.rows: return @[]
+    return s.altGrid[gr]
   if absRow < s.scrollback.len: return s.scrollback[absRow]
   let gr = absRow - s.scrollback.len
   if gr >= s.rows: return @[]
@@ -226,8 +235,13 @@ func absoluteRowAt*(s: Screen, absRow: int): seq[Cell] =
 func absoluteCellAt*(s: Screen, absRow, col: int): Cell =
   if col < 0 or col >= s.cols or absRow < 0: return emptyCell()
   if s.usingAlt:
-    if absRow >= s.rows: return emptyCell()
-    let row = s.altGrid[absRow]
+    let row =
+      if absRow < s.altScrollback.len:
+        s.altScrollback[absRow]
+      else:
+        let gr = absRow - s.altScrollback.len
+        if gr >= s.rows: return emptyCell()
+        s.altGrid[gr]
     if col >= row.len: return emptyCell()
     return row[col]
   if absRow < s.scrollback.len:
@@ -268,8 +282,11 @@ func absoluteContentLen*(s: Screen, absRow: int): int =
   ## selectable through the wrap boundary.
   if absRow < 0: return 0
   if s.usingAlt:
-    if absRow >= s.rows: return 0
-    return contentLen(s.altGrid[absRow], absRow < s.altRowSoftWrap.len and s.altRowSoftWrap[absRow])
+    if absRow < s.altScrollback.len:
+      return contentLen(s.altScrollback[absRow], absRow < s.altScrollbackSoftWrap.len and s.altScrollbackSoftWrap[absRow])
+    let gr = absRow - s.altScrollback.len
+    if gr >= s.rows: return 0
+    return contentLen(s.altGrid[gr], gr < s.altRowSoftWrap.len and s.altRowSoftWrap[gr])
   if absRow < s.scrollback.len:
     return contentLen(s.scrollback[absRow], absRow < s.scrollbackSoftWrap.len and s.scrollbackSoftWrap[absRow])
   let gr = absRow - s.scrollback.len
@@ -324,18 +341,42 @@ proc clearGrid(grid: var seq[seq[Cell]], startRow, endRow: int, cols: int, attrs
   for r in startRow .. endRow:
     for c in 0 ..< cols: grid[r][c] = emptyCell(attrs)
 
+proc addScrollbackRow(rows: var seq[seq[Cell]], wraps: var seq[bool], row: seq[Cell], wrapped: bool, cap: int) =
+  rows.add row
+  wraps.add wrapped
+  if rows.len > cap:
+    rows.delete(0)
+    if wraps.len > 0: wraps.delete(0)
+
+proc resizeScrollbackRows(rows: var seq[seq[Cell]], oldCols, cols: int, attrs: Attrs) =
+  for row in rows.mitems:
+    row.setLen(cols)
+    for c in oldCols ..< cols:
+      row[c] = emptyCell(attrs)
+
 proc scrollUp*(s: Screen, count: int = 1) =
   let n = min(count, s.scrollBottom - s.scrollTop + 1)
   if n <= 0: return
   let g = if s.usingAlt: addr s.altGrid else: addr s.grid
   let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
-  if not s.usingAlt and s.scrollTop == 0 and s.scrollBottom == s.rows - 1:
+  if s.usingAlt and s.altScrollbackEnabled:
     for i in 0 ..< n:
-      s.scrollback.add g[][i]
-      s.scrollbackSoftWrap.add wraps[][i]
-      if s.scrollback.len > s.scrollbackCap:
-        s.scrollback.delete(0)
-        if s.scrollbackSoftWrap.len > 0: s.scrollbackSoftWrap.delete(0)
+      addScrollbackRow(
+        s.altScrollback,
+        s.altScrollbackSoftWrap,
+        g[][s.scrollTop + i],
+        wraps[][s.scrollTop + i],
+        s.scrollbackCap,
+      )
+  elif not s.usingAlt and s.scrollTop == 0:
+    for i in 0 ..< n:
+      addScrollbackRow(
+        s.scrollback,
+        s.scrollbackSoftWrap,
+        g[][s.scrollTop + i],
+        wraps[][s.scrollTop + i],
+        s.scrollbackCap,
+      )
   for r in s.scrollTop .. (s.scrollBottom - n): g[][r] = g[][r + n]
   for r in s.scrollTop .. (s.scrollBottom - n): wraps[][r] = wraps[][r + n]
   let attrs = defaultAttrs()
@@ -357,6 +398,9 @@ proc scrollDown*(s: Screen, count: int = 1) =
 
 proc useAlternateScreen*(s: Screen, active: bool) =
   if active == s.usingAlt: return
+  if active:
+    s.altScrollback.setLen(0)
+    s.altScrollbackSoftWrap.setLen(0)
   s.usingAlt = active
 
 proc switchAlternateScreen*(s: Screen, active: bool): ScreenContextTransition =
@@ -364,6 +408,9 @@ proc switchAlternateScreen*(s: Screen, active: bool): ScreenContextTransition =
   ## caller-visible side effects implied by that transition.
   if active == s.usingAlt:
     return ScreenContextTransition()
+  if active:
+    s.altScrollback.setLen(0)
+    s.altScrollbackSoftWrap.setLen(0)
   s.usingAlt = active
   ScreenContextTransition(
     changed: true,
@@ -392,7 +439,7 @@ proc applyPrivateMode*(s: Screen, code: int, set: bool): bool =
 proc reset*(s: Screen) =
   s.cursor = newCursor(); s.scrollTop = 0; s.scrollBottom = s.rows - 1
   s.tabStops = makeTabStops(s.cols, DefaultTabWidth); s.modes = {smAutoWrap}
-  s.usingAlt = false; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
+  s.usingAlt = false; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.altScrollback.setLen(0); s.altScrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
   s.theme = defaultTheme(); let attrs = defaultAttrs()
   for r in 0 ..< s.rows:
     s.grid[r] = makeRow(s.cols, attrs)
@@ -437,6 +484,8 @@ proc resize*(s: Screen, cols, rows: int) =
         s.altGrid[r] = makeRow(cols, attrs)
         s.rowSoftWrap[r] = false
         s.altRowSoftWrap[r] = false
+  resizeScrollbackRows(s.scrollback, oldCols, cols, attrs)
+  resizeScrollbackRows(s.altScrollback, oldCols, cols, attrs)
   s.cols = cols; s.rows = rows; s.cursor.row = max(0, min(rows-1, s.cursor.row)); s.cursor.col = max(0, min(cols-1, s.cursor.col))
   s.scrollTop = 0; s.scrollBottom = rows - 1; s.tabStops = makeTabStops(cols, DefaultTabWidth)
 
@@ -764,7 +813,7 @@ proc eraseInLine*(s: Screen, mode: EraseMode) =
   case mode
   of emToEnd: s.clearRow(s.cursor.row, s.cursor.col, s.cols - 1, s.cursor.attrs)
   of emToStart: s.clearRow(s.cursor.row, 0, s.cursor.col, s.cursor.attrs)
-  of emAll: s.clearRow(s.cursor.row, 0, s.cols - 1, s.cursor.attrs)
+  of emAll, emScrollback: s.clearRow(s.cursor.row, 0, s.cols - 1, s.cursor.attrs)
 
 proc eraseInDisplay*(s: Screen, mode: EraseMode) =
   let g = if s.usingAlt: addr s.altGrid else: addr s.grid
@@ -783,6 +832,13 @@ proc eraseInDisplay*(s: Screen, mode: EraseMode) =
   of emAll:
     clearGrid(g[], 0, s.rows - 1, s.cols, s.cursor.attrs)
     for r in 0 ..< s.rows: wraps[][r] = false
+  of emScrollback:
+    if s.usingAlt:
+      s.altScrollback.setLen(0)
+      s.altScrollbackSoftWrap.setLen(0)
+    else:
+      s.scrollback.setLen(0)
+      s.scrollbackSoftWrap.setLen(0)
 
 proc insertLines*(s: Screen, count: int) = (if s.cursor.row >= s.scrollTop and s.cursor.row <= s.scrollBottom: (let ot = s.scrollTop; s.scrollTop = s.cursor.row; s.scrollDown(count); s.scrollTop = ot))
 proc deleteLines*(s: Screen, count: int) = (if s.cursor.row >= s.scrollTop and s.cursor.row <= s.scrollBottom: (let ot = s.scrollTop; s.scrollTop = s.cursor.row; s.scrollUp(count); s.scrollTop = ot))

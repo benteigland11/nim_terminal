@@ -21,8 +21,9 @@ c.update(25, 20, true)
 doAssert c.state == dsOutsideBottom
 
 # 3. Handle auto-scroll in your main loop
-if c.state == dsOutsideBottom:
+if c.autoscrollDelta > 0:
   echo "Main loop should scroll down now!"
+doAssert c.focusViewportRow == 23
 
 # 4. End drag on mouse release
 c.update(10, 20, false)
