@@ -63,6 +63,10 @@ type
     cmdCarriageReturn
     cmdBackspace
     cmdHorizontalTab
+    cmdCursorForwardTab  ## CHT / CSI Ps I
+    cmdCursorBackwardTab ## CBT / CSI Ps Z
+    cmdShiftOut           ## SO / LS1 selects G1 into GL
+    cmdShiftIn            ## SI / LS0 selects G0 into GL
     cmdBell
     cmdCursorUp
     cmdCursorDown
@@ -137,7 +141,8 @@ type
        cmdCursorNextLine, cmdCursorPrevLine,
        cmdInsertLines, cmdDeleteLines,
        cmdInsertChars, cmdDeleteChars, cmdEraseChars,
-       cmdRepeatPreviousChar, cmdScrollUp, cmdScrollDown:
+       cmdRepeatPreviousChar, cmdScrollUp, cmdScrollDown,
+       cmdCursorForwardTab, cmdCursorBackwardTab:
       count*: int
     of cmdCursorTo:
       row*, col*: int
@@ -174,6 +179,7 @@ type
     of cmdShellCommandFinished:
       exitCode*: int
     of cmdSelectCharset:
+      charsetSlot*: char
       charsetFinal*: byte
     else:
       discard
@@ -219,6 +225,8 @@ func translateExecute*(b: byte): VtCommand =
   of 0x09: cmd(cmdHorizontalTab)
   of 0x0A, 0x0B, 0x0C, 0x85: cmd(cmdLineFeed)   # LF, VT, FF, NEL all advance one line
   of 0x0D: cmd(cmdCarriageReturn)
+  of 0x0E: cmd(cmdShiftOut)
+  of 0x0F: cmd(cmdShiftIn)
   of 0x8D: cmd(cmdReverseIndex)                 # 8-bit RI
   else:
     VtCommand(kind: cmdExecute, rawByte: b, rawFinal: b)
@@ -254,6 +262,8 @@ func translateCsi*(
     let row = max(0, paramOr(params, 0, 1) - 1)
     let col = max(0, paramOr(params, 1, 1) - 1)
     return VtCommand(kind: cmdCursorTo, row: row, col: col)
+  of 'I': return cmdN(cmdCursorForwardTab, n)
+  of 'Z': return cmdN(cmdCursorBackwardTab, n)
   of 'J':
     return VtCommand(kind: cmdEraseInDisplay, eraseMode: eraseModeFrom(params))
   of 'K':
@@ -364,9 +374,10 @@ func translateDcs*(
 func translateEsc*(intermediates: openArray[byte], final: byte): VtCommand =
   if intermediates.len == 1 and intermediates[0] == byte('#') and final == byte('8'):
     return cmd(cmdScreenAlignmentTest)
-  if intermediates.len == 1 and intermediates[0] == byte('(') and
+  if intermediates.len == 1 and
+      (intermediates[0] == byte('(') or intermediates[0] == byte(')')) and
       (final == byte('B') or final == byte('0')):
-    return VtCommand(kind: cmdSelectCharset, charsetFinal: final)
+    return VtCommand(kind: cmdSelectCharset, charsetSlot: char(intermediates[0]), charsetFinal: final)
   if intermediates.len == 0:
     case char(final)
     of '7': return cmd(cmdSaveCursor)

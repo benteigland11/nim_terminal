@@ -155,6 +155,27 @@
     }
   },
   {
+    "name": "CSI CHT advances counted tab stops",
+    "input": "A\u001b[2IB",
+    "expect": {
+      "cursor": [0, 17],
+      "cells": {
+        "0,0": { "rune": 65 },
+        "0,16": { "rune": 66 }
+      }
+    }
+  },
+  {
+    "name": "CSI CBT retreats counted tab stops",
+    "input": "\u001b[20G\u001b[2ZB",
+    "expect": {
+      "cursor": [0, 9],
+      "cells": {
+        "0,8": { "rune": 66 }
+      }
+    }
+  },
+  {
     "name": "Tab clear removes current stop",
     "input": "\u001b[9G\u001b[0g\u001b[1GA\tB",
     "expect": {
@@ -326,6 +347,34 @@
     }
   },
   {
+    "name": "Scroll exposes blank row with current background",
+    "input": "\u001b[41m\u001b[1;3rA\r\nB\r\nC\n",
+    "expect": {
+      "lines": {
+        "0": "B",
+        "1": "C",
+        "2": ""
+      },
+      "cells": {
+        "2,0": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Scroll down exposes blank row with current background",
+    "input": "\u001b[41m\u001b[1;3rA\r\nB\r\nC\u001b[T",
+    "expect": {
+      "lines": {
+        "0": "",
+        "1": "A",
+        "2": "B"
+      },
+      "cells": {
+        "0,0": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
     "name": "Scroll down command moves scroll region content down",
     "input": "A\r\nB\r\nC\r\nD\u001b[2;4r\u001b[T",
     "expect": {
@@ -334,6 +383,136 @@
         "1": "",
         "2": "B",
         "3": "C"
+      }
+    }
+  },
+  {
+    "name": "Insert characters expose blanks with current background",
+    "input": "\u001b[41mabcdef\u001b[1;3H\u001b[2@",
+    "expect": {
+      "lines": {
+        "0": "ab  cdef"
+      },
+      "cells": {
+        "0,2": { "rune": 32, "bg": "1" },
+        "0,3": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Delete characters pad right edge with current background",
+    "input": "\u001b[41mabcdef\u001b[1;3H\u001b[2P",
+    "expect": {
+      "lines": {
+        "0": "abef"
+      },
+      "cells": {
+        "0,18": { "rune": 32, "bg": "1" },
+        "0,19": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Erase characters uses current background",
+    "input": "\u001b[41mabcdef\u001b[1;3H\u001b[2X",
+    "expect": {
+      "lines": {
+        "0": "ab  ef"
+      },
+      "cells": {
+        "0,2": { "rune": 32, "bg": "1" },
+        "0,3": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Erase characters ignores insert mode shifts",
+    "input": "abcdef\u001b[1;3H\u001b[4h\u001b[2X",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "ab  ef"
+      }
+    }
+  },
+  {
+    "name": "Erase characters at pending wrap stays on same row",
+    "input": "12345678901234567890\u001b[X",
+    "expect": {
+      "cursor": [0, 19],
+      "lines": {
+        "0": "1234567890123456789"
+      },
+      "cells": {
+        "1,0": { "rune": 32 }
+      }
+    }
+  },
+  {
+    "name": "Insert line exposes blank row with current background",
+    "input": "\u001b[41mA\r\nB\r\nC\u001b[1;3r\u001b[2;1H\u001b[L",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "",
+        "2": "B"
+      },
+      "cells": {
+        "1,0": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Delete line exposes blank row with current background",
+    "input": "\u001b[41mA\r\nB\r\nC\u001b[1;3r\u001b[2;1H\u001b[M",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "C",
+        "2": ""
+      },
+      "cells": {
+        "2,0": { "rune": 32, "bg": "1" }
+      }
+    }
+  },
+  {
+    "name": "CAN cancels partial CSI without applying movement",
+    "input": "A\u001b[10\u0018B",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "SUB cancels partial CSI without applying movement",
+    "input": "A\u001b[10\u001aB",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "Illegal CSI private marker after params is ignored",
+    "input": "A\u001b[1?10CB",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "CAN cancels OSC title without applying payload",
+    "input": "\u001b]0;Bad Title\u0018A",
+    "expect": {
+      "title": "",
+      "lines": {
+        "0": "A"
       }
     }
   },
@@ -383,6 +562,39 @@
   {
     "name": "Alternate screen enter and leave restores primary",
     "input": "main\u001b[?1049hALT\u001b[?1049lX",
+    "expect": {
+      "usingAlt": false,
+      "lines": {
+        "0": "mainX"
+      }
+    }
+  },
+  {
+    "name": "Alternate screen 1049 restores cursor attributes",
+    "input": "\u001b[31mABC\u001b[?1049h\u001b[32mZ\u001b[?1049lX",
+    "expect": {
+      "usingAlt": false,
+      "lines": {
+        "0": "ABCX"
+      },
+      "cells": {
+        "0,3": { "rune": 88, "fg": "1" }
+      }
+    }
+  },
+  {
+    "name": "Alternate screen reentry clears stale alternate content",
+    "input": "\u001b[?1049hALT\u001b[?1049l\u001b[?1049hX",
+    "expect": {
+      "usingAlt": true,
+      "lines": {
+        "0": "X"
+      }
+    }
+  },
+  {
+    "name": "Alternate screen clear does not erase primary screen",
+    "input": "main\u001b[?1049h\u001b[2JALT\u001b[?1049lX",
     "expect": {
       "usingAlt": false,
       "lines": {
@@ -458,6 +670,15 @@
     }
   },
   {
+    "name": "OSC 4 invalid color does not overwrite palette",
+    "input": "\u001b]4;1;#010203\u0007\u001b]4;1;not-a-color\u0007",
+    "expect": {
+      "palette": {
+        "1": "#010203"
+      }
+    }
+  },
+  {
     "name": "OSC 10 11 12 theme color updates",
     "input": "\u001b]10;#111213\u0007\u001b]11;#212223\u0007\u001b]12;#313233\u0007",
     "expect": {
@@ -466,6 +687,32 @@
         "background": "#212223",
         "cursor": "#313233"
       }
+    }
+  },
+  {
+    "name": "OSC 11 invalid color does not overwrite theme background",
+    "input": "\u001b]11;#212223\u0007\u001b]11;bogus\u0007",
+    "expect": {
+      "theme": {
+        "background": "#212223"
+      }
+    }
+  },
+  {
+    "name": "Unknown OSC is ignored without changing title",
+    "input": "\u001b]999;No Title\u0007X",
+    "expect": {
+      "title": "",
+      "lines": {
+        "0": "X"
+      }
+    }
+  },
+  {
+    "name": "Unsupported DECRQSS reports invalid state string",
+    "input": "\u001bP$qz\u001b\\",
+    "expect": {
+      "reports": ["\u001bP0$r\u001b\\"]
     }
   },
   {
@@ -577,6 +824,18 @@
     "expect": {
       "lines": {
         "0": "ABCX"
+      }
+    }
+  },
+  {
+    "name": "Private mode 1048 restores cursor attributes",
+    "input": "\u001b[31mA\u001b[?1048h\u001b[32mB\u001b[?1048lC",
+    "expect": {
+      "lines": {
+        "0": "AC"
+      },
+      "cells": {
+        "0,1": { "rune": 67, "fg": "1" }
       }
     }
   },
@@ -696,6 +955,36 @@
       "lines": {
         "0": "X"
       }
+    }
+  },
+  {
+    "name": "RIS clears insert mode",
+    "input": "\u001b[4habc\u001bcXY",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "XY"
+      }
+    }
+  },
+  {
+    "name": "RIS clears origin mode and scroll region",
+    "input": "\u001b[3;5r\u001b[?6h\u001bc\u001b[1;1HX",
+    "expect": {
+      "cursor": [0, 1],
+      "reports": [],
+      "cells": {
+        "0,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "RIS resets cursor visibility and autowrap reports",
+    "input": "\u001b[?25l\u001b[?7l\u001bc\u001b[?25$p\u001b[?7$p",
+    "expect": {
+      "cursorVisible": true,
+      "autowrap": true,
+      "reports": ["\u001b[?25;1$y", "\u001b[?7;1$y"]
     }
   },
   {
@@ -876,6 +1165,217 @@
     "input": "\u001b[?9999$p",
     "expect": {
       "reports": ["\u001b[?9999;0$y"]
+    }
+  },
+  {
+    "name": "Split-feed CSI preserves cursor positioning",
+    "inputChunks": ["ab", "\u001b[", "2;", "4H", "X"],
+    "expect": {
+      "cursor": [1, 4],
+      "cells": {
+        "1,3": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "Split-feed OSC title preserves payload",
+    "inputChunks": ["\u001b]", "0;Split", " Title", "\u0007"],
+    "expect": {
+      "title": "Split Title"
+    }
+  },
+  {
+    "name": "Split-feed DCS report preserves query",
+    "inputChunks": ["\u001bP", "$q", "m", "\u001b\\"],
+    "expect": {
+      "reports": ["\u001bP1$r0m\u001b\\"]
+    }
+  },
+  {
+    "name": "Split-feed printable Unicode preserves wide rune",
+    "inputChunks": ["🦀", "X"],
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 129408 },
+        "0,1": { "rune": 0 },
+        "0,2": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "G1 DEC special graphics shift out and shift in",
+    "input": "\u001b)0q\u000eq\u000fq",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 113 },
+        "0,1": { "rune": 9472 },
+        "0,2": { "rune": 113 }
+      }
+    }
+  },
+  {
+    "name": "Split-feed G1 charset and SO/SI",
+    "inputChunks": ["\u001b)", "0", "q", "\u000e", "q", "\u000f", "q"],
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 113 },
+        "0,1": { "rune": 9472 },
+        "0,2": { "rune": 113 }
+      }
+    }
+  },
+  {
+    "name": "DECSC restores active G1 charset shift",
+    "input": "\u001b)0\u000e\u001b7\u000fq\u001b8q",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 9472 }
+      }
+    }
+  },
+  {
+    "name": "DECSTBM homes cursor after valid region set",
+    "input": "\u001b[5;10H\u001b[2;4rX",
+    "expect": {
+      "cursor": [0, 1],
+      "reports": [],
+      "cells": {
+        "0,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "DECSTBM homes cursor relative to origin mode",
+    "input": "\u001b[?6h\u001b[2;4rX",
+    "expect": {
+      "cursor": [1, 1],
+      "cells": {
+        "1,0": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "DECSTBM rejects invalid inverted region",
+    "input": "\u001b[2;4r\u001b[5;3r\u001bP$qr\u001b\\",
+    "expect": {
+      "reports": ["\u001bP1$r2;4r\u001b\\"]
+    }
+  },
+  {
+    "name": "DECSTBM rejects one-line region",
+    "input": "\u001b[2;4r\u001b[3;3r\u001bP$qr\u001b\\",
+    "expect": {
+      "reports": ["\u001bP1$r2;4r\u001b\\"]
+    }
+  },
+  {
+    "name": "DECRQM alternate screen 1049 set and reset reports",
+    "input": "\u001b[?1049h\u001b[?1049$p\u001b[?1049l\u001b[?1049$p",
+    "expect": {
+      "usingAlt": false,
+      "reports": ["\u001b[?1049;1$y", "\u001b[?1049;2$y"]
+    }
+  },
+  {
+    "name": "Alternate screen 47 leave returns primary without cursor restore",
+    "input": "main\u001b[?47hALT\u001b[?47lX",
+    "expect": {
+      "usingAlt": false,
+      "lines": {
+        "0": "maiX"
+      }
+    }
+  },
+  {
+    "name": "Byte-split UTF-8 preserves wide rune",
+    "inputByteChunks": [[240], [159, 166], [128, 88]],
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 129408 },
+        "0,1": { "rune": 0 },
+        "0,2": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "Invalid UTF-8 emits replacement and resumes",
+    "inputByteChunks": [[240], [65]],
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65533 },
+        "0,1": { "rune": 65 }
+      }
+    }
+  },
+  {
+    "name": "Unexpected UTF-8 continuation byte emits replacement",
+    "inputByteChunks": [[128], [65]],
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65533 },
+        "0,1": { "rune": 65 }
+      }
+    }
+  },
+  {
+    "name": "Overlong UTF-8 sequence emits replacement",
+    "inputByteChunks": [[192], [175, 65]],
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65533 },
+        "0,1": { "rune": 65 }
+      }
+    }
+  },
+  {
+    "name": "HTS sets tab stop at current column",
+    "input": "\u001b[6G\u001bH\u001b[1GA\tB",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 65 },
+        "0,5": { "rune": 66 }
+      }
+    }
+  },
+  {
+    "name": "HPA grave alias moves to absolute column",
+    "input": "abc\u001b[10`X",
+    "expect": {
+      "cursor": [0, 10],
+      "cells": {
+        "0,9": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "VPA moves to absolute row",
+    "input": "abc\u001b[4dX",
+    "expect": {
+      "cursor": [3, 4],
+      "cells": {
+        "3,3": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "HPR and VPR aliases move relative cursor",
+    "input": "A\u001b[3aB\u001b[2eC",
+    "expect": {
+      "cursor": [2, 6],
+      "cells": {
+        "0,0": { "rune": 65 },
+        "0,4": { "rune": 66 },
+        "2,5": { "rune": 67 }
+      }
+    }
+  },
+  {
+    "name": "SCO save and restore cursor",
+    "input": "ABC\u001b[s\r\nDEF\u001b[uX",
+    "expect": {
+      "lines": {
+        "0": "ABCX"
+      }
     }
   }
 ]

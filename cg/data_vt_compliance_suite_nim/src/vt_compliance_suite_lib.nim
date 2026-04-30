@@ -75,6 +75,8 @@ type
   ComplianceCase* = object
     name*: string
     input*: string
+    inputChunks*: seq[string]
+    inputByteChunks*: seq[seq[byte]]
     expect*: ExpectedState
 
   ComplianceFailure* = object
@@ -95,6 +97,8 @@ type
     failures*: seq[ComplianceFailure]
 
   StateProvider* = proc(input: string): ActualState {.closure.}
+  ChunkedStateProvider* = proc(inputChunks: openArray[string]): ActualState {.closure.}
+  ByteChunkedStateProvider* = proc(inputChunks: openArray[seq[byte]]): ActualState {.closure.}
 
 func actualCell*(
     rune: uint32,
@@ -216,7 +220,18 @@ func parseExpectedState(node: JsonNode): ExpectedState =
 
 func parseComplianceCase*(node: JsonNode): ComplianceCase =
   result.name = node["name"].getStr()
-  result.input = node["input"].getStr()
+  if node.hasKey("inputByteChunks"):
+    for chunk in node["inputByteChunks"]:
+      var bytes: seq[byte] = @[]
+      for item in chunk:
+        bytes.add byte(item.getInt())
+      result.inputByteChunks.add bytes
+  elif node.hasKey("inputChunks"):
+    for item in node["inputChunks"]:
+      result.inputChunks.add item.getStr()
+    result.input = result.inputChunks.join("")
+  else:
+    result.input = node["input"].getStr()
   result.expect = parseExpectedState(node["expect"])
 
 proc loadSuite*(path: string): seq[ComplianceCase] =
@@ -391,7 +406,50 @@ func compare*(tc: ComplianceCase, actual: ActualState): ComplianceResult =
 proc runCase*(tc: ComplianceCase, provider: StateProvider): ComplianceResult =
   tc.compare(provider(tc.input))
 
+proc runCase*(tc: ComplianceCase, provider: ChunkedStateProvider): ComplianceResult =
+  if tc.inputChunks.len > 0:
+    tc.compare(provider(tc.inputChunks))
+  else:
+    tc.compare(provider([tc.input]))
+
+proc runCase*(tc: ComplianceCase, provider: ByteChunkedStateProvider): ComplianceResult =
+  if tc.inputByteChunks.len > 0:
+    tc.compare(provider(tc.inputByteChunks))
+  elif tc.inputChunks.len > 0:
+    var chunks: seq[seq[byte]] = @[]
+    for input in tc.inputChunks:
+      var bytes: seq[byte] = @[]
+      for ch in input:
+        bytes.add byte(ch)
+      chunks.add bytes
+    tc.compare(provider(chunks))
+  else:
+    var bytes: seq[byte] = @[]
+    for ch in tc.input:
+      bytes.add byte(ch)
+    tc.compare(provider([bytes]))
+
 proc runSuite*(cases: openArray[ComplianceCase], provider: StateProvider): ComplianceSummary =
+  for tc in cases:
+    inc result.total
+    let item = tc.runCase(provider)
+    if item.passed:
+      inc result.passed
+    else:
+      inc result.failed
+      result.failures.add item.failures
+
+proc runSuite*(cases: openArray[ComplianceCase], provider: ChunkedStateProvider): ComplianceSummary =
+  for tc in cases:
+    inc result.total
+    let item = tc.runCase(provider)
+    if item.passed:
+      inc result.passed
+    else:
+      inc result.failed
+      result.failures.add item.failures
+
+proc runSuite*(cases: openArray[ComplianceCase], provider: ByteChunkedStateProvider): ComplianceSummary =
   for tc in cases:
     inc result.total
     let item = tc.runCase(provider)

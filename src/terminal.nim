@@ -312,6 +312,10 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdCarriageReturn: t.screen.carriageReturn()
   of cmdBackspace:      t.screen.backspace()
   of cmdHorizontalTab:  t.screen.tab()
+  of cmdCursorForwardTab: t.screen.tab(cmd.count)
+  of cmdCursorBackwardTab: t.screen.backTab(cmd.count)
+  of cmdShiftOut:       t.screen.shiftOut()
+  of cmdShiftIn:        t.screen.shiftIn()
   of cmdBell: (if t.onBell != nil: t.onBell())
   of cmdCursorUp:       t.screen.cursorUp(cmd.count); t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row)
   of cmdCursorDown:     t.screen.cursorDown(cmd.count); t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row)
@@ -329,10 +333,9 @@ proc apply*(t: Terminal, cmd: VtCommand) =
       t.outputFootprint.markFullDisplayErase(activeAlternate = t.screen.usingAlt)
     t.damage.markAll()
   of cmdEraseChars:
-    let saved = t.screen.cursor; let k = min(cmd.count, t.screen.cols - saved.col)
-    for i in 0 ..< k: (t.screen.cursorTo(saved.row, saved.col + i); t.screen.writeRune(uint32(' '), 1))
-    t.screen.cursor = saved; t.damage.markRow(saved.row)
-    t.trackOutputFootprint(saved.row)
+    t.screen.eraseChars(cmd.count)
+    t.damage.markRow(rowBefore)
+    t.trackOutputFootprint(rowBefore)
   of cmdInsertLines: (t.screen.insertLines(cmd.count); t.trackOutputFootprint(rowBefore, t.screen.scrollBottom); t.damage.markAll())
   of cmdDeleteLines: (t.screen.deleteLines(cmd.count); t.trackOutputFootprint(rowBefore, t.screen.scrollBottom); t.damage.markAll())
   of cmdInsertChars: (t.screen.insertChars(cmd.count); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
@@ -421,9 +424,10 @@ proc apply*(t: Terminal, cmd: VtCommand) =
     t.screen.screenAlignmentTest()
     t.damage.markAll()
   of cmdSelectCharset:
+    let slot = if cmd.charsetSlot == ')': 1 else: 0
     case cmd.charsetFinal
-    of byte('0'): t.screen.setCharset(scsDecSpecialGraphics)
-    else: t.screen.setCharset(scsAscii)
+    of byte('0'): t.screen.selectCharset(slot, scsDecSpecialGraphics)
+    else: t.screen.selectCharset(slot, scsAscii)
   of cmdShellPromptStart:
     t.finishOutputFootprint(force = t.history.phase == sphOutput)
     t.history.markPromptStart(t.absoluteCursorRow())
@@ -452,7 +456,7 @@ proc feedBytes*(t: Terminal, data: openArray[byte]) =
   proc vtEmit(ev: VtEvent) =
     case ev.kind
     of vePrint: (t.decoder.feed([ev.byteVal]) do (rune: uint32, width: int): t.apply(VtCommand(kind: cmdPrint, rune: rune, width: width)))
-    of veExecute: t.apply(VtCommand(kind: cmdExecute, rawByte: ev.byteVal))
+    of veExecute: t.apply(translateExecute(ev.byteVal))
     of veEscDispatch:
       if ev.escIntermediates.len == 0:
         case char(ev.escFinal)

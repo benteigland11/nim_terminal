@@ -106,7 +106,9 @@ type
 
   SavedScreenState = object
     cursor: Cursor
-    charset: ScreenCharset
+    g0Charset: ScreenCharset
+    g1Charset: ScreenCharset
+    activeCharset: int
     modes: set[ScreenMode]
 
   Screen* = ref object
@@ -129,6 +131,9 @@ type
     altScrollbackEnabled*: bool
     usingAlt*: bool
     charset*: ScreenCharset
+    g0Charset*: ScreenCharset
+    g1Charset*: ScreenCharset
+    activeCharset*: int
     title*: string
     iconName*: string
     theme*: TerminalTheme
@@ -210,6 +215,9 @@ func newScreen*(
     altScrollbackEnabled: false,
     usingAlt: false,
     charset: scsAscii,
+    g0Charset: scsAscii,
+    g1Charset: scsAscii,
+    activeCharset: 0,
     title: "",
     iconName: "",
     theme: defaultTheme(),
@@ -391,7 +399,7 @@ proc scrollUp*(s: Screen, count: int = 1) =
       )
   for r in s.scrollTop .. (s.scrollBottom - n): g[][r] = g[][r + n]
   for r in s.scrollTop .. (s.scrollBottom - n): wraps[][r] = wraps[][r + n]
-  let attrs = defaultAttrs()
+  let attrs = s.cursor.attrs
   for r in (s.scrollBottom - n + 1) .. s.scrollBottom:
     g[][r] = makeRow(s.cols, attrs)
     wraps[][r] = false
@@ -403,7 +411,7 @@ proc scrollDown*(s: Screen, count: int = 1) =
   let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
   for r in countdown(s.scrollBottom, s.scrollTop + n): g[][r] = g[][r - n]
   for r in countdown(s.scrollBottom, s.scrollTop + n): wraps[][r] = wraps[][r - n]
-  let attrs = defaultAttrs()
+  let attrs = s.cursor.attrs
   for r in s.scrollTop .. (s.scrollTop + n - 1):
     g[][r] = makeRow(s.cols, attrs)
     wraps[][r] = false
@@ -458,7 +466,7 @@ proc applyPrivateMode*(s: Screen, code: int, set: bool): bool =
 proc reset*(s: Screen) =
   s.cursor = newCursor(); s.scrollTop = 0; s.scrollBottom = s.rows - 1
   s.tabStops = makeTabStops(s.cols, DefaultTabWidth); s.modes = {smAutoWrap}
-  s.usingAlt = false; s.charset = scsAscii; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.altScrollback.setLen(0); s.altScrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
+  s.usingAlt = false; s.charset = scsAscii; s.g0Charset = scsAscii; s.g1Charset = scsAscii; s.activeCharset = 0; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.altScrollback.setLen(0); s.altScrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
   s.theme = defaultTheme(); let attrs = defaultAttrs()
   for r in 0 ..< s.rows:
     s.grid[r] = makeRow(s.cols, attrs)
@@ -805,9 +813,31 @@ func scrollbackText*(s: Screen, idx: int): string =
 func scrollbackLine*(s: Screen, idx: int): seq[Cell] = (if idx < 0 or idx >= s.scrollback.len: @[] else: s.scrollback[idx])
 proc carriageReturn*(s: Screen) = (s.cursor.col = 0; s.cursor.pendingWrap = false)
 proc backspace*(s: Screen) = (s.cursor.col = max(0, s.cursor.col - 1); s.cursor.pendingWrap = false)
-proc tab*(s: Screen) =
-  for c in (s.cursor.col + 1) ..< s.cols: (if s.tabStops[c]: (s.cursor.col = c; return))
-  s.cursor.col = s.cols - 1
+proc tab*(s: Screen, count: int = 1) =
+  for _ in 0 ..< max(1, count):
+    var moved = false
+    for c in (s.cursor.col + 1) ..< s.cols:
+      if s.tabStops[c]:
+        s.cursor.col = c
+        moved = true
+        s.cursor.pendingWrap = false
+        break
+    if not moved:
+      s.cursor.col = s.cols - 1
+    s.cursor.pendingWrap = false
+
+proc backTab*(s: Screen, count: int = 1) =
+  for _ in 0 ..< max(1, count):
+    var moved = false
+    if s.cursor.col > 0:
+      for c in countdown(s.cursor.col - 1, 0):
+        if s.tabStops[c]:
+          s.cursor.col = c
+          moved = true
+          break
+    if not moved:
+      s.cursor.col = 0
+    s.cursor.pendingWrap = false
 
 func decSpecialGraphic(cp: uint32): uint32 =
   case cp
@@ -825,12 +855,29 @@ func decSpecialGraphic(cp: uint32): uint32 =
   else: cp
 
 func translateCharset(s: Screen, cp: uint32): uint32 =
-  case s.charset
+  let charset = if s.activeCharset == 1: s.g1Charset else: s.g0Charset
+  case charset
   of scsAscii: cp
   of scsDecSpecialGraphics: decSpecialGraphic(cp)
 
 proc setCharset*(s: Screen, charset: ScreenCharset) =
+  s.g0Charset = charset
   s.charset = charset
+
+proc selectCharset*(s: Screen, slot: int, charset: ScreenCharset) =
+  if slot == 1:
+    s.g1Charset = charset
+  else:
+    s.g0Charset = charset
+    s.charset = charset
+
+proc shiftOut*(s: Screen) =
+  s.activeCharset = 1
+  s.charset = s.g1Charset
+
+proc shiftIn*(s: Screen) =
+  s.activeCharset = 0
+  s.charset = s.g0Charset
 
 proc writeRune*(s: Screen, cp: uint32, width: int) =
   let mapped = s.translateCharset(cp)
@@ -933,6 +980,15 @@ proc deleteChars*(s: Screen, count: int) =
   let c = s.cursor.col; let r = s.cursor.row; let n = min(count, s.cols - c); let g = if s.usingAlt: addr s.altGrid else: addr s.grid
   for i in c .. (s.cols - n - 1): g[][r][i] = g[][r][i + n]
   s.clearRow(r, s.cols - n, s.cols - 1, s.cursor.attrs)
+
+proc eraseChars*(s: Screen, count: int) =
+  let c = s.cursor.col
+  let r = s.cursor.row
+  let n = min(max(0, count), s.cols - c)
+  if n <= 0:
+    return
+  s.clearRow(r, c, c + n - 1, s.cursor.attrs)
+  s.cursor.pendingWrap = false
 
 func applyIndexedOr24bit(p: openArray[SgrParam], si: int, cur: Color): (Color, int) =
   if si >= p.len: return (cur, 0)
@@ -1084,14 +1140,30 @@ func scrollRegionReport*(s: Screen): string =
 proc setTabStop*(s: Screen) = (if s.cursor.col < s.cols: s.tabStops[s.cursor.col] = true)
 proc clearTabStop*(s: Screen) = (if s.cursor.col < s.cols: s.tabStops[s.cursor.col] = false)
 proc clearAllTabStops*(s: Screen) = (for i in 0 ..< s.cols: s.tabStops[i] = false)
-proc setScrollRegion*(s: Screen, t, b: int) = (s.scrollTop = max(0, min(s.rows - 1, t)); s.scrollBottom = max(s.scrollTop, min(s.rows - 1, b)))
+proc setScrollRegion*(s: Screen, t, b: int) =
+  let top = max(0, min(s.rows - 1, t))
+  let bottom = max(0, min(s.rows - 1, b))
+  if top >= bottom:
+    return
+  s.scrollTop = top
+  s.scrollBottom = bottom
+  s.cursorTo(0, 0)
 func savedState(s: Screen): SavedScreenState =
-  SavedScreenState(cursor: s.cursor, charset: s.charset, modes: s.modes)
+  SavedScreenState(
+    cursor: s.cursor,
+    g0Charset: s.g0Charset,
+    g1Charset: s.g1Charset,
+    activeCharset: s.activeCharset,
+    modes: s.modes,
+  )
 
 proc applySavedState(s: Screen, saved: SavedScreenState) =
   s.cursor = saved.cursor
   s.cursor.pendingWrap = false
-  s.charset = saved.charset
+  s.g0Charset = saved.g0Charset
+  s.g1Charset = saved.g1Charset
+  s.activeCharset = saved.activeCharset
+  s.charset = if s.activeCharset == 1: s.g1Charset else: s.g0Charset
   s.modes = saved.modes
 
 proc saveCursor*(s: Screen) =

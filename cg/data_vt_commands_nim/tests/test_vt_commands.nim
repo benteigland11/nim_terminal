@@ -24,6 +24,15 @@ suite "CSI cursor movement":
     check translateCsi(@[p(2)], @[], byte('E')).kind == cmdCursorNextLine
     check translateCsi(@[p(2)], @[], byte('F')).kind == cmdCursorPrevLine
 
+  test "CSI I and Z map to forward/backward tab movement":
+    let fwd = translateCsi(@[p(2)], @[], byte('I'))
+    check fwd.kind == cmdCursorForwardTab
+    check fwd.count == 2
+
+    let back = translateCsi(@[p(3)], @[], byte('Z'))
+    check back.kind == cmdCursorBackwardTab
+    check back.count == 3
+
   test "CSI G moves to column (1-indexed input → 0-indexed output)":
     let c = translateCsi(@[p(10)], @[], byte('G'))
     check c.kind == cmdCursorToColumn
@@ -186,10 +195,18 @@ suite "ESC sequences":
   test "G0 charset selections are translated":
     let ascii = translateEsc(@[byte('(')], byte('B'))
     check ascii.kind == cmdSelectCharset
+    check ascii.charsetSlot == '('
     check ascii.charsetFinal == byte('B')
 
     let dec = translateEsc(@[byte('(')], byte('0'))
     check dec.kind == cmdSelectCharset
+    check dec.charsetSlot == '('
+    check dec.charsetFinal == byte('0')
+
+  test "G1 charset selections are translated":
+    let dec = translateEsc(@[byte(')')], byte('0'))
+    check dec.kind == cmdSelectCharset
+    check dec.charsetSlot == ')'
     check dec.charsetFinal == byte('0')
 
   test "ESC with intermediate falls through to unknown":
@@ -201,6 +218,8 @@ suite "C0 execute":
     check translateExecute(0x09'u8).kind == cmdHorizontalTab
     check translateExecute(0x0A'u8).kind == cmdLineFeed
     check translateExecute(0x0D'u8).kind == cmdCarriageReturn
+    check translateExecute(0x0E'u8).kind == cmdShiftOut
+    check translateExecute(0x0F'u8).kind == cmdShiftIn
     check translateExecute(0x07'u8).kind == cmdBell
 
   test "VT, FF, NEL also map to line feed":

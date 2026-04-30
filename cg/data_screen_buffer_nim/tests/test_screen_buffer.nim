@@ -45,6 +45,16 @@ suite "Writing and cursor":
     s.tab()
     check s.cursor.col == 16
 
+  test "counted tab and backtab traverse tab stops":
+    let s = newScreen(30, 1)
+    s.cursor.col = 1
+    s.tab(2)
+    check s.cursor.col == 16
+    s.backTab()
+    check s.cursor.col == 8
+    s.backTab(2)
+    check s.cursor.col == 0
+
   test "autowrap wraps to next line on overflow":
     let s = newScreen(4, 2)
     s.writeString("abcd")     # fills row 0, cursor at col 3 with pendingWrap
@@ -76,6 +86,19 @@ suite "Writing and cursor":
     check s.cellAt(0, 2).rune == 0x2510'u32
     check s.cellAt(0, 3).rune == 0x2502'u32
     check s.cellAt(0, 4).rune == uint32('q')
+
+  test "G1 charset can be selected through SO/SI":
+    let s = newScreen(8, 1)
+    s.selectCharset(1, scsDecSpecialGraphics)
+    s.writeString("q")
+    s.shiftOut()
+    s.writeString("q")
+    s.shiftIn()
+    s.writeString("q")
+
+    check s.cellAt(0, 0).rune == uint32('q')
+    check s.cellAt(0, 1).rune == 0x2500'u32
+    check s.cellAt(0, 2).rune == uint32('q')
 
   test "repeatPreviousChar repeats the preceding graphic cell":
     let s = newScreen(8, 1)
@@ -158,6 +181,49 @@ suite "Scrolling":
     s.linefeed()                       # should scroll inside region only
     check s.trimmedLine(0) == "A"
     check s.trimmedLine(3) == "D"
+
+  test "scrolling fills exposed rows with current attrs":
+    let s = newScreen(4, 3)
+    s.cursor.attrs.bg = indexedColor(1)
+    s.writeString("A"); s.carriageReturn(); s.linefeed()
+    s.writeString("B"); s.carriageReturn(); s.linefeed()
+    s.writeString("C"); s.linefeed()
+
+    check s.cellAt(2, 0).rune == uint32(' ')
+    check s.cellAt(2, 0).attrs.bg.kind == ckIndexed
+    check s.cellAt(2, 0).attrs.bg.index == 1
+
+  test "setScrollRegion homes cursor":
+    let s = newScreen(8, 5)
+    s.cursorTo(4, 7)
+
+    s.setScrollRegion(1, 3)
+
+    check s.scrollTop == 1
+    check s.scrollBottom == 3
+    check s.cursor.row == 0
+    check s.cursor.col == 0
+
+  test "setScrollRegion homes cursor relative to origin mode":
+    let s = newScreen(8, 5)
+    discard s.applyPrivateMode(6, true)
+
+    s.setScrollRegion(1, 3)
+
+    check s.cursor.row == 1
+    check s.cursor.col == 0
+
+  test "invalid one-line scroll regions are ignored":
+    let s = newScreen(8, 5)
+    s.setScrollRegion(1, 3)
+
+    s.setScrollRegion(3, 3)
+    check s.scrollTop == 1
+    check s.scrollBottom == 3
+
+    s.setScrollRegion(4, 2)
+    check s.scrollTop == 1
+    check s.scrollBottom == 3
 
   test "top-anchored primary scroll region contributes to scrollback":
     let s = newScreen(8, 4, scrollback = 10)
@@ -328,6 +394,30 @@ suite "Insert/delete":
     s.deleteChars(2)
     check s.lineText(0) == "abef  "
 
+  test "eraseChars blanks without insert-mode shifts":
+    let s = newScreen(8, 1)
+    s.writeString("abcdef")
+    s.cursorTo(0, 2)
+    s.modes.incl smInsert
+    s.eraseChars(2)
+
+    check s.cursor.row == 0
+    check s.cursor.col == 2
+    check s.lineText(0) == "ab  ef  "
+    check smInsert in s.modes
+
+  test "eraseChars clears pending wrap without wrapping":
+    let s = newScreen(4, 2)
+    s.writeString("abcd")
+    check s.cursor.pendingWrap
+    s.eraseChars(1)
+
+    check s.cursor.row == 0
+    check s.cursor.col == 3
+    check not s.cursor.pendingWrap
+    check s.lineText(0) == "abc "
+    check s.trimmedLine(1) == ""
+
   test "insertLines pushes rows down within scroll region":
     let s = newScreen(4, 4)
     for r in 0 ..< 4:
@@ -486,6 +576,17 @@ suite "Save / restore cursor":
     check smOrigin in s.modes
     check smAutoWrap notin s.modes
     check s.cellAt(1, 0).rune == 0x2500'u32
+
+  test "save/restore round-trips active G1 charset shift":
+    let s = newScreen(10, 2)
+    s.selectCharset(1, scsDecSpecialGraphics)
+    s.shiftOut()
+    s.saveCursor()
+    s.shiftIn()
+    s.restoreCursor()
+    s.writeString("q")
+
+    check s.cellAt(0, 0).rune == 0x2500'u32
 
 suite "Screen reset/alignment":
   test "screen alignment test fills active display with default E cells":

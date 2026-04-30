@@ -2,7 +2,7 @@
   "meta": {
     "id": "data-vt-compliance-suite-nim",
     "name": "VT Compliance Suite",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "domain": "data",
     "tags": [
       "terminal",
@@ -19,7 +19,7 @@
   },
   "validation": {
     "engine_version": 3,
-    "validated_at": "2026-04-29T04:19:03.469318+00:00",
+    "validated_at": "2026-04-29T23:11:45.374163+00:00",
     "runtime": "nim 2.2.10"
   },
   "library_notes": {

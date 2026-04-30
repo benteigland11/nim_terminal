@@ -24,10 +24,10 @@ proc newMockTerminal(rows, cols: int): Terminal =
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
-proc feed(t: Terminal, value: string) =
+proc feed(t: Terminal, value: openArray[byte]) =
   if value.len == 0:
     return
-  t.feedBytes(value.toOpenArrayByte(0, value.high))
+  t.feedBytes(value)
 
 func colorHex(color: PaletteColor): string =
   "#" & color.r.toHex(2) & color.g.toHex(2) & color.b.toHex(2)
@@ -41,12 +41,13 @@ func colorSpec(color: Color): Option[string] =
   of ckRgb:
     some("#" & color.r.toHex(2) & color.g.toHex(2) & color.b.toHex(2))
 
-proc complianceState(input: string): ActualState =
+proc complianceState(inputChunks: openArray[seq[byte]]): ActualState =
   let t = newMockTerminal(10, 20)
   var clipboardRequests: seq[tuple[selector: string, text: string]] = @[]
   t.onClipboardRequest = proc(selector, text: string) =
     clipboardRequests.add (selector: selector, text: text)
-  t.feed(input)
+  for input in inputChunks:
+    t.feed(input)
 
   result.cursorRow = some(t.screen.cursor.row)
   result.cursorCol = some(t.screen.cursor.col)
@@ -95,7 +96,7 @@ proc complianceState(input: string): ActualState =
 suite "Waymark VT compliance":
   test "core vector suite passes":
     let cases = loadSuite("cg/data_vt_compliance_suite_nim/src/vectors/core_vt.json")
-    let summary = runSuite(cases, complianceState)
+    let summary = runSuite(cases, ByteChunkedStateProvider(complianceState))
 
     check summaryLine(summary) == "VT compliance: " & $cases.len & "/" & $cases.len & " passed, 0 failed"
     if summary.failed > 0:
