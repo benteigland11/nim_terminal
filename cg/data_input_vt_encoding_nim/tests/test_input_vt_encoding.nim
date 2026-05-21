@@ -85,6 +85,16 @@ suite "input vt encoding":
     let bytes = encodeKeyEvent(key(kArrowUp), mode)
     check cast[string](bytes) == "\e[A"
 
+  test "keypad enter sends carriage return in normal and application keypad modes":
+    var mode = newInputMode()
+    check encodeKeyEvent(key(kKeypadEnter), mode) == @[13'u8]
+
+    mode.keypadApp = true
+    check encodeKeyEvent(key(kKeypadEnter), mode) == @[13'u8]
+
+  test "alt keypad enter prefixes escape":
+    check encodeKeyEvent(key(kKeypadEnter, {modAlt})) == @[27'u8, 13'u8]
+
   test "keyboard encoding application mode (arrow up)":
     var mode = newInputMode()
     mode.cursorApp = true

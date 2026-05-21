@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.1.3
+
+- Fixed numpad Enter so it sends carriage return even when application keypad mode is active.
+- Rebuilt the Linux release binary after the input encoding fix.
+
 ## v0.1.2
 
 - Added a reusable VT compliance suite widget and a 136-vector Waymark adapter test.

@@ -232,8 +232,8 @@ func encodeKeyEvent*(ev: KeyEvent, mode: InputMode = newInputMode()): seq[byte] 
   of kF11:        encodeTildeInto(result, 23, ev.mods)
   of kF12:        encodeTildeInto(result, 24, ev.mods)
   of kKeypadEnter:
-    if mode.keypadApp: result.add Esc; result.add byte('O'); result.add byte('M')
-    else: (if modAlt in ev.mods: result.add Esc); result.add Cr
+    if modAlt in ev.mods: result.add Esc
+    result.add Cr
 
 func encodeMouseEvent*(ev: MouseEvent, mode: InputMode = newInputMode()): seq[byte] =
   result = @[]
