@@ -40,6 +40,14 @@ const
 
 func key*(c: char): KeyCode = KeyCode(kind: kChar, c: c)
 
+func shortcutKey*(c: char): KeyCode =
+  ## Canonicalize printable letter shortcuts so backend-specific keycodes
+  ## resolve the same action for Ctrl+Shift+C, Ctrl+Shift+V, etc.
+  if c >= 'a' and c <= 'z':
+    key(char(ord(c) - ord('a') + ord('A')))
+  else:
+    key(c)
+
 func `==`*(a, b: KeyCode): bool =
   if a.kind != b.kind: return false
   case a.kind
@@ -94,8 +102,12 @@ func lookup*(m: ShortcutMap, code: KeyCode, mods: set[Modifier]): Option[string]
 
 func addStandardTerminalShortcuts*(m: ShortcutMap) =
   ## Load standard terminal shortcuts like Copy/Paste and Zoom.
-  m.bindAction(key('C'), {modCtrl, modShift}, "copy")
-  m.bindAction(key('V'), {modCtrl, modShift}, "paste")
+  m.bindAction(shortcutKey('C'), {modCtrl, modShift}, "copy")
+  m.bindAction(shortcutKey('V'), {modCtrl, modShift}, "paste")
+  for i in 1 .. 9:
+    m.bindAction(shortcutKey(char(ord('0') + i)), {modAlt}, "tab-" & $i)
   m.bindAction(kEqual, {modCtrl}, "zoom-in")
   m.bindAction(kPlus, {modCtrl}, "zoom-in")
+  m.bindAction(kEqual, {modCtrl, modShift}, "zoom-in")
+  m.bindAction(kPlus, {modCtrl, modShift}, "zoom-in")
   m.bindAction(kMinus, {modCtrl}, "zoom-out")

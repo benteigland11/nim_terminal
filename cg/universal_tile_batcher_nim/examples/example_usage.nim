@@ -1,13 +1,17 @@
 ## Example usage of Tile Batcher.
 ##
-## Demonstrates the batching API. Requires a GL context to run.
+## Demonstrates the batching API.
 
 import tile_batcher_lib
 
-# In a real app:
-# let batcher = newTileBatcher(texId)
-# batcher.beginBatch()
-# batcher.addTile(Tile(x: 0, y: 0, w: 10, h: 10, u1: 0, v1: 0, u2: 1, v2: 1, color: rgba(1,1,1,1)))
-# batcher.endBatch()
+let batcher = newTileBatcher(1)
+batcher.beginBatch()
+batcher.addTile(0, 0, 1, 1, 0, 0, 1, 1, rgba(1, 1, 1, 1))
 
-echo "Tile batcher example (API verified via compilation)."
+var submitted = 0
+batcher.endBatch(proc (textureId: uint32; vertices: openArray[TileVertex]) =
+  doAssert textureId == 1
+  submitted = vertices.len
+)
+
+doAssert submitted == 6

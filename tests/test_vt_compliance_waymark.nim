@@ -95,7 +95,9 @@ proc complianceState(inputChunks: openArray[seq[byte]]): ActualState =
 
 suite "Waymark VT compliance":
   test "core vector suite passes":
-    let cases = loadSuite("cg/data_vt_compliance_suite_nim/src/vectors/core_vt.json")
+    var cases = loadSuite("cg/data_vt_compliance_suite_nim/src/vectors/core_vt.json")
+    cases.add(loadSuite("cg/data_vt_compliance_suite_nim/src/vectors/phase1_vt.json"))
+    cases.add(loadSuite("cg/data_vt_compliance_suite_nim/src/vectors/phase1b_vt.json"))
     let summary = runSuite(cases, ByteChunkedStateProvider(complianceState))
 
     check summaryLine(summary) == "VT compliance: " & $cases.len & "/" & $cases.len & " passed, 0 failed"

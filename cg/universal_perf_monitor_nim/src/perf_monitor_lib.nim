@@ -14,7 +14,7 @@ type
     lastFrameStart: float
 
 proc newPerfMonitor*(): PerfMonitor =
-  let now = cpuTime()
+  let now = epochTime()
   PerfMonitor(
     startTime: now,
     lastReportTime: now,
@@ -25,22 +25,22 @@ proc newPerfMonitor*(): PerfMonitor =
 
 proc beginFrame*(m: PerfMonitor) =
   ## Mark the start of a frame to track latency.
-  m.lastFrameStart = cpuTime()
+  m.lastFrameStart = epochTime()
 
 proc endFrame*(m: PerfMonitor) =
   ## Mark the end of a frame and accumulate latency.
   if m.lastFrameStart > 0:
-    m.totalLatency += (cpuTime() - m.lastFrameStart)
+    m.totalLatency += (epochTime() - m.lastFrameStart)
     m.lastFrameStart = 0
   inc m.frames
 
 proc shouldReport*(m: PerfMonitor, interval: float = 2.0): bool =
   ## True if the specified interval (in seconds) has passed.
-  cpuTime() - m.lastReportTime >= interval
+  epochTime() - m.lastReportTime >= interval
 
 proc takeReport*(m: PerfMonitor): tuple[fps: float, avgLatencyMs: float] =
   ## Calculate stats and reset counters for the next interval.
-  let now = cpuTime()
+  let now = epochTime()
   let dt = now - m.lastReportTime
   if dt > 0 and m.frames > 0:
     result.fps = float(m.frames) / dt

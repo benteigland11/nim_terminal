@@ -5,15 +5,20 @@ suite "shortcut map":
 
   test "bind and lookup character shortcut":
     let m = newShortcutMap()
-    m.bindAction(key('C'), {modCtrl, modShift}, "copy")
+    m.bindAction(shortcutKey('C'), {modCtrl, modShift}, "copy")
     
-    let action = m.lookup(key('C'), {modCtrl, modShift})
+    let action = m.lookup(shortcutKey('C'), {modCtrl, modShift})
     check action.isSome
     check action.get() == "copy"
     
     # Check no match
-    check m.lookup(key('C'), {modCtrl}).isNone
-    check m.lookup(key('X'), {modCtrl, modShift}).isNone
+    check m.lookup(shortcutKey('C'), {modCtrl}).isNone
+    check m.lookup(shortcutKey('X'), {modCtrl, modShift}).isNone
+
+  test "printable letter shortcuts are case-normalized":
+    check shortcutKey('c') == shortcutKey('C')
+    check shortcutKey('v') == shortcutKey('V')
+    check shortcutKey('=') == key('=')
 
   test "bind and lookup special shortcut":
     let m = newShortcutMap()
@@ -26,5 +31,9 @@ suite "shortcut map":
   test "standard terminal shortcuts":
     let m = newShortcutMap()
     m.addStandardTerminalShortcuts()
-    check m.lookup(key('C'), {modCtrl, modShift}).get() == "copy"
+    check m.lookup(shortcutKey('c'), {modCtrl, modShift}).get() == "copy"
+    check m.lookup(shortcutKey('1'), {modAlt}).get() == "tab-1"
+    check m.lookup(shortcutKey('9'), {modAlt}).get() == "tab-9"
     check m.lookup(kEqual, {modCtrl}).get() == "zoom-in"
+    check m.lookup(kEqual, {modCtrl, modShift}).get() == "zoom-in"
+    check m.lookup(kPlus, {modCtrl, modShift}).get() == "zoom-in"

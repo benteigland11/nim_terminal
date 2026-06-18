@@ -1,0 +1,127 @@
+[
+  {
+    "name": "BS: Basic",
+    "input": "\u001b[3;3H\b",
+    "expect": {
+      "cursor": [2, 1]
+    }
+  },
+  {
+    "name": "BS: Stops at origin",
+    "input": "\u001b[1;1H\b",
+    "expect": {
+      "cursor": [0, 0]
+    }
+  },
+  {
+    "name": "BS: No wrap by default",
+    "input": "\u001b[3;1H\b",
+    "expect": {
+      "cursor": [2, 0]
+    }
+  },
+  {
+    "name": "BS: Pending wrap edgecase",
+    "input": "\u001b[1;19Hab\bX",
+    "expect": {
+      "cells": {
+        "0,18": { "rune": 88 },
+        "0,19": { "rune": 98 }
+      }
+    }
+  },
+  {
+    "name": "CR: Basic",
+    "input": "\u001b[3;3H\r",
+    "expect": {
+      "cursor": [2, 0]
+    }
+  },
+  {
+    "name": "LF: Basic",
+    "input": "\u001b[3;3H\n",
+    "expect": {
+      "cursor": [3, 2]
+    }
+  },
+  {
+    "name": "LF: Scrolls region",
+    "input": "A\r\nB\r\nC\r\nD\r\nE\u001b[2;4r\u001b[4;1H\n\u001b[r",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "C",
+        "2": "D",
+        "3": "",
+        "4": "E"
+      }
+    }
+  },
+  {
+    "name": "IL: Default param",
+    "input": "abcde\r\nfghij\r\nklmno\u001b[3;2H\u001b[L",
+    "expect": {
+      "lines": {
+        "0": "abcde",
+        "1": "fghij",
+        "2": "",
+        "3": "klmno"
+      }
+    }
+  },
+  {
+    "name": "IL: Respects scroll region",
+    "input": "11111\r\n22222\r\n33333\r\n44444\r\n55555\u001b[2;4r\u001b[3;1H\u001b[L\u001b[r",
+    "expect": {
+      "lines": {
+        "0": "11111",
+        "1": "22222",
+        "2": "",
+        "3": "33333",
+        "4": "55555"
+      }
+    }
+  },
+  {
+    "name": "DL: Default param",
+    "input": "abcde\r\nfghij\r\nklmno\u001b[2;1H\u001b[M",
+    "expect": {
+      "lines": {
+        "0": "abcde",
+        "1": "klmno",
+        "2": ""
+      }
+    }
+  },
+  {
+    "name": "DL: Respects scroll region",
+    "input": "11111\r\n22222\r\n33333\r\n44444\r\n55555\u001b[2;4r\u001b[2;1H\u001b[M\u001b[r",
+    "expect": {
+      "lines": {
+        "0": "11111",
+        "1": "33333",
+        "2": "44444",
+        "3": "",
+        "4": "55555"
+      }
+    }
+  },
+  {
+    "name": "ECH: Default param",
+    "input": "abcde\u001b[1;2H\u001b[X",
+    "expect": {
+      "lines": {
+        "0": "a cde"
+      }
+    }
+  },
+  {
+    "name": "ECH: Explicit param",
+    "input": "abcde\u001b[1;2H\u001b[2X",
+    "expect": {
+      "lines": {
+        "0": "a  de"
+      }
+    }
+  }
+]

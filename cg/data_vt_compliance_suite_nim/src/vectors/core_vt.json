@@ -20,6 +20,41 @@
     }
   },
   {
+    "name": "CUP: Default params",
+    "input": "\u001b[2;3H\u001b[H",
+    "expect": {
+      "cursor": [0, 0]
+    }
+  },
+  {
+    "name": "CUP: Row only",
+    "input": "\u001b[2;3H\u001b[2H",
+    "expect": {
+      "cursor": [1, 0]
+    }
+  },
+  {
+    "name": "CUP: Column only",
+    "input": "\u001b[2;3H\u001b[;2H",
+    "expect": {
+      "cursor": [0, 1]
+    }
+  },
+  {
+    "name": "CUP: Zero args are treated as 1",
+    "input": "\u001b[2;3H\u001b[0;0H",
+    "expect": {
+      "cursor": [0, 0]
+    }
+  },
+  {
+    "name": "CUP: Out of bounds params",
+    "input": "\u001b[999;999H",
+    "expect": {
+      "cursor": [9, 19]
+    }
+  },
+  {
     "name": "Erase in Display (ED 2) - Full",
     "input": "abc\u001b[2J",
     "expect": {
@@ -224,12 +259,57 @@
     }
   },
   {
+    "name": "ICH: Default parameter inserts one blank",
+    "input": "abcdefg\u001b[1;2H\u001b[@",
+    "expect": {
+      "lines": {
+        "0": "a bcdefg"
+      }
+    }
+  },
+  {
+    "name": "ICH: Scroll off right edge drops characters",
+    "input": "\u001b[1;14Habcdefg\u001b[1;15H\u001b[@",
+    "expect": {
+      "lines": {
+        "0": "             a bcdef"
+      }
+    }
+  },
+  {
+    "name": "ICH: Scroll entirely off right edge",
+    "input": "xxxxxxxxxxxxxxxxxxxx\u001b[1;1H\u001b[20@",
+    "expect": {
+      "lines": {
+        "0": ""
+      }
+    }
+  },
+  {
     "name": "Delete characters shifts left",
     "input": "abcdef\u001b[1;3H\u001b[2P",
     "expect": {
       "cursor": [0, 2],
       "lines": {
         "0": "abef"
+      }
+    }
+  },
+  {
+    "name": "DCH: Default parameter deletes one character",
+    "input": "abcd\u001b[1;2H\u001b[P",
+    "expect": {
+      "lines": {
+        "0": "acd"
+      }
+    }
+  },
+  {
+    "name": "DCH: Works outside top-bottom margin",
+    "input": "abcde\u001b[2;3r\u001b[1;1H\u001b[99P\u001b[r",
+    "expect": {
+      "lines": {
+        "0": ""
       }
     }
   },
@@ -639,6 +719,28 @@
     }
   },
   {
+    "name": "Button-event mouse mode is tracked",
+    "input": "\u001b[?1002h",
+    "expect": {
+      "mouseMode": "mmButtonEvent"
+    }
+  },
+  {
+    "name": "Any-event mouse mode is tracked",
+    "input": "\u001b[?1003h",
+    "expect": {
+      "mouseMode": "mmAnyEvent"
+    }
+  },
+  {
+    "name": "SGR mouse coordinate mode resets independently",
+    "input": "\u001b[?1002h\u001b[?1006h\u001b[?1006l",
+    "expect": {
+      "mouseMode": "mmButtonEvent",
+      "sgrMouse": false
+    }
+  },
+  {
     "name": "Mouse and input private modes reset",
     "input": "\u001b[?1000h\u001b[?1006h\u001b[?1007h\u001b[?2004h\u001b[?1004h\u001b[?1000l\u001b[?1006l\u001b[?1007l\u001b[?2004l\u001b[?1004l",
     "expect": {
@@ -705,6 +807,56 @@
       "title": "",
       "lines": {
         "0": "X"
+      }
+    }
+  },
+  {
+    "name": "DCS: Unrecognized DCS is swallowed",
+    "input": "A\u001bP0z\u001b\\B",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "APC: Unrecognized APC is swallowed",
+    "input": "A\u001b_foo\u001b\\B",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "PM: Unrecognized PM is swallowed",
+    "input": "A\u001b^bar\u001b\\B",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "SOS: Unrecognized SOS is swallowed",
+    "input": "A\u001bXbaz\u001b\\B",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
+      }
+    }
+  },
+  {
+    "name": "CAN cancels DCS string without applying payload",
+    "input": "A\u001bP0z\u0018B",
+    "expect": {
+      "cursor": [0, 2],
+      "lines": {
+        "0": "AB"
       }
     }
   },
@@ -1375,6 +1527,99 @@
     "expect": {
       "lines": {
         "0": "ABCX"
+      }
+    }
+  },
+  {
+    "name": "DCH deletes wide character cleanly",
+    "input": "🦀X\u001b[1;1H\u001b[P",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 32 },
+        "0,1": { "rune": 88 }
+      }
+    }
+  },
+  {
+    "name": "ICH pushes wide character safely without splitting it",
+    "input": "A🦀\u001b[1;1H\u001b[@",
+    "expect": {
+      "cells": {
+        "0,0": { "rune": 32 },
+        "0,1": { "rune": 65 },
+        "0,2": { "rune": 129408 },
+        "0,3": { "rune": 0 }
+      }
+    }
+  },
+  {
+    "name": "SU: Scroll Up explicit parameter",
+    "input": "A\r\nB\r\nC\u001b[2S",
+    "expect": {
+      "lines": {
+        "0": "C",
+        "1": "",
+        "2": ""
+      }
+    }
+  },
+  {
+    "name": "SU: Scroll Up inside top-bottom margin",
+    "input": "A\r\nB\r\nC\r\nD\r\nE\u001b[2;4r\u001b[2S\u001b[r",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "D",
+        "2": "",
+        "3": "",
+        "4": "E"
+      }
+    }
+  },
+  {
+    "name": "SD: Scroll Down explicit parameter",
+    "input": "A\r\nB\r\nC\u001b[2T",
+    "expect": {
+      "lines": {
+        "0": "",
+        "1": "",
+        "2": "A"
+      }
+    }
+  },
+  {
+    "name": "SD: Scroll Down inside top-bottom margin",
+    "input": "A\r\nB\r\nC\r\nD\r\nE\u001b[2;4r\u001b[2T\u001b[r",
+    "expect": {
+      "lines": {
+        "0": "A",
+        "1": "",
+        "2": "",
+        "3": "B",
+        "4": "E"
+      }
+    }
+  },
+  {
+    "name": "Alt screen 1049 saves/restores cursor and preserves main buffer",
+    "input": "abc\r\ndef\u001b[1;2H\u001b[?1049h\u001b[2J\u001b[5;5HXY\u001b[?1049lZ",
+    "expect": {
+      "lines": {
+        "0": "aZc",
+        "1": "def"
+      }
+    }
+  },
+  {
+    "name": "Alt screen 47 does not save/restore cursor",
+    "input": "abc\r\ndef\u001b[1;2H\u001b[?47h\u001b[2J\u001b[5;5HXY\u001b[?47lZ",
+    "expect": {
+      "lines": {
+        "0": "abc",
+        "1": "def",
+        "2": "",
+        "3": "",
+        "4": "      Z"
       }
     }
   }

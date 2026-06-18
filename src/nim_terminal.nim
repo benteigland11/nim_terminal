@@ -3,26 +3,36 @@
 ## Main entry point: creates a window, loads a font, and runs the
 ## terminal pipeline with a Pixie-based renderer.
 
-import staticglfw
+when defined(waymarkSdl3):
+  import sdl3 as sdl
+else:
+  import staticglfw
 import opengl
 import pixie
 import os
-import std/[json, options, parsecfg, strutils]
+import std/[algorithm, json, options, parsecfg, strutils, times, unicode]
 import terminal
 import gpu_renderer
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
-from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toMouseButton, toPrintableRune
+when not defined(waymarkSdl3):
+  from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toMouseButton, toPrintableRune
 import ../cg/universal_perf_monitor_nim/src/perf_monitor_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/frontend_glfw_window_nim/src/glfw_window_lib
+from ../cg/frontend_render_relays_nim/src/render_relays_lib as render_relay_lib import nil
+from ../cg/frontend_window_relays_nim/src/window_relays_lib as window_relay_lib import nil
+from ../cg/frontend_gpu_relays_nim/src/gpu_relays_lib as gpu_relay_lib import nil
+from ../cg/frontend_opengl_gpu_driver_nim/src/opengl_gpu_driver_lib as opengl_gpu_driver_lib import nil
 import ../cg/universal_os_launcher_nim/src/os_launcher_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
 import ../cg/universal_process_cwd_nim/src/process_cwd_lib
+import ../cg/universal_title_resolver_nim/src/title_resolver_lib
 import ../cg/universal_path_candidates_nim/src/path_candidates_lib
 import ../cg/universal_split_pane_tree_nim/src/split_pane_tree_lib as pane_tree
 import ../cg/universal_resource_budget_nim/src/resource_budget_lib
 import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
-import ../cg/backend_system_clipboard_nim/src/system_clipboard_lib
+from ../cg/universal_clipboard_provider_nim/src/clipboard_provider_lib as clipboard_provider_lib import nil
+from ../cg/backend_system_clipboard_nim/src/system_clipboard_lib as system_clipboard_lib import nil
 import ../cg/data_terminal_scroll_policy_nim/src/terminal_scroll_policy_lib
 
 const
@@ -65,6 +75,7 @@ type
     id: PaneId
     terminal: Terminal
     cwd: string
+    title: TitleState
 
   TerminalWorkspace = object
     id: TabId
@@ -115,6 +126,13 @@ var
   tabs = newTabSet()
   workspaces: seq[TerminalWorkspace] = @[]
   rend: GpuTerminalRenderer
+  frameRelays: render_relay_lib.RenderRelays
+  windowRelays: window_relay_lib.WindowRelays
+  gpuRelays: gpu_relay_lib.GpuRelays
+  glTriangleDriver: opengl_gpu_driver_lib.OpenGlTriangleDriver
+  glVertexScratch: seq[opengl_gpu_driver_lib.TexturedVertex] = @[]
+  clipboardProviders: seq[clipboard_provider_lib.ClipboardProvider] = @[]
+  clipboardPolicy = clipboard_provider_lib.defaultClipboardPolicy()
   window: Window
   winWidth = DefaultWindowWidth
   winHeight = DefaultWindowHeight
@@ -138,6 +156,16 @@ var
   lifecycleChaosCycles = 0
   keyTextFallback = false
   inputDebug = false
+  # Last cell a mouse report was sent for. xterm only emits motion when the
+  # pointer crosses into a new character cell; tracking this lets us suppress
+  # per-pixel motion floods that would otherwise turn a click into a drag.
+  lastMouseReportRow = -1
+  lastMouseReportCol = -1
+
+when defined(waymarkSdl3):
+  var
+    glContext: sdl.GLContext
+    appShouldClose = false
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -219,11 +247,12 @@ func toChildWheelEncoding(kind: ScrollInputKind): ChildWheelEncoding =
   of sikCursorKeys: cweCursorKeys
   of sikNone: cweNone
 
-func castSet(s: cint): set[terminal.Modifier] =
-  if (s and MOD_SHIFT) != 0: result.incl terminal.modShift
-  if (s and MOD_ALT) != 0: result.incl terminal.modAlt
-  if (s and MOD_CONTROL) != 0: result.incl terminal.modCtrl
-  if (s and MOD_SUPER) != 0: result.incl terminal.modSuper
+when not defined(waymarkSdl3):
+  func castSet(s: cint): set[terminal.Modifier] =
+    if (s and MOD_SHIFT) != 0: result.incl terminal.modShift
+    if (s and MOD_ALT) != 0: result.incl terminal.modAlt
+    if (s and MOD_CONTROL) != 0: result.incl terminal.modCtrl
+    if (s and MOD_SUPER) != 0: result.incl terminal.modSuper
 
 proc activeWorkspaceIndex(): int =
   if tabs.activeId.isNone: return -1
@@ -262,22 +291,12 @@ proc sessionByPane(workspace: var TerminalWorkspace, paneId: PaneId): ptr Termin
   let idx = workspace.sessionIndex(paneId)
   if idx < 0: nil else: addr workspace.sessions[idx]
 
-proc refreshSessionCwd(session: var TerminalSession): bool =
-  when defined(windows):
-    false
-  else:
-    let cwd = processCwd(session.terminal.host.pid)
-    if cwd.isNone or cwd.get() == session.cwd:
-      return false
-    session.cwd = cwd.get()
-    true
-
 proc tabLabelForWorkspace(workspace: TerminalWorkspace): string =
   let activeIdx = workspace.activeSessionIndex()
   if activeIdx < 0:
     ""
   else:
-    cwdLabel(workspace.sessions[activeIdx].cwd)
+    workspace.sessions[activeIdx].title.resolve()
 
 proc refreshWorkspaceTabLabel(wi: int): bool =
   if wi < 0 or wi >= workspaces.len or workspaces[wi].sessions.len == 0:
@@ -285,14 +304,39 @@ proc refreshWorkspaceTabLabel(wi: int): bool =
   let activeIdx = workspaces[wi].activeSessionIndex()
   if activeIdx < 0:
     return false
-  discard refreshSessionCwd(workspaces[wi].sessions[activeIdx])
+
+  var changed = false
+  let session = addr workspaces[wi].sessions[activeIdx]
+  
+  # 1. Update CWD
+  when not defined(windows):
+    let liveCwd = processCwd(session.terminal.host.pid)
+    if liveCwd.isSome:
+      if session.title.updateCwd(liveCwd.get()):
+        session.cwd = liveCwd.get()
+        changed = true
+
+    # 2. Update Program Name
+    let prog = processName(session.terminal.host.pid)
+    if prog.isSome:
+      if session.title.updateProgramName(prog.get()):
+        changed = true
+
+  # 3. Update OSC Title
+  if session.title.updateOscTitle(session.terminal.screen.title):
+    changed = true
+
   let label = tabLabelForWorkspace(workspaces[wi])
   if label.len == 0:
     return false
-  let tabIdx = tabs.indexOf(workspaces[wi].id)
-  if tabIdx < 0 or tabs.tabs[tabIdx].label == label:
-    return false
-  result = tabs.rename(workspaces[wi].id, label)
+  let tabId = workspaces[wi].id
+  let tabIdx = tabs.indexOf(tabId)
+  if tabIdx < 0: return false
+  
+  if tabs.tabs[tabIdx].label != label:
+    result = tabs.rename(tabId, label)
+  else:
+    result = false
 
 proc contentHeight(): int = max(1, winHeight - headerHeight)
 
@@ -360,14 +404,28 @@ proc updateChromeHeights() =
 proc chooseInitialWindowSize() =
   winWidth = DefaultWindowWidth
   winHeight = DefaultWindowHeight
-  let monitor = getPrimaryMonitor()
-  if monitor == nil:
-    return
-  let mode = getVideoMode(monitor)
-  if mode == nil:
-    return
-  let maxWidth = max(MinWindowWidth, int(float(mode.width) * 0.92))
-  let maxHeight = max(MinWindowHeight, int(float(mode.height) * 0.86))
+  var displayWidth = 0
+  var displayHeight = 0
+  when defined(waymarkSdl3):
+    let display = sdl.getPrimaryDisplay()
+    if display == 0:
+      return
+    var rect: sdl.Rect
+    if not sdl.getDisplayUsableBounds(display, rect):
+      return
+    displayWidth = int(rect.w)
+    displayHeight = int(rect.h)
+  else:
+    let monitor = getPrimaryMonitor()
+    if monitor == nil:
+      return
+    let mode = getVideoMode(monitor)
+    if mode == nil:
+      return
+    displayWidth = int(mode.width)
+    displayHeight = int(mode.height)
+  let maxWidth = max(MinWindowWidth, int(float(displayWidth) * 0.92))
+  let maxHeight = max(MinWindowHeight, int(float(displayHeight) * 0.86))
   winWidth = min(DefaultWindowWidth, maxWidth)
   winHeight = min(DefaultWindowHeight, maxHeight)
 
@@ -505,7 +563,23 @@ proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
   )
   term.screen.altScrollbackEnabled = altScrollbackEnabled(config.altScreenScrollback)
   applyConfiguredTheme(term)
-  TerminalSession(id: paneId, terminal: term, cwd: sessionCwd)
+
+  var session = TerminalSession(
+    id: paneId,
+    terminal: term,
+    cwd: sessionCwd,
+    title: newTitleState(tpPreferTitle)
+  )
+  discard session.title.updateCwd(sessionCwd)
+
+  let sessPtr = addr session # Be careful with closures in loops if this were a loop
+  term.onTitleChanged = proc(title: string) =
+    # Note: This closure captures sessPtr which is stable inside TerminalSession seq if not reallocated
+    # Actually, it's safer to use the workspace-level update since we refresh periodically anyway.
+    # We'll just store it in the terminal for now.
+    discard
+
+  session
 
 proc addTerminalTab() =
   let cwd =
@@ -513,12 +587,22 @@ proc addTerminalTab() =
       startupSessionCwd()
     else:
       validSessionCwd(activeSessionCwd())
-  let label = cwdLabel(cwd)
+  let label = title_resolver_lib.cwdLabel(cwd)
   let id = tabs.addTab(label)
   var workspace = TerminalWorkspace(id: id, panes: pane_tree.newSplitPaneTree(), sessions: @[])
   workspace.sessions.add newSession(workspace.panes.active, contentRect(), cwd)
   workspaces.add workspace
   resizeTerminals()
+
+proc activateTabNumber(number: int): bool =
+  let idx = number - 1
+  if idx < 0 or idx >= tabs.tabs.len:
+    return false
+  result = tabs.activate(tabs.tabs[idx].id)
+  if result:
+    let term = activeTerm()
+    if term != nil:
+      term.damage.markAll()
 
 proc splitActivePane() =
   let workspace = activeWorkspace()
@@ -534,7 +618,6 @@ proc splitActivePane() =
       area = item.rect
       break
   workspace[].sessions.add newSession(fresh, area, cwd)
-  discard workspace[].panes.activate(sourcePane)
   resizeTerminals()
   let sourceIdx = workspace[].sessionIndex(sourcePane)
   if sourceIdx >= 0: workspace[].sessions[sourceIdx].terminal.damage.markAll()
@@ -588,14 +671,198 @@ proc activeWorkspaceDirty(): bool =
     if session.terminal.damage.anyDirty: return true
   false
 
+func toRenderColor(c: PaletteColor): render_relay_lib.RenderColor =
+  render_relay_lib.rgba8(c.r, c.g, c.b)
+
+func toOpenGlFilter(value: gpu_relay_lib.GpuTextureFilter): opengl_gpu_driver_lib.TextureFilter =
+  case value
+  of gpu_relay_lib.gtfNearest: opengl_gpu_driver_lib.tfNearest
+  of gpu_relay_lib.gtfLinear: opengl_gpu_driver_lib.tfLinear
+
+func toOpenGlWrap(value: gpu_relay_lib.GpuTextureWrap): opengl_gpu_driver_lib.TextureWrap =
+  case value
+  of gpu_relay_lib.gtwClampToEdge: opengl_gpu_driver_lib.twClampToEdge
+  of gpu_relay_lib.gtwRepeat: opengl_gpu_driver_lib.twRepeat
+
+func toOpenGlOptions(options: gpu_relay_lib.GpuTextureOptions): opengl_gpu_driver_lib.TextureOptions =
+  opengl_gpu_driver_lib.TextureOptions(
+    minFilter: options.minFilter.toOpenGlFilter,
+    magFilter: options.magFilter.toOpenGlFilter,
+    wrapS: options.wrapS.toOpenGlWrap,
+    wrapT: options.wrapT.toOpenGlWrap,
+  )
+
+proc installOpenGlGpuRelays() =
+  glTriangleDriver = opengl_gpu_driver_lib.newOpenGlTriangleDriver()
+  gpuRelays = gpu_relay_lib.GpuRelays(
+    createTextureProc: proc (): gpu_relay_lib.GpuTextureId =
+      gpu_relay_lib.textureId(opengl_gpu_driver_lib.createTexture()),
+    deleteTextureProc: proc (id: gpu_relay_lib.GpuTextureId) =
+      opengl_gpu_driver_lib.deleteTexture(gpu_relay_lib.uint32Value(id)),
+    configureTextureProc: proc (id: gpu_relay_lib.GpuTextureId; options: gpu_relay_lib.GpuTextureOptions) =
+      opengl_gpu_driver_lib.configureTexture(gpu_relay_lib.uint32Value(id), options.toOpenGlOptions),
+    uploadRgba8TextureProc: proc (id: gpu_relay_lib.GpuTextureId; width, height: int; pixels: pointer) =
+      opengl_gpu_driver_lib.uploadRgba8Texture(gpu_relay_lib.uint32Value(id), width, height, pixels),
+    drawTexturedTrianglesProc: proc (textureId: gpu_relay_lib.GpuTextureId; vertices: openArray[gpu_relay_lib.GpuVertex]) =
+      glVertexScratch.setLen(vertices.len)
+      for i, vertex in vertices:
+        glVertexScratch[i] = opengl_gpu_driver_lib.TexturedVertex(
+          x: vertex.x,
+          y: vertex.y,
+          u: vertex.u,
+          v: vertex.v,
+          r: vertex.r,
+          g: vertex.g,
+          b: vertex.b,
+          a: vertex.a,
+        )
+      opengl_gpu_driver_lib.drawTexturedTriangles(glTriangleDriver, gpu_relay_lib.uint32Value(textureId), glVertexScratch),
+    enableAlphaBlendingProc: proc () =
+      opengl_gpu_driver_lib.enableAlphaTexturing(),
+    flushProc: proc () =
+      opengl_gpu_driver_lib.flush(),
+  )
+
+proc disposeOpenGlGpuRelays() =
+  if glTriangleDriver != nil:
+    opengl_gpu_driver_lib.dispose(glTriangleDriver)
+    glTriangleDriver = nil
+
+when not defined(waymarkSdl3):
+  proc installGlfwWindowRelays() =
+    windowRelays = window_relay_lib.WindowRelays(
+      geometry: window_relay_lib.WindowGeometryRelays(
+        getPosition: proc (): window_relay_lib.WindowPoint =
+          if window == nil:
+            return window_relay_lib.point(0, 0)
+          var x, y: cint
+          getWindowPos(window, addr x, addr y)
+          window_relay_lib.point(int(x), int(y)),
+        setPosition: proc (point: window_relay_lib.WindowPoint) =
+          if window != nil:
+            setWindowPos(window, cint(point.x), cint(point.y)),
+        getWindowSize: proc (): window_relay_lib.WindowSize =
+          if window == nil:
+            return window_relay_lib.size2d(0, 0)
+          var width, height: cint
+          getWindowSize(window, addr width, addr height)
+          window_relay_lib.size2d(int(width), int(height)),
+        getDrawableSize: proc (): window_relay_lib.WindowSize =
+          if window == nil:
+            return window_relay_lib.size2d(0, 0)
+          var width, height: cint
+          getFramebufferSize(window, addr width, addr height)
+          window_relay_lib.size2d(int(width), int(height)),
+        setMinimumSize: proc (size: window_relay_lib.WindowSize) =
+          if window != nil:
+            setWindowSizeLimits(window, cint(size.width), cint(size.height), DONT_CARE, DONT_CARE),
+      ),
+      input: window_relay_lib.WindowInputRelays(
+        isMouseButtonDown: proc (button: window_relay_lib.MouseButton): bool =
+          if window == nil:
+            return false
+          let glfwButton =
+            case button
+            of window_relay_lib.mbLeft: MOUSE_BUTTON_LEFT
+            of window_relay_lib.mbMiddle: MOUSE_BUTTON_MIDDLE
+            of window_relay_lib.mbRight: MOUSE_BUTTON_RIGHT
+          getMouseButton(window, cint(glfwButton)) == PRESS,
+      ),
+      lifecycle: window_relay_lib.WindowLifecycleRelays(
+        shouldClose: proc (): bool =
+          window != nil and windowShouldClose(window) != 0,
+        requestClose: proc () =
+          if window != nil:
+            setWindowShouldClose(window, 1),
+      )
+    )
+
+  proc installGlfwRenderRelays() =
+    frameRelays = render_relay_lib.RenderRelays(
+      frame: render_relay_lib.RenderFrameRelays(
+        setViewport: proc (size: render_relay_lib.RenderSize) =
+          glViewport(0, 0, cint(size.width), cint(size.height)),
+        clear: proc (color: render_relay_lib.RenderColor) =
+          glClearColor(color.r, color.g, color.b, color.a)
+          glClear(GL_COLOR_BUFFER_BIT),
+        flush: proc () =
+          glFlush(),
+        present: proc () =
+          if window != nil:
+            swapBuffers(window),
+      )
+    )
+
+when defined(waymarkSdl3):
+  proc installSdlWindowRelays() =
+    windowRelays = window_relay_lib.WindowRelays(
+      geometry: window_relay_lib.WindowGeometryRelays(
+        getPosition: proc (): window_relay_lib.WindowPoint =
+          if window == nil:
+            return window_relay_lib.point(0, 0)
+          var x, y: cint
+          discard sdl.getWindowPosition(window, x, y)
+          window_relay_lib.point(int(x), int(y)),
+        setPosition: proc (point: window_relay_lib.WindowPoint) =
+          if window != nil:
+            discard sdl.setWindowPosition(window, cint(point.x), cint(point.y)),
+        getWindowSize: proc (): window_relay_lib.WindowSize =
+          if window == nil:
+            return window_relay_lib.size2d(0, 0)
+          var width, height: cint
+          discard sdl.getWindowSize(window, width, height)
+          window_relay_lib.size2d(int(width), int(height)),
+        getDrawableSize: proc (): window_relay_lib.WindowSize =
+          if window == nil:
+            return window_relay_lib.size2d(0, 0)
+          var width, height: cint
+          discard sdl.getWindowSizeInPixels(window, width, height)
+          window_relay_lib.size2d(int(width), int(height)),
+        setMinimumSize: proc (size: window_relay_lib.WindowSize) =
+          if window != nil:
+            discard sdl.setWindowMinimumSize(window, cint(size.width), cint(size.height)),
+      ),
+      input: window_relay_lib.WindowInputRelays(
+        isMouseButtonDown: proc (button: window_relay_lib.MouseButton): bool =
+          let mask =
+            case button
+            of window_relay_lib.mbLeft: sdl.BUTTON_LMASK
+            of window_relay_lib.mbMiddle: sdl.BUTTON_MMASK
+            of window_relay_lib.mbRight: sdl.BUTTON_RMASK
+          var x, y: cfloat
+          (sdl.getMouseState(x, y) and uint32(mask)) != 0'u32,
+      ),
+      lifecycle: window_relay_lib.WindowLifecycleRelays(
+        shouldClose: proc (): bool =
+          appShouldClose,
+        requestClose: proc () =
+          appShouldClose = true,
+      )
+    )
+
+  proc installSdlRenderRelays() =
+    frameRelays = render_relay_lib.RenderRelays(
+      frame: render_relay_lib.RenderFrameRelays(
+        setViewport: proc (size: render_relay_lib.RenderSize) =
+          glViewport(0, 0, cint(size.width), cint(size.height)),
+        clear: proc (color: render_relay_lib.RenderColor) =
+          glClearColor(color.r, color.g, color.b, color.a)
+          glClear(GL_COLOR_BUFFER_BIT),
+        flush: proc () =
+          glFlush(),
+        present: proc () =
+          if window != nil:
+            discard sdl.gL_SwapWindow(window),
+      )
+    )
+
 proc drawActiveWorkspace() =
   let wi = activeWorkspaceIndex()
   if wi < 0: return
   let activeIdx = workspaces[wi].activeSessionIndex()
   if activeIdx < 0: return
   let bg = workspaces[wi].sessions[activeIdx].terminal.screen.theme.background
-  glClearColor(bg.r.float32 / 255.0, bg.g.float32 / 255.0, bg.b.float32 / 255.0, 1.0)
-  glClear(GL_COLOR_BUFFER_BIT)
+  render_relay_lib.beginFrame(frameRelays, render_relay_lib.size2d(winWidth, winHeight), toRenderColor(bg))
   let layouts = workspaces[wi].panes.layouts(contentRect())
   for item in layouts:
     let idx = workspaces[wi].sessionIndex(item.id)
@@ -642,7 +909,7 @@ proc rebuildAtlas() =
   let chromeAtlas = makeAtlas(config.fontSize, chromeFont)
   if rend != nil:
     rend.dispose()
-  rend = newGpuTerminalRenderer(atlas, chromeAtlas)
+  rend = newGpuTerminalRenderer(atlas, chromeAtlas, gpuRelays)
   rend.loadLogoTexture(config.logoPath)
   updateChromeHeights()
   resizeTerminalViewsPreservingView(anchors)
@@ -716,16 +983,167 @@ proc writeScreenSnapshot(term: Terminal) =
       mode.mouseMode == mmNone and
       (mode.cursorApp or mode.focusReporting)
     )
+
+    proc colorName(c: screen_buffer_lib.Color): string =
+      case c.kind
+      of ckDefault:
+        "default"
+      of ckIndexed:
+        "idx" & $c.index
+      of ckRgb:
+        "#" & c.r.toHex(2) & c.g.toHex(2) & c.b.toHex(2)
+
+    proc attrName(attrs: screen_buffer_lib.Attrs): string =
+      var parts: seq[string] = @[]
+      if attrs.fg.kind != ckDefault: parts.add "fg=" & colorName(attrs.fg)
+      if attrs.bg.kind != ckDefault: parts.add "bg=" & colorName(attrs.bg)
+      if attrs.flags.len > 0: parts.add "flags=" & $attrs.flags
+      if attrs.underlineStyle != usNone: parts.add "underline=" & $attrs.underlineStyle
+      if parts.len == 0: "default" else: parts.join(",")
+
+    proc rowAttrRuns(row: int): string =
+      if row < 0 or row >= term.screen.rows: return ""
+      var runs: seq[string] = @[]
+      var start = 0
+      var last = attrName(term.screen.cellAt(row, 0).attrs)
+      for col in 1 ..< term.screen.cols:
+        let attrs = attrName(term.screen.cellAt(row, col).attrs)
+        if attrs != last:
+          if last != "default":
+            runs.add $start & "-" & $(col - 1) & ":" & last
+          start = col
+          last = attrs
+      if last != "default":
+        runs.add $start & "-" & $(term.screen.cols - 1) & ":" & last
+      runs.join(" | ")
+
+    lines.add "cursor_attrs=" & attrName(term.screen.cursor.attrs)
+
+    var rowsToDump: seq[int] = @[]
+    proc addDumpRow(row: int) =
+      if row >= 0 and row < term.screen.rows and row notin rowsToDump:
+        rowsToDump.add row
+
     for i in 0 ..< min(term.screen.rows, 20):
+      addDumpRow(i)
+    for i in term.screen.cursor.row - 4 .. term.screen.cursor.row + 2:
+      addDumpRow(i)
+    for i in max(0, term.screen.rows - 8) ..< term.screen.rows:
+      addDumpRow(i)
+
+    rowsToDump.sort()
+    for i in rowsToDump:
       lines.add $i & ": " & term.screen.lineText(i)
+      let attrs = rowAttrRuns(i)
+      if attrs.len > 0:
+        lines.add $i & " attrs: " & attrs
     writeFile(screenSnapshotPath, lines.join("\n"))
   except CatchableError:
     discard
 
+func toProviderResult(value: system_clipboard_lib.ClipboardResult): clipboard_provider_lib.ClipboardResult =
+  case value.status
+  of system_clipboard_lib.csSuccess:
+    clipboard_provider_lib.clipboardSuccess(value.backend)
+  of system_clipboard_lib.csNoBackend:
+    clipboard_provider_lib.clipboardUnavailable(value.backend, value.message)
+  of system_clipboard_lib.csCommandFailed:
+    clipboard_provider_lib.clipboardFailed(value.backend, value.message)
+
+func toProviderTextResult(value: system_clipboard_lib.ClipboardTextResult): clipboard_provider_lib.ClipboardTextResult =
+  case value.status
+  of system_clipboard_lib.csSuccess:
+    clipboard_provider_lib.clipboardTextSuccess(value.backend, value.text)
+  of system_clipboard_lib.csNoBackend:
+    clipboard_provider_lib.clipboardTextUnavailable(value.backend, value.message)
+  of system_clipboard_lib.csCommandFailed:
+    clipboard_provider_lib.clipboardTextFailed(value.backend, value.message)
+
+proc nativeClipboardProvider(): clipboard_provider_lib.ClipboardProvider =
+  when defined(waymarkSdl3):
+    clipboard_provider_lib.provider(
+      "sdl3",
+      proc (): clipboard_provider_lib.ClipboardTextResult =
+        let text = sdl.getClipboardText()
+        if text == nil:
+          return clipboard_provider_lib.clipboardTextUnavailable("sdl3", $sdl.getError())
+        result = clipboard_provider_lib.clipboardTextSuccess("sdl3", $text)
+        sdl.sdlFree(text),
+      proc (text: string): clipboard_provider_lib.ClipboardResult =
+        if sdl.setClipboardText(cstring(text)):
+          clipboard_provider_lib.clipboardSuccess("sdl3")
+        else:
+          clipboard_provider_lib.clipboardFailed("sdl3", $sdl.getError()),
+    )
+  else:
+    clipboard_provider_lib.provider(
+      "glfw",
+      proc (): clipboard_provider_lib.ClipboardTextResult =
+        if window == nil:
+          return clipboard_provider_lib.clipboardTextUnavailable("glfw", "window is not available")
+        let text = window.getClipboardString()
+        if text == nil:
+          clipboard_provider_lib.clipboardTextUnavailable("glfw", "clipboard text is not available")
+        else:
+          clipboard_provider_lib.clipboardTextSuccess("glfw", $text),
+      proc (text: string): clipboard_provider_lib.ClipboardResult =
+        if window == nil:
+          return clipboard_provider_lib.clipboardUnavailable("glfw", "window is not available")
+        window.setClipboardString(cstring(text))
+        clipboard_provider_lib.clipboardSuccess("glfw"),
+    )
+
+proc systemClipboardProvider(): clipboard_provider_lib.ClipboardProvider =
+  clipboard_provider_lib.provider(
+    "system-command",
+    proc (): clipboard_provider_lib.ClipboardTextResult =
+      system_clipboard_lib.pasteText().toProviderTextResult,
+    proc (text: string): clipboard_provider_lib.ClipboardResult =
+      system_clipboard_lib.copyText(text).toProviderResult,
+  )
+
+proc installClipboardProviders() =
+  clipboardProviders = @[nativeClipboardProvider(), systemClipboardProvider()]
+
 proc copyToClipboard(text: string) =
-  let copied = copyText(text)
-  if not copied.success:
-    window.setClipboardString(cstring(text))
+  discard clipboard_provider_lib.writeText(clipboardProviders, text, clipboardPolicy)
+
+proc pasteFromClipboard(): string =
+  let text = clipboard_provider_lib.readText(clipboardProviders, clipboardPolicy)
+  if clipboard_provider_lib.success(text):
+    text.text
+  else:
+    ""
+
+proc handleShortcutAction(term: Terminal; action: string): bool =
+  result = true
+  case action
+  of "copy":
+    if term.selection.isActive:
+      let text = term.selection.extractText(term.screen.cols) do (r: int) -> seq[CellData]:
+        let row = term.screen.absoluteRowAt(r)
+        var res = newSeq[CellData](row.len)
+        for i, c in row: res[i] = CellData(rune: c.rune, width: int(c.width))
+        res
+      copyToClipboard(text)
+  of "paste":
+    let text = pasteFromClipboard()
+    if text.len > 0:
+      discard term.sendPaste(text)
+  of "zoom-in":
+    fontSize += 1.0
+    rebuildAtlas()
+  of "zoom-out":
+    fontSize = max(4.0, fontSize - 1.0)
+    rebuildAtlas()
+  else:
+    if action.startsWith("tab-"):
+      try:
+        discard activateTabNumber(parseInt(action[4 .. ^1]))
+      except ValueError:
+        discard
+    else:
+      result = false
 
 proc closeAllWorkspaces() =
   for workspace in workspaces:
@@ -737,8 +1155,11 @@ proc closeAllWorkspaces() =
 proc renderOnce() =
   drawActiveWorkspace()
   rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
-  swapBuffers(window)
+  render_relay_lib.endFrame(frameRelays)
   writeGpuSnapshot()
+
+when defined(waymarkSdl3):
+  proc pollEvents()
 
 proc runLifecycleChaos(cycles: int) =
   if cycles <= 0: return
@@ -764,7 +1185,7 @@ proc runLifecycleChaos(cycles: int) =
     else:
       winWidth = if winWidth == 1280: 960 else: 1280
       winHeight = if winHeight == 720: 640 else: 720
-      glViewport(0, 0, cint(winWidth), cint(winHeight))
+      render_relay_lib.setViewport(frameRelays, render_relay_lib.size2d(winWidth, winHeight))
       resizeTerminals()
 
     maxTabs = max(maxTabs, tabs.tabs.len)
@@ -786,266 +1207,668 @@ proc runLifecycleChaos(cycles: int) =
        " anomalies=", snap.anomalies.len
 
 # ---------------------------------------------------------------------------
-# GLFW Callbacks
+# Platform Callbacks and Events
 # ---------------------------------------------------------------------------
 
-proc onChar(win: Window, codepoint: cuint) {.cdecl.} =
-  if keyTextFallback: return
-  let term = activeTerm()
-  if term == nil: return
-  let sent = term.sendKey(keyChar(uint32(codepoint)))
-  if inputDebug: echo "[input] char codepoint=", codepoint, " queued=", sent
-  term.damage.markAll()
-
-proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
-  if action == PRESS or action == REPEAT:
+when not defined(waymarkSdl3):
+  proc onChar(win: Window, codepoint: cuint) {.cdecl.} =
+    if keyTextFallback: return
     let term = activeTerm()
     if term == nil: return
-    let m = castSet(mods)
-    if inputDebug: echo "[input] key key=", key, " action=", action, " mods=", mods
-
-    if terminal.modCtrl in m and terminal.modShift in m and key == KEY_T:
+    let sent = term.sendKey(keyChar(uint32(codepoint)))
+    if inputDebug: echo "[input] char codepoint=", codepoint, " queued=", sent
+    term.damage.markAll()
+  
+  proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
+    if action == PRESS or action == REPEAT:
+      let term = activeTerm()
+      if term == nil: return
+      let m = castSet(mods)
+      if inputDebug: echo "[input] key key=", key, " action=", action, " mods=", mods
+  
+      if terminal.modCtrl in m and terminal.modShift in m and key == KEY_T:
+        addTerminalTab()
+        return
+      if terminal.modCtrl in m and terminal.modShift in m and (key == KEY_ENTER or key == KEY_KP_ENTER):
+        splitActivePane()
+        return
+      if terminal.modCtrl in m and terminal.modShift in m and key == KEY_W:
+        closeActivePane()
+        return
+      if terminal.modCtrl in m and key == KEY_TAB:
+        if terminal.modShift in m: discard tabs.activatePrevious()
+        else: discard tabs.activateNext()
+        let term = activeTerm()
+        if term != nil: term.damage.markAll()
+        return
+  
+      # 1. Map GLFW key to ShortcutMap.KeyCode
+      var sk: shortcut_map_lib.KeyCode
+      case key
+      of KEY_EQUAL: sk = shortcut_map_lib.kEqual
+      of KEY_MINUS: sk = shortcut_map_lib.kMinus
+      of KEY_KP_ADD: sk = shortcut_map_lib.kPlus
+      of KEY_KP_SUBTRACT: sk = shortcut_map_lib.kMinus
+      of KEY_ENTER, KEY_KP_ENTER: sk = shortcut_map_lib.kEnter
+      else:
+        if key >= 32 and key <= 126: sk = shortcut_map_lib.shortcutKey(char(key))
+        else: sk = shortcut_map_lib.kNone
+  
+      # 2. Lookup high-level actions
+      let actionName = term.shortcuts.lookup(sk, cast[set[shortcut_map_lib.Modifier]](m))
+      if actionName.isSome:
+        if handleShortcutAction(term, actionName.get()):
+          return
+  
+      # GLFW's char callback does not reliably emit Ctrl/Alt character
+      # combinations. Send those from the key callback so Ctrl+C, Ctrl+D,
+      # Alt+letter, etc. reach the child process.
+      if terminal.modCtrl in m or terminal.modAlt in m:
+        let ch = toPrintableRune(key, mods)
+        if ch.isSome:
+          let sent = term.sendKey(keyChar(ch.get(), m))
+          if inputDebug: echo "[input] modified printable codepoint=", ch.get(), " queued=", sent
+          term.damage.markAll()
+          return
+      elif keyTextFallback:
+        let ch = toPrintableRune(key, mods)
+        if ch.isSome:
+          let sent = term.sendKey(keyChar(ch.get(), m))
+          if inputDebug: echo "[input] fallback printable codepoint=", ch.get(), " queued=", sent
+          term.damage.markAll()
+          return
+  
+      # 3. Standard keys
+      let tk = toKeyCode(key).int
+      if tk != 0 and tk != 1: # 0 = kNone, 1 = kChar
+        let sent = term.sendKey(terminal.key(cast[terminal.KeyCode](tk), m))
+        if inputDebug: echo "[input] special key=", tk, " queued=", sent
+        term.damage.markAll()
+  
+  proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
+    var x, y: cdouble; getCursorPos(win, addr x, addr y)
+    if button == MOUSE_BUTTON_LEFT and action == RELEASE:
+      draggingWindow = false
+  
+    if button == MOUSE_BUTTON_LEFT and action == PRESS and inTitleBar(int(y)):
+      draggingWindow = true
+      dragStartMouseX = x
+      dragStartMouseY = y
+      let pos = window_relay_lib.getPosition(windowRelays)
+      dragStartWinX = cint(pos.x)
+      dragStartWinY = cint(pos.y)
+      dragStartGlobalX = float(pos.x) + x
+      dragStartGlobalY = float(pos.y) + y
+      let term = activeTerm()
+      if term != nil and term.activeLink.isSome:
+        term.activeLink = none(ActiveLink)
+        term.damage.markAll()
+      return
+  
+    if button == MOUSE_BUTTON_LEFT and action == PRESS and inTabBar(int(y)):
+      let closeId = tabs.closeTabAtX(int(x), winWidth, tabBarHeight)
+      if closeId.isSome:
+        removeTerminalTab(closeId.get())
+        return
+      if plusButtonAtX(int(x), winWidth, tabBarHeight):
+        addTerminalTab()
+        return
+      let tabId = tabs.tabAtX(int(x), winWidth, tabBarHeight)
+      if tabId.isSome:
+        discard tabs.activate(tabId.get())
+        let term = activeTerm()
+        if term != nil: term.damage.markAll()
+        return
+  
+    if int(y) < headerHeight: return
+    var paneFocusChanged = false
+    let session = focusPaneAt(int(x), int(y), paneFocusChanged)
+    if session == nil: return
+    let term = session[].terminal
+    # Swallow the pane-focus-acquiring click ONLY when the child isn't tracking
+    # mouse. Mouse-aware apps (grok, vim) need that click forwarded too, else
+    # their own click-to-focus (e.g. focusing a chat input) never fires.
+    if paneFocusChanged and button == MOUSE_BUTTON_LEFT and action == PRESS and
+       term.inputMode.shouldIntercept(castSet(mods)):
+      return
+    let area = activeSessionRect(session[].id)
+    if area.isNone: return
+    let col = localCol(area.get(), x); let row = localRow(area.get(), y)
+    let bufferRow = term.viewport.viewportToBuffer(row)
+    if bufferRow < 0: return
+    if term.inputMode.shouldIntercept(castSet(mods)):
+      if button == MOUSE_BUTTON_LEFT:
+        let isDown = action == PRESS
+  
+        # Handle link clicking
+        if not isDown and term.activeLink.isSome:
+          launchUri(term.activeLink.get().link.text)
+          return
+  
+        term.drag.update(row, col, isDown)
+        if isDown:
+          let wi = activeWorkspaceIndex()
+          if wi >= 0: clearSelectionsExcept(workspaces[wi], session[].id)
+          term.selection.start(point(bufferRow, col))
+        term.damage.markAll()
+    else:
+      let tmb = toMouseButton(button).int
+      if tmb != terminal.mbRelease.int: # skip only the unknown-button sentinel
+        lastMouseReportRow = row; lastMouseReportCol = col
+        discard term.sendMouse(mouse(if action == PRESS: mePress else: meRelease, cast[terminal.MouseButton](tmb), row, col, castSet(mods)))
+  
+  proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
+    if draggingWindow:
+      let pos = window_relay_lib.getPosition(windowRelays)
+      let currentGlobalX = float(pos.x) + x
+      let currentGlobalY = float(pos.y) + y
+      window_relay_lib.setPosition(
+        windowRelays,
+        window_relay_lib.point(
+          int(dragStartWinX + cint(currentGlobalX - dragStartGlobalX)),
+          int(dragStartWinY + cint(currentGlobalY - dragStartGlobalY)),
+        )
+      )
+      return
+  
+    let wi = activeWorkspaceIndex()
+    if wi < 0: return
+    let activeId = workspaces[wi].panes.active
+    let sessionIdx = workspaces[wi].sessionIndex(activeId)
+    if sessionIdx < 0: return
+    let term = workspaces[wi].sessions[sessionIdx].terminal
+    if int(y) < headerHeight and term.drag.state == dsIdle:
+      if term.activeLink.isSome:
+        term.activeLink = none(ActiveLink)
+        term.damage.markAll()
+      return
+    let area = activeSessionRect(activeId)
+    if area.isNone: return
+    let col = localCol(area.get(), x)
+    let row = localRow(area.get(), y)
+    let rawRow = rawLocalRow(area.get(), y)
+  
+    if term.drag.state != dsIdle:
+      let leftDown = window_relay_lib.isMouseButtonDown(windowRelays, window_relay_lib.mbLeft)
+      term.drag.update(rawRow, col, leftDown)
+      if term.drag.state == dsIdle:
+        term.damage.markAll()
+        return
+      let delta = term.drag.autoscrollDelta()
+      if delta < 0:
+        term.viewport.scrollUp(1)
+      elif delta > 0:
+        term.viewport.scrollDown(1)
+      term.refreshViewport(false)
+      let focusRow = term.drag.focusViewportRow()
+      let focusBufferRow = term.viewport.viewportToBuffer(focusRow)
+      if focusBufferRow >= 0:
+        term.selection.update(point(focusBufferRow, col))
+      term.damage.markAll()
+    else:
+      let absRow = term.viewport.viewportToBuffer(row)
+      if absRow < 0: return
+      # Update active link hover state
+      let lineStr = term.screen.absoluteLineText(absRow)
+      let links = detectLinks(lineStr)
+      var newActive = none(ActiveLink)
+      for l in links:
+        let sc = term.screen.colOfByteIndex(absRow, l.startIdx)
+        let ec = term.screen.colOfByteIndex(absRow, l.endIdx)
+        if col >= sc and col < ec:
+          newActive = some(ActiveLink(link: l, row: absRow, startCol: sc, endCol: ec))
+          break
+      if newActive != term.activeLink:
+        term.activeLink = newActive
+        term.damage.markAll()
+  
+      if not term.inputMode.shouldIntercept() and term.inputMode.trackingWantsMotion() and
+         (row != lastMouseReportRow or col != lastMouseReportCol):
+        # Only report motion on cell change (xterm behavior). Per-pixel reports
+        # flood the child and turn a jittery click into press+drag+release,
+        # which apps read as a selection rather than a focus click.
+        lastMouseReportRow = row; lastMouseReportCol = col
+        let leftDown = window_relay_lib.isMouseButtonDown(windowRelays, window_relay_lib.mbLeft)
+        let kind =
+          if leftDown and term.inputMode.trackingWantsDrag(): meDrag
+          else: meMove
+        # No button held during motion must report "no button" (param 35),
+        # not a phantom left-drag. mbRelease encodes to the no-button code.
+        let btn = if leftDown: terminal.mbLeft else: terminal.mbRelease
+        discard term.sendMouse(mouse(kind, btn, row, col, castSet(0)))
+  
+  proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
+    var x, y: cdouble; getCursorPos(win, addr x, addr y)
+    let session = if int(y) >= headerHeight: focusPaneAt(int(x), int(y)) else: nil
+    let term = if session == nil: activeTerm() else: session[].terminal
+    if term == nil: return
+    let ctrlDown = (getKey(window, KEY_LEFT_CONTROL) == PRESS or getKey(window, KEY_RIGHT_CONTROL) == PRESS)
+    let shiftDown = (getKey(window, KEY_LEFT_SHIFT) == PRESS or getKey(window, KEY_RIGHT_SHIFT) == PRESS)
+    if ctrlDown:
+      if yoffset > 0: fontSize += 1.0
+      elif yoffset < 0: fontSize = max(4.0, fontSize - 1.0)
+      rebuildAtlas()
+    else:
+      let scrollKind = term.inputMode.scrollInputKind(term.screen.usingAlt)
+      let normalTuiLikely =
+        (not term.screen.usingAlt) and
+        term.inputMode.mouseMode == mmNone and
+        (term.inputMode.cursorApp or term.inputMode.focusReporting)
+      let action = decideWheelAction(ScrollPolicyInput(
+        usingAltScreen: term.screen.usingAlt,
+        childWantsWheel: term.inputMode.shouldSendWheel(term.screen.usingAlt),
+        childWheelEncoding: toChildWheelEncoding(scrollKind),
+        viewportHasHistory: term.viewport.maxScroll > 0,
+        viewportHasMeaningfulHistory: term.viewport.hasMeaningfulHistory(config.meaningfulHistoryRows),
+        viewportAtLiveEnd: term.viewport.isAtLiveEnd,
+        scrollingTowardHistory: yoffset > 0,
+        normalScreenTuiLikely: normalTuiLikely,
+        forceTerminalScroll: shiftDown,
+        forceChildScroll: false,
+        altScrollbackMode: config.altScreenScrollback,
+        altWheelPolicy: config.altWheelPolicy,
+        normalWheelPolicy: config.normalWheelPolicy,
+      ))
+      case action
+      of saScrollViewport:
+        if yoffset > 0: term.viewport.scrollUp(3)
+        elif yoffset < 0: term.viewport.scrollDown(3)
+      of saRouteToChild:
+        let paneId =
+          if session == nil:
+            let workspace = activeWorkspace()
+            if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
+          else:
+            session[].id
+        let area = activeSessionRect(paneId)
+        let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
+        let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
+        case scrollKind
+        of sikCursorKeys:
+          let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+          for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+            discard term.sendKey(key(keyCode))
+        of sikMouseWheel:
+          let button = if yoffset > 0: mbWheelUp else: mbWheelDown
+          for _ in 0 ..< max(1, int(abs(yoffset))):
+            discard term.sendMouse(mouse(mePress, button, row, col))
+        of sikNone:
+          discard
+      of saRouteMouseWheel:
+        let paneId =
+          if session == nil:
+            let workspace = activeWorkspace()
+            if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
+          else:
+            session[].id
+        let area = activeSessionRect(paneId)
+        let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
+        let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
+        let button = if yoffset > 0: mbWheelUp else: mbWheelDown
+        for _ in 0 ..< max(1, int(abs(yoffset))):
+          discard term.sendMouse(mouse(mePress, button, row, col))
+      of saRouteCursorKeys:
+        let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+        for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+          discard term.sendKey(key(keyCode))
+      of saRoutePageKeys:
+        let keyCode = if yoffset > 0: kPageUp else: kPageDown
+        discard term.sendKey(key(keyCode))
+      of saIgnore:
+        discard
+    term.refreshViewport(false); term.damage.markAll()
+  
+  proc onWindowFocus(win: Window, focused: cint) {.cdecl.} =
+    let term = activeTerm()
+    if term == nil: return
+    discard term.sendFocus(focused != 0)
+  
+  proc resizeToFramebuffer(win: Window, fallbackWidth, fallbackHeight: cint) =
+    let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
+    let currentWindowSize = window_relay_lib.getWindowSize(windowRelays)
+    let report = chooseDrawableSize(
+      framebuffer = size2d(drawableSize.width, drawableSize.height),
+      window = size2d(currentWindowSize.width, currentWindowSize.height),
+      fallback = size2d(int(fallbackWidth), int(fallbackHeight)),
+    )
+    if not report.chosen.isPositive:
+      return
+    let actualWidth = cint(report.chosen.width)
+    let actualHeight = cint(report.chosen.height)
+    let changedSize = report.changedFrom(size2d(winWidth, winHeight))
+    if changedSize:
+      winWidth = report.chosen.width
+      winHeight = report.chosen.height
+      if rend != nil and rend.atlas != nil:
+        resizeTerminals()
+    render_relay_lib.setViewport(frameRelays, render_relay_lib.size2d(int(actualWidth), int(actualHeight)))
+    if resizeSnapshotPath.len > 0:
+      try:
+        let content = contentRect()
+        let layouts = activePaneLayouts()
+        let firstPane =
+          if layouts.len > 0: layouts[0].rect
+          else: pane_tree.rect(0, 0, 0, 0)
+        let inner = paneInnerRect(firstPane)
+        writeFile(resizeSnapshotPath,
+          formatSizeDiagnostics(report) &
+          "content=" & $content.w & "x" & $content.h & "\n" &
+          "pane=" & $firstPane.w & "x" & $firstPane.h & "\n" &
+          "inner=" & $inner.w & "x" & $inner.h & "\n" &
+          "grid=" & $paneCols(firstPane) & "x" & $paneRows(firstPane) & "\n")
+      except CatchableError:
+        discard
+  
+  proc onResize(win: Window, width, height: cint) {.cdecl.} =
+    resizeToFramebuffer(win, width, height)
+  
+  proc syncFramebufferSize(): bool =
+    if window == nil:
+      return false
+    let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
+    let currentWindowSize = window_relay_lib.getWindowSize(windowRelays)
+    let report = chooseDrawableSize(
+      framebuffer = size2d(drawableSize.width, drawableSize.height),
+      window = size2d(currentWindowSize.width, currentWindowSize.height),
+      fallback = size2d(0, 0),
+    )
+    if not report.chosen.isPositive:
+      return false
+    if not report.changedFrom(size2d(winWidth, winHeight)):
+      return false
+    resizeToFramebuffer(window, cint(report.chosen.width), cint(report.chosen.height))
+    true
+  
+when defined(waymarkSdl3):
+  func toTerminalMods(mods: sdl.Keymod): set[terminal.Modifier] =
+    let raw = mods.uint32
+    if (raw and sdl.KMOD_SHIFT) != 0: result.incl terminal.modShift
+    if (raw and sdl.KMOD_CTRL) != 0: result.incl terminal.modCtrl
+    if (raw and sdl.KMOD_ALT) != 0: result.incl terminal.modAlt
+    if (raw and sdl.KMOD_GUI) != 0: result.incl terminal.modSuper
+  
+  func toShortcutMods(mods: set[terminal.Modifier]): set[shortcut_map_lib.Modifier] =
+    cast[set[shortcut_map_lib.Modifier]](mods)
+  
+  func toSdlKeyCode(scancode: sdl.Scancode): terminal.KeyCode =
+    case scancode
+    of sdl.SCANCODE_RETURN: kEnter
+    of sdl.SCANCODE_TAB: kTab
+    of sdl.SCANCODE_BACKSPACE: kBackspace
+    of sdl.SCANCODE_ESCAPE: kEscape
+    of sdl.SCANCODE_INSERT: kInsert
+    of sdl.SCANCODE_DELETE: kDelete
+    of sdl.SCANCODE_HOME: kHome
+    of sdl.SCANCODE_END: kEnd
+    of sdl.SCANCODE_PAGEUP: kPageUp
+    of sdl.SCANCODE_PAGEDOWN: kPageDown
+    of sdl.SCANCODE_UP: kArrowUp
+    of sdl.SCANCODE_DOWN: kArrowDown
+    of sdl.SCANCODE_LEFT: kArrowLeft
+    of sdl.SCANCODE_RIGHT: kArrowRight
+    of sdl.SCANCODE_F1: kF1
+    of sdl.SCANCODE_F2: kF2
+    of sdl.SCANCODE_F3: kF3
+    of sdl.SCANCODE_F4: kF4
+    of sdl.SCANCODE_F5: kF5
+    of sdl.SCANCODE_F6: kF6
+    of sdl.SCANCODE_F7: kF7
+    of sdl.SCANCODE_F8: kF8
+    of sdl.SCANCODE_F9: kF9
+    of sdl.SCANCODE_F10: kF10
+    of sdl.SCANCODE_F11: kF11
+    of sdl.SCANCODE_F12: kF12
+    of sdl.SCANCODE_KP_ENTER: kKeypadEnter
+    else: kNone
+  
+  func toSdlMouseButton(button: uint8): terminal.MouseButton =
+    case button
+    of sdl.BUTTON_LEFT: mbLeft
+    of sdl.BUTTON_MIDDLE: mbMiddle
+    of sdl.BUTTON_RIGHT: mbRight
+    else: mbRelease
+  
+  func printableFromSdlKey(keycode: sdl.Keycode): Option[uint32] =
+    if keycode >= 32'u32 and keycode <= 126'u32:
+      some(uint32(keycode))
+    else:
+      none(uint32)
+  
+  func shortcutKeyFromSdl(keycode: sdl.Keycode): shortcut_map_lib.KeyCode =
+    case keycode
+    of sdl.SDLK_EQUALS: shortcut_map_lib.kEqual
+    of sdl.SDLK_MINUS: shortcut_map_lib.kMinus
+    of sdl.SDLK_PLUS: shortcut_map_lib.kPlus
+    of sdl.SDLK_RETURN, sdl.SDLK_KP_ENTER: shortcut_map_lib.kEnter
+    else:
+      if keycode >= 32'u32 and keycode <= 126'u32:
+        shortcut_map_lib.shortcutKey(char(keycode))
+      else:
+        shortcut_map_lib.kNone
+  
+  proc handleTextInput(text: cstring) =
+    if text == nil: return
+    if keyTextFallback: return
+    let term = activeTerm()
+    if term == nil: return
+    for r in ($text).runes:
+      discard term.sendKey(keyChar(uint32(r)))
+    term.damage.markAll()
+  
+  proc handleSdlKey(event: sdl.KeyboardEvent) =
+    if not event.down: return
+    let term = activeTerm()
+    if term == nil: return
+    let mods = toTerminalMods(event.`mod`)
+    let sc = event.scancode
+  
+    if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_T:
       addTerminalTab()
       return
-    if terminal.modCtrl in m and terminal.modShift in m and key == KEY_ENTER:
+    if terminal.modCtrl in mods and terminal.modShift in mods and (sc == sdl.SCANCODE_RETURN or sc == sdl.SCANCODE_KP_ENTER):
       splitActivePane()
       return
-    if terminal.modCtrl in m and terminal.modShift in m and key == KEY_W:
+    if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_W:
       closeActivePane()
       return
-    if terminal.modCtrl in m and key == KEY_TAB:
-      if terminal.modShift in m: discard tabs.activatePrevious()
+    if terminal.modCtrl in mods and sc == sdl.SCANCODE_TAB:
+      if terminal.modShift in mods: discard tabs.activatePrevious()
       else: discard tabs.activateNext()
       let term = activeTerm()
       if term != nil: term.damage.markAll()
       return
-
-    # 1. Map GLFW key to ShortcutMap.KeyCode
-    var sk: shortcut_map_lib.KeyCode
-    case key
-    of KEY_EQUAL: sk = shortcut_map_lib.kEqual
-    of KEY_MINUS: sk = shortcut_map_lib.kMinus
-    of KEY_KP_ADD: sk = shortcut_map_lib.kPlus
-    of KEY_KP_SUBTRACT: sk = shortcut_map_lib.kMinus
-    else:
-      if key >= 32 and key <= 126: sk = shortcut_map_lib.key(char(key))
-      else: sk = shortcut_map_lib.kNone
-
-    # 2. Lookup high-level actions
-    let actionName = term.shortcuts.lookup(sk, cast[set[shortcut_map_lib.Modifier]](m))
+  
+    let actionName = term.shortcuts.lookup(shortcutKeyFromSdl(event.key), toShortcutMods(mods))
     if actionName.isSome:
-      case actionName.get()
-      of "copy":
-        if term.selection.isActive:
-          let text = term.selection.extractText(term.screen.cols) do (r: int) -> seq[CellData]:
-            let row = term.screen.absoluteRowAt(r)
-            var res = newSeq[CellData](row.len)
-            for i, c in row: res[i] = CellData(rune: c.rune, width: int(c.width))
-            res
-          copyToClipboard(text)
+      if handleShortcutAction(term, actionName.get()):
         return
-      of "paste":
-        let text = window.getClipboardString()
-        if text != nil: discard term.sendPaste($text)
-        return
-      of "zoom-in": fontSize += 1.0; rebuildAtlas(); return
-      of "zoom-out": fontSize = max(4.0, fontSize - 1.0); rebuildAtlas(); return
-      else: discard
-
-    # GLFW's char callback does not reliably emit Ctrl/Alt character
-    # combinations. Send those from the key callback so Ctrl+C, Ctrl+D,
-    # Alt+letter, etc. reach the child process.
-    if terminal.modCtrl in m or terminal.modAlt in m:
-      let ch = toPrintableRune(key, mods)
+  
+    if terminal.modCtrl in mods or terminal.modAlt in mods or keyTextFallback:
+      let ch = printableFromSdlKey(event.key)
       if ch.isSome:
-        let sent = term.sendKey(keyChar(ch.get(), m))
-        if inputDebug: echo "[input] modified printable codepoint=", ch.get(), " queued=", sent
+        discard term.sendKey(keyChar(ch.get(), mods))
         term.damage.markAll()
         return
-    elif keyTextFallback:
-      let ch = toPrintableRune(key, mods)
-      if ch.isSome:
-        let sent = term.sendKey(keyChar(ch.get(), m))
-        if inputDebug: echo "[input] fallback printable codepoint=", ch.get(), " queued=", sent
-        term.damage.markAll()
-        return
-
-    # 3. Standard keys
-    let tk = toKeyCode(key).int
-    if tk != 0 and tk != 1: # 0 = kNone, 1 = kChar
-      let sent = term.sendKey(terminal.key(cast[terminal.KeyCode](tk), m))
-      if inputDebug: echo "[input] special key=", tk, " queued=", sent
+  
+    let tk = toSdlKeyCode(sc)
+    if tk != kNone and tk != kChar:
+      discard term.sendKey(terminal.key(tk, mods))
       term.damage.markAll()
-
-proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
-  var x, y: cdouble; getCursorPos(win, addr x, addr y)
-  if button == MOUSE_BUTTON_LEFT and action == RELEASE:
-    draggingWindow = false
-
-  if button == MOUSE_BUTTON_LEFT and action == PRESS and inTitleBar(int(y)):
-    draggingWindow = true
-    dragStartMouseX = x
-    dragStartMouseY = y
-    getWindowPos(win, addr dragStartWinX, addr dragStartWinY)
-    dragStartGlobalX = float(dragStartWinX) + x
-    dragStartGlobalY = float(dragStartWinY) + y
-    let term = activeTerm()
-    if term != nil and term.activeLink.isSome:
-      term.activeLink = none(ActiveLink)
-      term.damage.markAll()
-    return
-
-  if button == MOUSE_BUTTON_LEFT and action == PRESS and inTabBar(int(y)):
-    let closeId = tabs.closeTabAtX(int(x), winWidth, tabBarHeight)
-    if closeId.isSome:
-      removeTerminalTab(closeId.get())
-      return
-    if plusButtonAtX(int(x), winWidth, tabBarHeight):
-      addTerminalTab()
-      return
-    let tabId = tabs.tabAtX(int(x), winWidth, tabBarHeight)
-    if tabId.isSome:
-      discard tabs.activate(tabId.get())
+  
+  proc handleMouseButton(x, y: float; button: uint8; down: bool; mods: set[terminal.Modifier]) =
+    if button == sdl.BUTTON_LEFT and not down:
+      draggingWindow = false
+  
+    if button == sdl.BUTTON_LEFT and down and inTitleBar(int(y)):
+      draggingWindow = true
+      dragStartMouseX = x
+      dragStartMouseY = y
+      let pos = window_relay_lib.getPosition(windowRelays)
+      dragStartWinX = cint(pos.x)
+      dragStartWinY = cint(pos.y)
+      dragStartGlobalX = float(pos.x) + x
+      dragStartGlobalY = float(pos.y) + y
       let term = activeTerm()
-      if term != nil: term.damage.markAll()
+      if term != nil and term.activeLink.isSome:
+        term.activeLink = none(ActiveLink)
+        term.damage.markAll()
       return
-
-  if int(y) < headerHeight: return
-  var paneFocusChanged = false
-  let session = focusPaneAt(int(x), int(y), paneFocusChanged)
-  if session == nil: return
-  if paneFocusChanged and button == MOUSE_BUTTON_LEFT and action == PRESS:
-    return
-  let term = session[].terminal
-  let area = activeSessionRect(session[].id)
-  if area.isNone: return
-  let col = localCol(area.get(), x); let row = localRow(area.get(), y)
-  let bufferRow = term.viewport.viewportToBuffer(row)
-  if bufferRow < 0: return
-  if term.inputMode.shouldIntercept(castSet(mods)):
-    if button == MOUSE_BUTTON_LEFT:
-      let isDown = action == PRESS
-
-      # Handle link clicking
-      if not isDown and term.activeLink.isSome:
-        launchUri(term.activeLink.get().link.text)
+  
+    if button == sdl.BUTTON_LEFT and down and inTabBar(int(y)):
+      let closeId = tabs.closeTabAtX(int(x), winWidth, tabBarHeight)
+      if closeId.isSome:
+        removeTerminalTab(closeId.get())
         return
-
-      term.drag.update(row, col, isDown)
-      if isDown:
-        let wi = activeWorkspaceIndex()
-        if wi >= 0: clearSelectionsExcept(workspaces[wi], session[].id)
-        term.selection.start(point(bufferRow, col))
+      if plusButtonAtX(int(x), winWidth, tabBarHeight):
+        addTerminalTab()
+        return
+      let tabId = tabs.tabAtX(int(x), winWidth, tabBarHeight)
+      if tabId.isSome:
+        discard tabs.activate(tabId.get())
+        let term = activeTerm()
+        if term != nil: term.damage.markAll()
+        return
+  
+    if int(y) < headerHeight: return
+    var paneFocusChanged = false
+    let session = focusPaneAt(int(x), int(y), paneFocusChanged)
+    if session == nil: return
+    let term = session[].terminal
+    # Swallow the pane-focus-acquiring click ONLY when the child isn't tracking
+    # mouse. Mouse-aware apps (grok, vim) need that click forwarded too, else
+    # their own click-to-focus (e.g. focusing a chat input) never fires.
+    if paneFocusChanged and button == sdl.BUTTON_LEFT and down and
+       term.inputMode.shouldIntercept(mods):
+      return
+    let area = activeSessionRect(session[].id)
+    if area.isNone: return
+    let col = localCol(area.get(), x)
+    let row = localRow(area.get(), y)
+    let bufferRow = term.viewport.viewportToBuffer(row)
+    if bufferRow < 0: return
+    if term.inputMode.shouldIntercept(mods):
+      if button == sdl.BUTTON_LEFT:
+        if not down and term.activeLink.isSome:
+          launchUri(term.activeLink.get().link.text)
+          return
+        term.drag.update(row, col, down)
+        if down:
+          let wi = activeWorkspaceIndex()
+          if wi >= 0: clearSelectionsExcept(workspaces[wi], session[].id)
+          term.selection.start(point(bufferRow, col))
+        term.damage.markAll()
+    else:
+      let tmb = toSdlMouseButton(button)
+      if tmb != mbRelease:
+        lastMouseReportRow = row; lastMouseReportCol = col
+        discard term.sendMouse(mouse(if down: mePress else: meRelease, tmb, row, col, mods))
+  
+  proc handleMouseMove(x, y: float; state: uint32) =
+    if draggingWindow:
+      let pos = window_relay_lib.getPosition(windowRelays)
+      let currentGlobalX = float(pos.x) + x
+      let currentGlobalY = float(pos.y) + y
+      window_relay_lib.setPosition(
+        windowRelays,
+        window_relay_lib.point(
+          int(dragStartWinX + cint(currentGlobalX - dragStartGlobalX)),
+          int(dragStartWinY + cint(currentGlobalY - dragStartGlobalY)),
+        )
+      )
+      return
+  
+    let wi = activeWorkspaceIndex()
+    if wi < 0: return
+    let activeId = workspaces[wi].panes.active
+    let sessionIdx = workspaces[wi].sessionIndex(activeId)
+    if sessionIdx < 0: return
+    let term = workspaces[wi].sessions[sessionIdx].terminal
+    if int(y) < headerHeight and term.drag.state == dsIdle:
+      if term.activeLink.isSome:
+        term.activeLink = none(ActiveLink)
+        term.damage.markAll()
+      return
+    let area = activeSessionRect(activeId)
+    if area.isNone: return
+    let col = localCol(area.get(), x)
+    let row = localRow(area.get(), y)
+    let rawRow = rawLocalRow(area.get(), y)
+  
+    if term.drag.state != dsIdle:
+      let leftDown = window_relay_lib.isMouseButtonDown(windowRelays, window_relay_lib.mbLeft)
+      term.drag.update(rawRow, col, leftDown)
+      if term.drag.state == dsIdle:
+        term.damage.markAll()
+        return
+      let delta = term.drag.autoscrollDelta()
+      if delta < 0: term.viewport.scrollUp(1)
+      elif delta > 0: term.viewport.scrollDown(1)
+      term.refreshViewport(false)
+      let focusRow = term.drag.focusViewportRow()
+      let focusBufferRow = term.viewport.viewportToBuffer(focusRow)
+      if focusBufferRow >= 0:
+        term.selection.update(point(focusBufferRow, col))
       term.damage.markAll()
-  else:
-    let tmb = toMouseButton(button).int
-    if tmb != 0 and tmb != 1: # kNone=0, kChar=1
-      discard term.sendMouse(mouse(if action == PRESS: mePress else: meRelease, cast[terminal.MouseButton](tmb), row, col, castSet(mods)))
-
-proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
-  if draggingWindow:
-    var currentWinX, currentWinY: cint
-    getWindowPos(win, addr currentWinX, addr currentWinY)
-    let currentGlobalX = float(currentWinX) + x
-    let currentGlobalY = float(currentWinY) + y
-    setWindowPos(
-      win,
-      dragStartWinX + cint(currentGlobalX - dragStartGlobalX),
-      dragStartWinY + cint(currentGlobalY - dragStartGlobalY),
-    )
-    return
-
-  let wi = activeWorkspaceIndex()
-  if wi < 0: return
-  let activeId = workspaces[wi].panes.active
-  let sessionIdx = workspaces[wi].sessionIndex(activeId)
-  if sessionIdx < 0: return
-  let term = workspaces[wi].sessions[sessionIdx].terminal
-  if int(y) < headerHeight and term.drag.state == dsIdle:
-    if term.activeLink.isSome:
-      term.activeLink = none(ActiveLink)
-      term.damage.markAll()
-    return
-  let area = activeSessionRect(activeId)
-  if area.isNone: return
-  let col = localCol(area.get(), x)
-  let row = localRow(area.get(), y)
-  let rawRow = rawLocalRow(area.get(), y)
-
-  if term.drag.state != dsIdle:
-    term.drag.update(rawRow, col, true)
-    let delta = term.drag.autoscrollDelta()
-    if delta < 0:
-      term.viewport.scrollUp(1)
-    elif delta > 0:
-      term.viewport.scrollDown(1)
-    term.refreshViewport(false)
-    let focusRow = term.drag.focusViewportRow()
-    let focusBufferRow = term.viewport.viewportToBuffer(focusRow)
-    if focusBufferRow >= 0:
-      term.selection.update(point(focusBufferRow, col))
-    term.damage.markAll()
-  else:
-    let absRow = term.viewport.viewportToBuffer(row)
-    if absRow < 0: return
-    # Update active link hover state
-    let lineStr = term.screen.absoluteLineText(absRow)
-    let links = detectLinks(lineStr)
-    var newActive = none(ActiveLink)
-    for l in links:
-      let sc = term.screen.colOfByteIndex(absRow, l.startIdx)
-      let ec = term.screen.colOfByteIndex(absRow, l.endIdx)
-      if col >= sc and col < ec:
-        newActive = some(ActiveLink(link: l, row: absRow, startCol: sc, endCol: ec))
-        break
-    if newActive != term.activeLink:
-      term.activeLink = newActive
-      term.damage.markAll()
-
-    if not term.inputMode.shouldIntercept() and term.inputMode.trackingWantsMotion():
-      let leftDown = getMouseButton(window, MOUSE_BUTTON_LEFT) == PRESS
-      let kind =
-        if leftDown and term.inputMode.trackingWantsDrag(): meDrag
-        else: meMove
-      discard term.sendMouse(mouse(kind, mbLeft, row, col, castSet(0)))
-
-proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
-  var x, y: cdouble; getCursorPos(win, addr x, addr y)
-  let session = if int(y) >= headerHeight: focusPaneAt(int(x), int(y)) else: nil
-  let term = if session == nil: activeTerm() else: session[].terminal
-  if term == nil: return
-  let ctrlDown = (getKey(window, KEY_LEFT_CONTROL) == PRESS or getKey(window, KEY_RIGHT_CONTROL) == PRESS)
-  let shiftDown = (getKey(window, KEY_LEFT_SHIFT) == PRESS or getKey(window, KEY_RIGHT_SHIFT) == PRESS)
-  if ctrlDown:
-    if yoffset > 0: fontSize += 1.0
-    elif yoffset < 0: fontSize = max(4.0, fontSize - 1.0)
-    rebuildAtlas()
-  else:
-    let scrollKind = term.inputMode.scrollInputKind(term.screen.usingAlt)
-    let normalTuiLikely =
-      (not term.screen.usingAlt) and
-      term.inputMode.mouseMode == mmNone and
-      (term.inputMode.cursorApp or term.inputMode.focusReporting)
-    let action = decideWheelAction(ScrollPolicyInput(
-      usingAltScreen: term.screen.usingAlt,
-      childWantsWheel: term.inputMode.shouldSendWheel(term.screen.usingAlt),
-      childWheelEncoding: toChildWheelEncoding(scrollKind),
-      viewportHasHistory: term.viewport.maxScroll > 0,
-      viewportHasMeaningfulHistory: term.viewport.hasMeaningfulHistory(config.meaningfulHistoryRows),
-      viewportAtLiveEnd: term.viewport.isAtLiveEnd,
-      scrollingTowardHistory: yoffset > 0,
-      normalScreenTuiLikely: normalTuiLikely,
-      forceTerminalScroll: shiftDown,
-      forceChildScroll: false,
-      altScrollbackMode: config.altScreenScrollback,
-      altWheelPolicy: config.altWheelPolicy,
-      normalWheelPolicy: config.normalWheelPolicy,
-    ))
-    case action
-    of saScrollViewport:
-      if yoffset > 0: term.viewport.scrollUp(3)
-      elif yoffset < 0: term.viewport.scrollDown(3)
-    of saRouteToChild:
+    else:
+      let absRow = term.viewport.viewportToBuffer(row)
+      if absRow < 0: return
+      let lineStr = term.screen.absoluteLineText(absRow)
+      let links = detectLinks(lineStr)
+      var newActive = none(ActiveLink)
+      for l in links:
+        let sc = term.screen.colOfByteIndex(absRow, l.startIdx)
+        let ec = term.screen.colOfByteIndex(absRow, l.endIdx)
+        if col >= sc and col < ec:
+          newActive = some(ActiveLink(link: l, row: absRow, startCol: sc, endCol: ec))
+          break
+      if newActive != term.activeLink:
+        term.activeLink = newActive
+        term.damage.markAll()
+  
+      if not term.inputMode.shouldIntercept() and term.inputMode.trackingWantsMotion() and
+         (row != lastMouseReportRow or col != lastMouseReportCol):
+        # Only report motion on cell change (xterm behavior). Per-pixel reports
+        # flood the child and turn a jittery click into press+drag+release,
+        # which apps read as a selection rather than a focus click.
+        lastMouseReportRow = row; lastMouseReportCol = col
+        let leftDown = window_relay_lib.isMouseButtonDown(windowRelays, window_relay_lib.mbLeft)
+        let kind = if leftDown and term.inputMode.trackingWantsDrag(): meDrag else: meMove
+        # No button held during motion must report "no button" (param 35),
+        # not a phantom left-drag. mbRelease encodes to the no-button code.
+        let btn = if leftDown: terminal.mbLeft else: terminal.mbRelease
+        discard term.sendMouse(mouse(kind, btn, row, col, {}))
+  
+  proc handleScrollAt(x, y: float; yoffset: float; mods: set[terminal.Modifier]) =
+    let session = if int(y) >= headerHeight: focusPaneAt(int(x), int(y)) else: nil
+    let term = if session == nil: activeTerm() else: session[].terminal
+    if term == nil: return
+    let ctrlDown = terminal.modCtrl in mods
+    let shiftDown = terminal.modShift in mods
+    if ctrlDown:
+      if yoffset > 0: fontSize += 1.0
+      elif yoffset < 0: fontSize = max(4.0, fontSize - 1.0)
+      rebuildAtlas()
+    else:
+      let scrollKind = term.inputMode.scrollInputKind(term.screen.usingAlt)
+      let normalTuiLikely =
+        (not term.screen.usingAlt) and
+        term.inputMode.mouseMode == mmNone and
+        (term.inputMode.cursorApp or term.inputMode.focusReporting)
+      let action = decideWheelAction(ScrollPolicyInput(
+        usingAltScreen: term.screen.usingAlt,
+        childWantsWheel: term.inputMode.shouldSendWheel(term.screen.usingAlt),
+        childWheelEncoding: toChildWheelEncoding(scrollKind),
+        viewportHasHistory: term.viewport.maxScroll > 0,
+        viewportHasMeaningfulHistory: term.viewport.hasMeaningfulHistory(config.meaningfulHistoryRows),
+        viewportAtLiveEnd: term.viewport.isAtLiveEnd,
+        scrollingTowardHistory: yoffset > 0,
+        normalScreenTuiLikely: normalTuiLikely,
+        forceTerminalScroll: shiftDown,
+        forceChildScroll: false,
+        altScrollbackMode: config.altScreenScrollback,
+        altWheelPolicy: config.altWheelPolicy,
+        normalWheelPolicy: config.normalWheelPolicy,
+      ))
       let paneId =
         if session == nil:
           let workspace = activeWorkspace()
@@ -1055,106 +1878,97 @@ proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
       let area = activeSessionRect(paneId)
       let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
       let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
-      case scrollKind
-      of sikCursorKeys:
-        let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
-        for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
-          discard term.sendKey(key(keyCode))
-      of sikMouseWheel:
+      case action
+      of saScrollViewport:
+        if yoffset > 0: term.viewport.scrollUp(3)
+        elif yoffset < 0: term.viewport.scrollDown(3)
+      of saRouteToChild:
+        case scrollKind
+        of sikCursorKeys:
+          let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+          for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+            discard term.sendKey(key(keyCode))
+        of sikMouseWheel:
+          let button = if yoffset > 0: mbWheelUp else: mbWheelDown
+          for _ in 0 ..< max(1, int(abs(yoffset))):
+            discard term.sendMouse(mouse(mePress, button, row, col))
+        of sikNone:
+          discard
+      of saRouteMouseWheel:
         let button = if yoffset > 0: mbWheelUp else: mbWheelDown
         for _ in 0 ..< max(1, int(abs(yoffset))):
           discard term.sendMouse(mouse(mePress, button, row, col))
-      of sikNone:
-        discard
-    of saRouteMouseWheel:
-      let paneId =
-        if session == nil:
-          let workspace = activeWorkspace()
-          if workspace == nil: pane_tree.paneId(-1) else: workspace[].panes.active
-        else:
-          session[].id
-      let area = activeSessionRect(paneId)
-      let col = if area.isSome: localCol(area.get(), x) else: term.screen.cursor.col
-      let row = if area.isSome: localRow(area.get(), y) else: term.screen.cursor.row
-      let button = if yoffset > 0: mbWheelUp else: mbWheelDown
-      for _ in 0 ..< max(1, int(abs(yoffset))):
-        discard term.sendMouse(mouse(mePress, button, row, col))
-    of saRouteCursorKeys:
-      let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
-      for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+      of saRouteCursorKeys:
+        let keyCode = if yoffset > 0: kArrowUp else: kArrowDown
+        for _ in 0 ..< max(1, int(abs(yoffset) * 3)):
+          discard term.sendKey(key(keyCode))
+      of saRoutePageKeys:
+        let keyCode = if yoffset > 0: kPageUp else: kPageDown
         discard term.sendKey(key(keyCode))
-    of saRoutePageKeys:
-      let keyCode = if yoffset > 0: kPageUp else: kPageDown
-      discard term.sendKey(key(keyCode))
-    of saIgnore:
-      discard
-  term.refreshViewport(false); term.damage.markAll()
-
-proc onWindowFocus(win: Window, focused: cint) {.cdecl.} =
-  let term = activeTerm()
-  if term == nil: return
-  discard term.sendFocus(focused != 0)
-
-proc resizeToFramebuffer(win: Window, fallbackWidth, fallbackHeight: cint) =
-  var fbWidth, fbHeight: cint
-  var windowWidth, windowHeight: cint
-  getFramebufferSize(win, addr fbWidth, addr fbHeight)
-  getWindowSize(win, addr windowWidth, addr windowHeight)
-  let report = chooseDrawableSize(
-    framebuffer = size2d(int(fbWidth), int(fbHeight)),
-    window = size2d(int(windowWidth), int(windowHeight)),
-    fallback = size2d(int(fallbackWidth), int(fallbackHeight)),
-  )
-  if not report.chosen.isPositive:
-    return
-  let actualWidth = cint(report.chosen.width)
-  let actualHeight = cint(report.chosen.height)
-  let changedSize = report.changedFrom(size2d(winWidth, winHeight))
-  if changedSize:
-    winWidth = report.chosen.width
-    winHeight = report.chosen.height
-    if rend != nil and rend.atlas != nil:
-      resizeTerminals()
-  glViewport(0, 0, actualWidth, actualHeight)
-  if resizeSnapshotPath.len > 0:
-    try:
-      let content = contentRect()
-      let layouts = activePaneLayouts()
-      let firstPane =
-        if layouts.len > 0: layouts[0].rect
-        else: pane_tree.rect(0, 0, 0, 0)
-      let inner = paneInnerRect(firstPane)
-      writeFile(resizeSnapshotPath,
-        formatSizeDiagnostics(report) &
-        "content=" & $content.w & "x" & $content.h & "\n" &
-        "pane=" & $firstPane.w & "x" & $firstPane.h & "\n" &
-        "inner=" & $inner.w & "x" & $inner.h & "\n" &
-        "grid=" & $paneCols(firstPane) & "x" & $paneRows(firstPane) & "\n")
-    except CatchableError:
-      discard
-
-proc onResize(win: Window, width, height: cint) {.cdecl.} =
-  resizeToFramebuffer(win, width, height)
-
-proc syncFramebufferSize(): bool =
-  if window == nil:
-    return false
-  var fbWidth, fbHeight: cint
-  var windowWidth, windowHeight: cint
-  getFramebufferSize(window, addr fbWidth, addr fbHeight)
-  getWindowSize(window, addr windowWidth, addr windowHeight)
-  let report = chooseDrawableSize(
-    framebuffer = size2d(int(fbWidth), int(fbHeight)),
-    window = size2d(int(windowWidth), int(windowHeight)),
-    fallback = size2d(0, 0),
-  )
-  if not report.chosen.isPositive:
-    return false
-  if not report.changedFrom(size2d(winWidth, winHeight)):
-    return false
-  resizeToFramebuffer(window, cint(report.chosen.width), cint(report.chosen.height))
-  true
-
+      of saIgnore:
+        discard
+    term.refreshViewport(false)
+    term.damage.markAll()
+  
+  proc resizeToFramebuffer(fallbackWidth, fallbackHeight: cint) =
+    let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
+    let currentWindowSize = window_relay_lib.getWindowSize(windowRelays)
+    let report = chooseDrawableSize(
+      framebuffer = size2d(drawableSize.width, drawableSize.height),
+      window = size2d(currentWindowSize.width, currentWindowSize.height),
+      fallback = size2d(int(fallbackWidth), int(fallbackHeight)),
+    )
+    if not report.chosen.isPositive: return
+    let changedSize = report.changedFrom(size2d(winWidth, winHeight))
+    if changedSize:
+      winWidth = report.chosen.width
+      winHeight = report.chosen.height
+      if rend != nil and rend.atlas != nil:
+        resizeTerminals()
+    render_relay_lib.setViewport(frameRelays, render_relay_lib.size2d(winWidth, winHeight))
+  
+  proc syncFramebufferSize(): bool =
+    if window == nil: return false
+    let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
+    let currentWindowSize = window_relay_lib.getWindowSize(windowRelays)
+    let report = chooseDrawableSize(
+      framebuffer = size2d(drawableSize.width, drawableSize.height),
+      window = size2d(currentWindowSize.width, currentWindowSize.height),
+      fallback = size2d(0, 0),
+    )
+    if not report.chosen.isPositive: return false
+    if not report.changedFrom(size2d(winWidth, winHeight)): return false
+    resizeToFramebuffer(cint(report.chosen.width), cint(report.chosen.height))
+    true
+  
+  proc onWindowFocus(focused: bool) =
+    let term = activeTerm()
+    if term == nil: return
+    discard term.sendFocus(focused)
+  
+  proc pollEvents() =
+    var event: sdl.Event
+    while sdl.pollEvent(event):
+      let evType = uint32(event.common.`type`)
+      if evType == uint32(sdl.EVENT_QUIT) or evType == uint32(sdl.EVENT_WINDOW_CLOSE_REQUESTED):
+        appShouldClose = true
+      elif evType == uint32(sdl.EVENT_WINDOW_RESIZED) or evType == uint32(sdl.EVENT_WINDOW_PIXEL_SIZE_CHANGED):
+        resizeToFramebuffer(cint(event.window.data1), cint(event.window.data2))
+      elif evType == uint32(sdl.EVENT_WINDOW_FOCUS_GAINED):
+        onWindowFocus(true)
+      elif evType == uint32(sdl.EVENT_WINDOW_FOCUS_LOST):
+        onWindowFocus(false)
+      elif evType == uint32(sdl.EVENT_TEXT_INPUT):
+        handleTextInput(event.text.text)
+      elif evType == uint32(sdl.EVENT_KEY_DOWN):
+        handleSdlKey(event.key)
+      elif evType == uint32(sdl.EVENT_MOUSE_BUTTON_DOWN) or evType == uint32(sdl.EVENT_MOUSE_BUTTON_UP):
+        handleMouseButton(event.button.x, event.button.y, event.button.button, event.button.down, toTerminalMods(sdl.getModState()))
+      elif evType == uint32(sdl.EVENT_MOUSE_MOTION):
+        handleMouseMove(event.motion.x, event.motion.y, event.motion.state)
+      elif evType == uint32(sdl.EVENT_MOUSE_WHEEL):
+        handleScrollAt(event.wheel.mouse_x, event.wheel.mouse_y, event.wheel.y, toTerminalMods(sdl.getModState()))
+  
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1166,36 +1980,62 @@ keyTextFallback =
   getEnv("WAYMARK_KEY_TEXT_FALLBACK", "0") == "1"
 inputDebug = getEnv("WAYMARK_INPUT_DEBUG", "0") == "1"
 
-if init() == 0: quit("Failed to init GLFW")
-windowHint(CONTEXT_VERSION_MAJOR, 2); windowHint(CONTEXT_VERSION_MINOR, 1)
 chooseInitialWindowSize()
-window = createWindow(cint(winWidth), cint(winHeight), cstring(config.title), nil, nil)
-if window == nil: quit("Failed to create window")
-setWindowSizeLimits(window, cint(MinWindowWidth), cint(MinWindowHeight), DONT_CARE, DONT_CARE)
-focusWindow(window)
-makeContextCurrent(window); loadExtensions()
-var fbWidth, fbHeight: cint
-getFramebufferSize(window, addr fbWidth, addr fbHeight)
-if fbWidth > 0 and fbHeight > 0:
-  winWidth = int(fbWidth)
-  winHeight = int(fbHeight)
-  glViewport(0, 0, fbWidth, fbHeight)
+
+when defined(waymarkSdl3):
+  if not sdl.init(sdl.INIT_VIDEO): quit("Failed to init SDL3: " & $sdl.getError())
+  discard sdl.gL_SetAttribute(sdl.GL_CONTEXT_MAJOR_VERSION, 2)
+  discard sdl.gL_SetAttribute(sdl.GL_CONTEXT_MINOR_VERSION, 1)
+  discard sdl.gL_SetAttribute(sdl.GL_DOUBLEBUFFER, 1)
+  let flags = sdl.WINDOW_OPENGL or sdl.WINDOW_RESIZABLE or sdl.WINDOW_HIGH_PIXEL_DENSITY
+  window = sdl.createWindow(cstring(config.title), cint(winWidth), cint(winHeight), flags)
+  if window == nil: quit("Failed to create SDL3 window: " & $sdl.getError())
+  installSdlWindowRelays()
+  window_relay_lib.setMinimumSize(windowRelays, window_relay_lib.size2d(MinWindowWidth, MinWindowHeight))
+  glContext = sdl.gL_CreateContext(window)
+  if glContext == nil: quit("Failed to create SDL3 OpenGL context: " & $sdl.getError())
+  if not sdl.gL_MakeCurrent(window, glContext): quit("Failed to make SDL3 OpenGL context current: " & $sdl.getError())
+  loadExtensions()
+  discard sdl.gL_SetSwapInterval(1)
+  discard sdl.startTextInput(window)
+  installOpenGlGpuRelays()
+  installSdlRenderRelays()
+  installClipboardProviders()
+  resizeToFramebuffer(cint(winWidth), cint(winHeight))
+else:
+  if init() == 0: quit("Failed to init GLFW")
+  windowHint(CONTEXT_VERSION_MAJOR, 2); windowHint(CONTEXT_VERSION_MINOR, 1)
+  window = createWindow(cint(winWidth), cint(winHeight), cstring(config.title), nil, nil)
+  if window == nil: quit("Failed to create window")
+  installGlfwWindowRelays()
+  window_relay_lib.setMinimumSize(windowRelays, window_relay_lib.size2d(MinWindowWidth, MinWindowHeight))
+  focusWindow(window)
+  makeContextCurrent(window); loadExtensions()
+  swapInterval(cint(1))  # vsync: cap presentation to display refresh (mirrors SDL gL_SetSwapInterval)
+  installOpenGlGpuRelays()
+  installGlfwRenderRelays()
+  installClipboardProviders()
+  let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
+  if window_relay_lib.isPositive(drawableSize):
+    winWidth = drawableSize.width
+    winHeight = drawableSize.height
+    render_relay_lib.setViewport(frameRelays, render_relay_lib.size2d(winWidth, winHeight))
 
 fallbackTypefaces = loadFallbackTypefaces()
 let atlas = makeAtlas(fontSize, font)
 let chromeAtlas = makeAtlas(config.fontSize, chromeFont)
-rend = newGpuTerminalRenderer(atlas, chromeAtlas)
+rend = newGpuTerminalRenderer(atlas, chromeAtlas, gpuRelays)
 rend.loadLogoTexture(config.logoPath)
 updateChromeHeights()
 addTerminalTab()
 
-discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
-discard window.setMouseButtonCallback(onMouseButton); discard window.setCursorPosCallback(onCursorPos)
-discard window.setScrollCallback(onScroll); discard window.setFramebufferSizeCallback(onResize)
-discard window.setWindowSizeCallback(onResize)
-discard window.setWindowFocusCallback(onWindowFocus)
-
-onResize(window, cint(winWidth), cint(winHeight))
+when not defined(waymarkSdl3):
+  discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
+  discard window.setMouseButtonCallback(onMouseButton); discard window.setCursorPosCallback(onCursorPos)
+  discard window.setScrollCallback(onScroll); discard window.setFramebufferSizeCallback(onResize)
+  discard window.setWindowSizeCallback(onResize)
+  discard window.setWindowFocusCallback(onWindowFocus)
+  onResize(window, cint(winWidth), cint(winHeight))
 writeGpuSnapshot()
 
 if lifecycleChaosCycles > 0:
@@ -1203,12 +2043,32 @@ if lifecycleChaosCycles > 0:
   closeAllWorkspaces()
   if rend != nil:
     rend.dispose()
+    disposeOpenGlGpuRelays()
     writeGpuSnapshot()
-  terminate()
+  when defined(waymarkSdl3):
+    if glContext != nil:
+      discard sdl.gL_DestroyContext(glContext)
+      glContext = nil
+    if window != nil:
+      sdl.destroyWindow(window)
+      window = nil
+    sdl.quit()
+  else:
+    terminate()
   quit(0)
 
 let perf = newPerfMonitor()
-while windowShouldClose(window) == 0:
+# Frame-rate cap. vsync (gL_SetSwapInterval) is unreliable under Wayland/this GL setup --
+# present does not block, so without this the loop free-runs at ~20k FPS whenever a process is
+# emitting output (n>0 every iteration), saturating the GPU and starving compute (e.g. ROCm
+# training) until amdgpu hangs. This explicit budget caps the loop regardless of vsync.
+let maxFps = block:
+  let raw = os.getEnv("WAYMARK_MAX_FPS", "120")
+  try: max(1, parseInt(raw)) except CatchableError: 120
+let frameBudgetSec = 1.0 / maxFps.float
+while true:
+  if window_relay_lib.shouldClose(windowRelays): break
+  let frameStart = epochTime()
   perf.beginFrame()
   let resized = syncFramebufferSize()
   var n = 0
@@ -1220,23 +2080,41 @@ while windowShouldClose(window) == 0:
       n += readCount
   let term = activeTerm()
   if term == nil: break
-  if atlas.isDirty: rend.updateAtlasTexture()
+  let atlasWasDirty = atlas.isDirty
+  let chromeAtlasWasDirty = chromeAtlas.isDirty
+  if atlasWasDirty: rend.updateAtlasTexture()
+  if chromeAtlasWasDirty: rend.updateChromeAtlasTexture()
   let tabLabelsChanged = refreshTabCwdLabels()
   let blockedBySyncUpdate = activeWorkspaceSyncUpdateActive()
-  let changed = (resized or n > 0 or atlas.isDirty or activeWorkspaceDirty() or tabLabelsChanged) and not blockedBySyncUpdate
+  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or activeWorkspaceDirty() or tabLabelsChanged) and not blockedBySyncUpdate
   if changed:
     drawActiveWorkspace()
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
-    swapBuffers(window)
+    render_relay_lib.endFrame(frameRelays)
     writeGpuSnapshot()
     writeScreenSnapshot(term)
   pollEvents(); perf.endFrame()
   if perf.shouldReport(2.0):
     let s = perf.takeReport()
     echo "FPS: ", s.fps, " Latency: ", s.avgLatencyMs, " ms"
-  if not changed: os.sleep(1)
+  # Pace the frame to the budget whether or not anything changed. This is the real cap:
+  # even under continuous output (n>0) the loop can never exceed maxFps, so it cannot
+  # busy-render the GPU. Idle frames sleep the full budget; active frames sleep the remainder.
+  let frameSec = epochTime() - frameStart
+  if frameSec < frameBudgetSec:
+    os.sleep(int((frameBudgetSec - frameSec) * 1000.0))
 
 if rend != nil:
   rend.dispose()
+  disposeOpenGlGpuRelays()
   writeGpuSnapshot()
-terminate()
+when defined(waymarkSdl3):
+  if glContext != nil:
+    discard sdl.gL_DestroyContext(glContext)
+    glContext = nil
+  if window != nil:
+    sdl.destroyWindow(window)
+    window = nil
+  sdl.quit()
+else:
+  terminate()

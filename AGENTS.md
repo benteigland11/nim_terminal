@@ -3,6 +3,11 @@
 
 When trying to fix things, always look to modify an existing widget or add a widget. Don't rely on glue code to fix bugs. Glue code is config, not logic.
 
+For Waymark platform/rendering work, keep Araq's relay philosophy in mind:
+https://nim-lang.org/araq/relays.html. Prefer small injected relay surfaces
+for OS, window, input, clipboard, and render backend boundaries so reusable
+logic stays in widgets and app glue only installs concrete drivers.
+
 Widget library manager. Widgets are reusable code modules with tests,
 examples, and metadata. Installed widgets live under `cg/<widget_id>/`.
 

@@ -2,22 +2,20 @@
   "meta": {
     "id": "universal-tile-batcher-nim",
     "name": "Tile Batcher",
-    "version": "1.4.1",
+    "version": "1.5.0",
     "domain": "universal",
     "tags": [
-      "opengl",
       "rendering",
       "tile",
       "batching",
-      "terminal"
+      "geometry",
+      "triangles"
     ]
   },
-  "description": "Efficiently draws many small quads (tiles) using OpenGL in a single pass.",
+  "description": "Efficiently batches many small quads (tiles) into textured triangle vertices and submits them to a caller-provided draw sink.",
   "tech_stack": {
     "language": "nim",
-    "dependencies": [
-      "opengl >= 1.2.0"
-    ]
+    "dependencies": []
   },
   "custom_notes": "",
   "library_notes": {
@@ -27,7 +25,7 @@
   },
   "validation": {
     "engine_version": 3,
-    "validated_at": "2026-04-26T04:15:31.581248+00:00",
-    "runtime": "nim 2.2.8"
+    "validated_at": "2026-05-01T03:34:57.701255+00:00",
+    "runtime": "nim 2.2.10"
   }
 }

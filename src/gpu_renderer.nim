@@ -1,18 +1,19 @@
 ## GPU-accelerated terminal grid renderer.
 ##
-## Translates the in-memory `Screen` buffer into OpenGL quads.
+## Translates the in-memory `Screen` buffer into GPU quads.
 ## Uses `TileBatcher` for efficiency and `GlyphAtlas` for UV mapping.
 
-import opengl
 import pixie
 import std/options
 import ../cg/data_screen_buffer_nim/src/screen_buffer_lib
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
 import ../cg/universal_tile_batcher_nim/src/tile_batcher_lib
+import ../cg/frontend_gpu_relays_nim/src/gpu_relays_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
 import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
 import ../cg/data_pixel_resource_size_nim/src/pixel_resource_size_lib
 import ../cg/data_terminal_render_attrs_nim/src/terminal_render_attrs_lib as render_attrs
+import ../cg/frontend_cursor_row_highlight_nim/src/cursor_row_highlight_lib
 import terminal
 
 type
@@ -20,6 +21,8 @@ type
     atlas*: GlyphAtlas
     chromeAtlas*: GlyphAtlas
     batcher*: TileBatcher
+    gpu*: GpuRelays
+    gpuVertices: seq[GpuVertex]
     atlasTexId*: uint32
     chromeTexId*: uint32
     bgTexId*: uint32      ## 1x1 white texture for drawing backgrounds
@@ -46,14 +49,26 @@ proc recordBatcherBuffer(r: GpuTerminalRenderer) =
   r.resources.recordUpsert("buffer", glId(id), r.batcher.uploadedVertexBytes(), "tile batch vertex buffer")
 
 proc finishBatch(r: GpuTerminalRenderer) =
-  r.batcher.endBatch()
-  r.recordBatcherBuffer()
+  r.batcher.endBatch(proc (textureId: uint32; vertices: openArray[TileVertex]) =
+    r.gpuVertices.setLen(vertices.len)
+    for i, vertex in vertices:
+      r.gpuVertices[i] = GpuVertex(
+        x: vertex.x,
+        y: vertex.y,
+        u: vertex.u,
+        v: vertex.v,
+        r: vertex.r,
+        g: vertex.g,
+        b: vertex.b,
+        a: vertex.a,
+      )
+    r.gpu.drawTexturedTriangles(gpu_relays_lib.textureId(textureId), r.gpuVertices)
+  )
 
 proc uploadAtlasTexture(r: GpuTerminalRenderer; atlas: GlyphAtlas; texId: uint32; label: string) =
-  glBindTexture(GL_TEXTURE_2D, texId)
   let img = atlas.atlasImage
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8.cint, cint(img.width), cint(img.height),
-               0, GL_RGBA, GL_UNSIGNED_BYTE, addr img.data[0])
+  if img.width <= 0 or img.height <= 0 or img.data.len == 0: return
+  r.gpu.uploadRgba8Texture(textureId(texId), img.width, img.height, addr img.data[0])
   atlas.isDirty = false
   r.recordTexture(texId, label, atlasBytes(atlas))
 
@@ -71,18 +86,12 @@ proc loadLogoTexture*(r: GpuTerminalRenderer, path: string) =
     if img.width <= 0 or img.height <= 0 or img.data.len == 0: return
     if r.logoTexId != 0:
       var oldId = r.logoTexId
-      glDeleteTextures(1, addr oldId)
+      r.gpu.deleteTexture(textureId(oldId))
       r.resources.recordDelete("texture", glId(oldId))
       r.logoTexId = 0
-    var id: uint32
-    glGenTextures(1, addr id)
-    glBindTexture(GL_TEXTURE_2D, id)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8.cint, cint(img.width), cint(img.height),
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, addr img.data[0])
+    let id = uint32Value(r.gpu.createTexture())
+    r.gpu.configureTexture(textureId(id), defaultTextureOptions(gtfLinear))
+    r.gpu.uploadRgba8Texture(textureId(id), img.width, img.height, addr img.data[0])
     r.logoTexId = id
     r.logoAspect = img.width.float32 / img.height.float32
     r.recordTexture(id, "titlebar logo", rgba8Bytes(img.width, img.height))
@@ -96,6 +105,9 @@ func toRgba(c: PaletteColor): RgbaColor =
 func toRgba(c: render_attrs.RenderColor): RgbaColor =
   tile_batcher_lib.rgba(c.r.float32 / 255.0, c.g.float32 / 255.0, c.b.float32 / 255.0, 1.0)
 
+func toRgba(c: HighlightColor): RgbaColor =
+  tile_batcher_lib.rgba(c.r.float32 / 255.0, c.g.float32 / 255.0, c.b.float32 / 255.0, 1.0)
+
 func toRenderColor(c: PaletteColor): render_attrs.RenderColor =
   render_attrs.rgb(c.r, c.g, c.b)
 
@@ -104,7 +116,7 @@ func toTerminalColor(c: screen_buffer_lib.Color): render_attrs.TerminalColor =
   of screen_buffer_lib.ckDefault:
     render_attrs.defaultColor()
   of screen_buffer_lib.ckIndexed:
-    render_attrs.indexedColor(c.index)
+    render_attrs.indexedColor(int(c.index))
   of screen_buffer_lib.ckRgb:
     render_attrs.rgbColor(c.r, c.g, c.b)
 
@@ -133,31 +145,22 @@ proc preRenderChromeAscii*(r: GpuTerminalRenderer) =
   for i in 32..126: discard r.chromeAtlas.getGlyph(uint32(i))
   r.updateChromeAtlasTexture()
 
-proc newGpuTerminalRenderer*(atlas: GlyphAtlas, chromeAtlas: GlyphAtlas = nil): GpuTerminalRenderer =
+proc newGpuTerminalRenderer*(atlas: GlyphAtlas, chromeAtlas: GlyphAtlas = nil, gpu = noopGpuRelays()): GpuTerminalRenderer =
   var ids: array[3, uint32]
-  glGenTextures(3, addr ids[0])
-  glBindTexture(GL_TEXTURE_2D, ids[0])
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-  glBindTexture(GL_TEXTURE_2D, ids[1])
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-  glBindTexture(GL_TEXTURE_2D, ids[2])
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+  for i in 0 ..< ids.len:
+    ids[i] = uint32Value(gpu.createTexture())
+  gpu.configureTexture(textureId(ids[0]), defaultTextureOptions(gtfLinear))
+  gpu.configureTexture(textureId(ids[1]), defaultTextureOptions(gtfLinear))
+  gpu.configureTexture(textureId(ids[2]), defaultTextureOptions(gtfNearest))
   var whitePixel: uint32 = 0xFFFFFFFF'u32
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8.cint, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, addr whitePixel)
+  gpu.uploadSolidRgba8Texture(textureId(ids[2]), whitePixel)
 
   result = GpuTerminalRenderer(
     atlas: atlas,
     chromeAtlas: if chromeAtlas == nil: atlas else: chromeAtlas,
     batcher: newTileBatcher(ids[0], capacity = 100000),
+    gpu: gpu,
+    gpuVertices: @[],
     atlasTexId: ids[0],
     chromeTexId: ids[1],
     bgTexId: ids[2],
@@ -190,8 +193,7 @@ proc dispose*(r: GpuTerminalRenderer) =
     if id != 0:
       texIds.add id
   for id in texIds:
-    var local = id
-    glDeleteTextures(1, addr local)
+    r.gpu.deleteTexture(textureId(id))
     r.resources.recordDelete("texture", glId(id))
   r.atlasTexId = 0
   r.chromeTexId = 0
@@ -227,6 +229,13 @@ proc addChromeText(r: GpuTerminalRenderer, x, y, winWidth, winHeight: int, text:
       glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y,
       color
     )
+    inc col
+
+proc prepareChromeText(r: GpuTerminalRenderer, text: string, maxChars: int = int.high) =
+  var col = 0
+  for ch in text:
+    if col >= maxChars: break
+    discard r.chromeAtlas.getGlyph(uint32(ch))
     inc col
 
 proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titleBarHeight, tabBarHeight: int, title = "Waymark - Built with Nim") =
@@ -292,6 +301,13 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
   let titleTextY = max(1, (titleBarHeight - r.chromeAtlas.cellHeight) div 2)
   let titleTextX = if r.logoTexId != 0: logoX + logoW + 10 else: logoX
   let titleCols = max(0, (winWidth - titleTextX - 12) div max(1, r.chromeAtlas.cellWidth))
+  r.prepareChromeText(title, titleCols)
+  for tab in tabs.tabs:
+    r.prepareChromeText(tab.label)
+  r.prepareChromeText("x+")
+  if r.chromeAtlas.isDirty:
+    r.updateChromeAtlasTexture()
+
   r.addChromeText(titleTextX, titleTextY, winWidth, winHeight, title, text, titleCols)
 
   let textY = titleBarHeight + max(1, (tabBarHeight - r.chromeAtlas.cellHeight) div 2)
@@ -333,6 +349,19 @@ proc drawPaneBackground*(r: GpuTerminalRenderer, t: Terminal, x, y, w, h, winWid
   r.addRect(x, y, w, h, winWidth, winHeight, toRgba(t.screen.theme.background))
   r.finishBatch()
 
+proc prepareVisibleGlyphs(r: GpuTerminalRenderer, t: Terminal) =
+  let s = t.screen
+  let rows = max(1, t.viewport.height)
+  let cols = s.cols
+  for row in 0 ..< rows:
+    let absRow = t.viewport.viewportToBuffer(row)
+    let cells = s.absoluteRowAt(absRow)
+    if cells.len == 0: continue
+    for col in 0 ..< min(cols, cells.len):
+      let cell = cells[col]
+      if cell.width != 0 and cell.rune > 32:
+        discard r.atlas.getGlyph(cell.rune)
+
 proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, x, y, w, h: int, showCursor = true) =
   ## Optimized single-pass rendering.
   if w <= 0 or h <= 0: return
@@ -351,12 +380,33 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
   let sw = float32(winWidth); let sh = float32(winHeight)
   let tw = (cw / sw) * 2.0; let th = (ch / sh) * 2.0
 
-  glEnable(GL_TEXTURE_2D); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+  r.prepareVisibleGlyphs(t)
+  if r.atlas.isDirty:
+    r.updateAtlasTexture()
+
+  r.gpu.enableAlphaBlending()
 
   # --- ONE PASS FOR ALL BACKGROUNDS ---
   r.batcher.textureId = r.bgTexId
   r.batcher.beginBatch()
   r.addRect(x, y, w, h, winWidth, winHeight, tBg)
+
+  let cvr = t.viewport.bufferToViewport(s.absoluteCursorRow())
+  var visibleRowTexts = newSeq[string](rows)
+  for row in 0 ..< rows:
+    visibleRowTexts[row] = s.absoluteLineText(t.viewport.viewportToBuffer(row))
+  let composerHighlight = defaultComposerHighlightStyle()
+  let composerRect = codexComposerHighlightRect(
+    visibleRowTexts,
+    cursorViewportRow = cvr,
+    cellHeight = r.atlas.cellHeight,
+    viewport = PixelRect(x: x, y: y, w: w, h: h),
+    cursorVisible = s.cursor.visible and not s.cursor.pendingWrap,
+    style = composerHighlight,
+  )
+  if composerRect.isSome:
+    let rect = composerRect.get()
+    r.addRect(rect.x, rect.y, rect.w, rect.h, winWidth, winHeight, toRgba(composerHighlight.color))
 
   for row in 0 ..< rows:
     let absRow = t.viewport.viewportToBuffer(row)
@@ -369,7 +419,6 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
       if resolved.drawBackground:
         r.batcher.addTile(ndcX(x + col * r.atlas.cellWidth, winWidth), py, tw*float32(max(1, int(cell.width))), th, 0, 0, 1, 1, toRgba(resolved.background))
   # Cursor
-  let cvr = t.viewport.bufferToViewport(s.absoluteCursorRow())
   if showCursor and cvr != -1 and s.cursor.visible and not s.cursor.pendingWrap:
     let cursorX = x + s.cursor.col * r.atlas.cellWidth
     let cursorY = y + cvr * r.atlas.cellHeight
@@ -449,7 +498,7 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
         let color = toRgba(resolved.foreground)
         r.batcher.addTile(ndcX(x + col * r.atlas.cellWidth, winWidth), py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
   r.finishBatch()
-  glFlush()
+  r.gpu.flush()
   t.damage.clear()
 
 proc draw*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, topOffsetPx: int = 0) =

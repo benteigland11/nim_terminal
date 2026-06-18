@@ -34,7 +34,7 @@ type
   Color* = object
     case kind*: ColorKind
     of ckDefault: discard
-    of ckIndexed: index*: int
+    of ckIndexed: index*: uint8
     of ckRgb:     r*, g*, b*: uint8
 
   AttrFlag* = enum
@@ -159,7 +159,7 @@ func defaultTheme*(): TerminalTheme =
   )
 
 func defaultColor*(): Color = Color(kind: ckDefault)
-func indexedColor*(i: int): Color = Color(kind: ckIndexed, index: i)
+func indexedColor*(i: int): Color = Color(kind: ckIndexed, index: uint8(i))
 func rgbColor*(r, g, b: uint8): Color = Color(kind: ckRgb, r: r, g: g, b: b)
 
 func defaultAttrs*(): Attrs =
@@ -349,6 +349,19 @@ proc setSoftWrap(s: Screen, row: int, wrapped: bool) =
   if s.usingAlt: s.altRowSoftWrap[row] = wrapped
   else: s.rowSoftWrap[row] = wrapped
 
+
+proc sanitizeRow(s: Screen, row: int) =
+  if row < 0 or row >= s.rows or s.cols <= 0: return
+  let g = if s.usingAlt: addr s.altGrid else: addr s.grid
+  for c in 0 ..< s.cols:
+    let w = g[][row][c].width
+    if w == 0:
+      if c == 0 or g[][row][c-1].width != 2:
+        g[][row][c] = emptyCell(g[][row][c].attrs)
+    elif w == 2:
+      if c == s.cols - 1 or g[][row][c+1].width != 0:
+        g[][row][c] = emptyCell(g[][row][c].attrs)
+
 proc clearRow(s: Screen, row: int, startCol, endCol: int, attrs: Attrs) =
   if row < 0 or row >= s.rows or s.cols <= 0: return
   let first = max(0, startCol)
@@ -356,6 +369,7 @@ proc clearRow(s: Screen, row: int, startCol, endCol: int, attrs: Attrs) =
   if first > last: return
   for c in first .. last: s.setCell(row, c, emptyCell(attrs))
   if first == 0 and last == s.cols - 1: s.setSoftWrap(row, false)
+  s.sanitizeRow(row)
 
 proc clearGrid(grid: var seq[seq[Cell]], startRow, endRow: int, cols: int, attrs: Attrs) =
   for r in startRow .. endRow:
@@ -899,6 +913,7 @@ proc writeRune*(s: Screen, cp: uint32, width: int) =
     if smAutoWrap in s.modes: s.cursor.pendingWrap = true; s.cursor.col = s.cols - 1
     else: s.cursor.col = s.cols - 1
   else: s.cursor.col += width
+  s.sanitizeRow(s.cursor.row)
 
 func previousGraphicCell(s: Screen): Cell =
   let g = if s.usingAlt: s.altGrid else: s.grid

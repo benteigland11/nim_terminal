@@ -181,7 +181,10 @@ func encodeMouseInto(buf: var seq[byte], ev: MouseEvent, mode: MouseMode) =
     appendInt(buf, ev.col + 1)
     buf.add byte(';')
     appendInt(buf, ev.row + 1)
-    buf.add(if ev.kind == meRelease or ev.button == mbRelease: byte('m') else: byte('M'))
+    # Terminator marks press/motion (M) vs release (m). Key off the event
+    # KIND, not the button: a no-button motion report (button mbRelease ->
+    # code 35) is still motion, so it must use 'M', not 'm'.
+    buf.add(if ev.kind == meRelease: byte('m') else: byte('M'))
 
 # ---------------------------------------------------------------------------
 # Public API

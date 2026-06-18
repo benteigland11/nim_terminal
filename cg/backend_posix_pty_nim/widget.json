@@ -2,7 +2,7 @@
   "meta": {
     "id": "backend-posix-pty-nim",
     "name": "POSIX PTY Launch Environment",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "domain": "backend",
     "tags": [
       "posix",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 3,
-    "validated_at": "2026-04-26T17:29:46.908755+00:00",
+    "validated_at": "2026-05-01T03:36:09.148018+00:00",
     "runtime": "nim 2.2.10"
   }
 }

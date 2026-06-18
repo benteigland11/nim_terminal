@@ -17,6 +17,13 @@ suite "drag controller":
     c.update(5, 10, false)
     check c.state == dsIdle
 
+  test "motion with mouse released cancels active drag":
+    var c = newDragController(24)
+    c.update(5, 10, true)
+    check c.state == dsActive
+    c.update(6, 12, false)
+    check c.state == dsIdle
+
   test "auto-scroll signaling":
     var c = newDragController(24)
     c.update(10, 10, true)

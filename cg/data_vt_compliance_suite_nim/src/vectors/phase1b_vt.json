@@ -1,0 +1,55 @@
+[
+  {
+    "name": "REP: Default param",
+    "input": "a\u001b[b",
+    "expect": {
+      "lines": {
+        "0": "aa"
+      }
+    }
+  },
+  {
+    "name": "REP: Explicit param",
+    "input": "a\u001b[3b",
+    "expect": {
+      "lines": {
+        "0": "aaaa"
+      }
+    }
+  },
+  {
+    "name": "TAB: Default tab stops",
+    "input": "\u001b[1;1H\t",
+    "expect": {
+      "cursor": [0, 8]
+    }
+  },
+  {
+    "name": "HTS/TBC: Custom tab stops",
+    "input": "\u001b[3g\u001b[1;5H\u001bH\u001b[1;15H\u001bH\u001b[1;1H\t\t",
+    "expect": {
+      "cursor": [0, 14]
+    }
+  },
+  {
+    "name": "CHT: Forward tabulation",
+    "input": "\u001b[1;1H\u001b[2I",
+    "expect": {
+      "cursor": [0, 16]
+    }
+  },
+  {
+    "name": "CBT: Backward tabulation",
+    "input": "\u001b[1;20H\u001b[Z",
+    "expect": {
+      "cursor": [0, 16]
+    }
+  },
+  {
+    "name": "CBT: Backward tabulation explicit",
+    "input": "\u001b[1;20H\u001b[2Z",
+    "expect": {
+      "cursor": [0, 8]
+    }
+  }
+]

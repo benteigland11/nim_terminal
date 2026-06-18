@@ -27,3 +27,23 @@ proc processCwdLabel*(pid: int, procRoot = "/proc"): Option[string] =
   ## Resolve a process cwd and return its compact label.
   let path = processCwd(pid, procRoot)
   if path.isNone: none(string) else: some(cwdLabel(path.get()))
+
+proc processName*(pid: int, procRoot = "/proc"): Option[string] =
+  ## Resolve a process name from its command line or comm file.
+  if pid <= 0: return none(string)
+  try:
+    # Try comm file first (cleanest short name)
+    let commPath = procRoot / $pid / "comm"
+    if fileExists(commPath):
+      return some(readFile(commPath).strip())
+    
+    # Fallback to cmdline
+    let cmdPath = procRoot / $pid / "cmdline"
+    if fileExists(cmdPath):
+      let raw = readFile(cmdPath)
+      let first = raw.split('\0')[0]
+      let (_, name) = splitPath(first)
+      if name.len > 0: return some(name)
+  except CatchableError:
+    discard
+  none(string)

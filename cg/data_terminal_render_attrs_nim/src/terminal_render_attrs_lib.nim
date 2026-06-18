@@ -19,7 +19,7 @@ type
     of tckDefault:
       discard
     of tckIndexed:
-      index*: int
+      index*: uint8
     of tckRgb:
       r*, g*, b*: uint8
 
@@ -50,7 +50,7 @@ func defaultColor*(): TerminalColor =
   TerminalColor(kind: tckDefault)
 
 func indexedColor*(index: int): TerminalColor =
-  TerminalColor(kind: tckIndexed, index: index)
+  TerminalColor(kind: tckIndexed, index: uint8(index))
 
 func rgbColor*(r, g, b: uint8): TerminalColor =
   TerminalColor(kind: tckRgb, r: r, g: g, b: b)
@@ -80,10 +80,10 @@ func resolveColor*(color: TerminalColor, default: RenderColor, ansi: array[16, R
   of tckDefault:
     default
   of tckIndexed:
-    if color.index >= 0 and color.index < 16:
+    if color.index < 16:
       ansi[color.index]
     else:
-      xterm256Color(uint8(max(0, min(255, color.index))))
+      xterm256Color(color.index)
   of tckRgb:
     rgb(color.r, color.g, color.b)
 

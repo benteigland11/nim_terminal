@@ -2,7 +2,7 @@
 ##
 ## Tries common clipboard commands at runtime and returns structured results.
 
-import std/[options, os, osproc, streams, strutils]
+import std/[options, os, osproc, streams]
 
 type
   ClipboardBackend* = object
@@ -92,8 +92,15 @@ proc copyTextWith*(text: string; item: ClipboardBackend): ClipboardResult =
     )
     process.inputStream.write(text)
     process.inputStream.close()
-    let code = process.waitForExit()
-    if code == 0:
+    let code = process.peekExitCode()
+    if code == -1:
+      result = ClipboardResult(
+        status: csSuccess,
+        backend: item.name,
+        exitCode: -1,
+        message: "clipboard command accepted input and remains active",
+      )
+    elif code == 0:
       result = ClipboardResult(status: csSuccess, backend: item.name, exitCode: code)
     else:
       result = ClipboardResult(

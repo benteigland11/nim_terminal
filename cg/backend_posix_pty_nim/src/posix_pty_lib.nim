@@ -4,17 +4,18 @@
 ## This widget owns the pure launch contract around cwd, TERM/COLORTERM,
 ## TERM_PROGRAM, and optional child diagnostics.
 
-import std/os
+import std/[envvars, os]
 
 type
   PosixPtyLaunchEnv* = object
     term*: string
     colorTerm*: string
     termProgram*: string
+    clearNoColor*: bool
     childProbePath*: string
 
 func defaultPosixPtyLaunchEnv*(): PosixPtyLaunchEnv =
-  PosixPtyLaunchEnv(term: "xterm-256color", colorTerm: "truecolor")
+  PosixPtyLaunchEnv(term: "xterm-256color", colorTerm: "truecolor", clearNoColor: true)
 
 func inheritedOrDefaultColorTerm*(inherited, fallback: string): string =
   if inherited.len > 0:
@@ -22,10 +23,11 @@ func inheritedOrDefaultColorTerm*(inherited, fallback: string): string =
   else:
     fallback
 
-func childProbePayload*(cwd, term, colorTerm, tty: string): string =
+func childProbePayload*(cwd, term, colorTerm, tty: string, noColor = ""): string =
   "cwd=" & cwd & "\n" &
   "term=" & term & "\n" &
   "colorterm=" & colorTerm & "\n" &
+  "no_color=" & noColor & "\n" &
   "tty=" & tty & "\n"
 
 proc applyPosixPtyLaunchEnv*(env: PosixPtyLaunchEnv, cwd, tty: string) =
@@ -41,10 +43,12 @@ proc applyPosixPtyLaunchEnv*(env: PosixPtyLaunchEnv, cwd, tty: string) =
     putEnv("COLORTERM", env.colorTerm)
   if env.termProgram.len > 0:
     putEnv("TERM_PROGRAM", env.termProgram)
+  if env.clearNoColor:
+    delEnv("NO_COLOR")
   if env.childProbePath.len > 0:
     try:
       writeFile(env.childProbePath,
-        childProbePayload(getCurrentDir(), env.term, env.colorTerm, tty))
+        childProbePayload(getCurrentDir(), env.term, env.colorTerm, tty, getEnv("NO_COLOR", "")))
     except OSError:
       discard
 

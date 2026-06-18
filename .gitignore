@@ -18,6 +18,9 @@ src/test_*
 src/terminal
 !src/terminal.nim
 benchmarks/terminal_benchmarks
+experiments/uirelays_render_relay_spike
+experiments/sdl3_opengl_render_relay_spike
+nim_terminal_sdl3
 *.o
 .claude/reports/
 .claude/settings.local.json
