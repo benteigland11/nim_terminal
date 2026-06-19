@@ -47,3 +47,6 @@ JAX_Brain.md
 # transient memory test outputs (commit only curated SUMMARY.md when ready)
 tests/memory/reports/valgrind-*.log
 tests/memory/reports/overnight-*/
+
+# Backup files
+*.bak
