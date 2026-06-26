@@ -74,7 +74,7 @@ the running process instead of being intercepted by the app.
 | `Ctrl+Tab` | Switch to the next tab. |
 | `Ctrl+Shift+Tab` | Switch to the previous tab. |
 | `Ctrl+Shift+Enter` | Split the active tab into a new pane. |
-| `Ctrl+Shift+W` | Close the active pane. |
+| `Ctrl+Shift+W` | Close the active pane, or close the tab when only one pane remains and another tab is open. |
 | `Ctrl+Shift+C` | Copy selected text to the system clipboard. |
 | `Ctrl+Shift+V` | Paste clipboard text into the active terminal. |
 | `Ctrl++` / `Ctrl+=` | Increase terminal font size. |

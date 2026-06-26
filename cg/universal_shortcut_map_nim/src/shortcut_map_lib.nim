@@ -104,6 +104,7 @@ func addStandardTerminalShortcuts*(m: ShortcutMap) =
   ## Load standard terminal shortcuts like Copy/Paste and Zoom.
   m.bindAction(shortcutKey('C'), {modCtrl, modShift}, "copy")
   m.bindAction(shortcutKey('V'), {modCtrl, modShift}, "paste")
+  m.bindAction(shortcutKey('W'), {modCtrl}, "close-tab")
   for i in 1 .. 9:
     m.bindAction(shortcutKey(char(ord('0') + i)), {modAlt}, "tab-" & $i)
   m.bindAction(kEqual, {modCtrl}, "zoom-in")
@@ -111,3 +112,8 @@ func addStandardTerminalShortcuts*(m: ShortcutMap) =
   m.bindAction(kEqual, {modCtrl, modShift}, "zoom-in")
   m.bindAction(kPlus, {modCtrl, modShift}, "zoom-in")
   m.bindAction(kMinus, {modCtrl}, "zoom-out")
+
+func addAgentTerminalShortcuts*(m: ShortcutMap) =
+  ## Load standard shortcuts plus agent-oriented bindings.
+  m.addStandardTerminalShortcuts()
+  m.bindAction(shortcutKey('A'), {modCtrl, modShift}, "switch-surface")

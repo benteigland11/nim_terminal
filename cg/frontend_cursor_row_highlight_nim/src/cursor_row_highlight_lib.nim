@@ -80,6 +80,26 @@ func isCodexStatusRow(row: string): bool =
   (text.startsWith("gpt-") or text.startsWith("o") or text.startsWith("codex-")) and
     " · " in text
 
+func codexPromptBlockEnd(visibleRows: openArray[string], promptRow, maxRows: int): int =
+  result = min(visibleRows.len, promptRow + 1)
+  for row in promptRow + 1 ..< min(visibleRows.len, promptRow + max(1, maxRows) + 1):
+    if isCodexStatusRow(visibleRows[row]):
+      return row
+
+func promptHighlightRect(
+    promptRow, rowCount, cellHeight: int,
+    viewport: PixelRect,
+  ): Option[PixelRect] =
+  let rowY = viewport.y + promptRow * cellHeight
+  if rowY >= viewport.y + viewport.h:
+    return none(PixelRect)
+  some(PixelRect(
+    x: viewport.x,
+    y: rowY,
+    w: viewport.w,
+    h: min(rowCount * cellHeight, viewport.y + viewport.h - rowY),
+  ))
+
 func codexComposerHighlightRect*(
     visibleRows: openArray[string],
     cursorViewportRow, cellHeight: int,
@@ -104,19 +124,36 @@ func codexComposerHighlightRect*(
   if promptRow < 0 or not isCodexPromptRow(visibleRows[promptRow]):
     return none(PixelRect)
 
-  var endRow = min(visibleRows.len, promptRow + max(1, style.maxRows))
-  for row in promptRow + 1 ..< min(visibleRows.len, promptRow + max(1, style.maxRows) + 1):
-    if isCodexStatusRow(visibleRows[row]):
-      endRow = row
-      break
-
+  let endRow = codexPromptBlockEnd(visibleRows, promptRow, style.maxRows)
   let rowCount = max(style.minRows, endRow - promptRow)
-  let rowY = viewport.y + promptRow * cellHeight
-  if rowY >= viewport.y + viewport.h:
-    return none(PixelRect)
-  some(PixelRect(
-    x: viewport.x,
-    y: rowY,
-    w: viewport.w,
-    h: min(rowCount * cellHeight, viewport.y + viewport.h - rowY),
-  ))
+  promptHighlightRect(promptRow, rowCount, cellHeight, viewport)
+
+func codexPromptHighlightRects*(
+    visibleRows: openArray[string],
+    cellHeight: int,
+    viewport: PixelRect,
+    cursorVisible = true,
+    style = defaultComposerHighlightStyle(),
+  ): seq[PixelRect] =
+  ## Return highlight rectangles for every visible Codex prompt block.
+  ##
+  ## This is intentionally not cursor-relative: transcript prompts above the
+  ## active composer should keep the same visual treatment as the live prompt.
+  if not style.enabled:
+    return @[]
+  if style.onlyWhenCursorVisible and not cursorVisible:
+    return @[]
+  if cellHeight <= 0 or viewport.w <= 0 or viewport.h <= 0:
+    return @[]
+
+  var row = 0
+  while row < visibleRows.len:
+    if not isCodexPromptRow(visibleRows[row]):
+      inc row
+      continue
+    let endRow = codexPromptBlockEnd(visibleRows, row, style.maxRows)
+    let rowCount = max(style.minRows, endRow - row)
+    let rect = promptHighlightRect(row, rowCount, cellHeight, viewport)
+    if rect.isSome:
+      result.add rect.get()
+    row = max(row + 1, endRow)

@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "id": "sample-alpha-nim",
+    "name": "Sample Alpha",
+    "version": "1.0.0",
+    "domain": "data"
+  },
+  "description": "Alpha fixture module for catalog scanning.",
+  "tech_stack": { "language": "nim", "dependencies": [] }
+}

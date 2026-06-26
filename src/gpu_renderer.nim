@@ -4,12 +4,16 @@
 ## Uses `TileBatcher` for efficiency and `GlyphAtlas` for UV mapping.
 
 import pixie
-import std/options
+import std/[options, unicode]
 import ../cg/data_screen_buffer_nim/src/screen_buffer_lib
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
 import ../cg/universal_tile_batcher_nim/src/tile_batcher_lib
 import ../cg/frontend_gpu_relays_nim/src/gpu_relays_lib
 import ../cg/universal_tab_set_nim/src/tab_set_lib
+import ../cg/frontend_app_surface_relays_nim/src/app_surface_relays_lib
+import ../cg/frontend_workspace_chrome_nim/src/workspace_chrome_lib
+import ../cg/data_widget_catalog_nim/src/widget_catalog_lib as widget_catalog
+import cartograph_surface
 import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
 import ../cg/data_pixel_resource_size_nim/src/pixel_resource_size_lib
 import ../cg/data_terminal_render_attrs_nim/src/terminal_render_attrs_lib as render_attrs
@@ -143,6 +147,8 @@ proc preRenderAscii*(r: GpuTerminalRenderer) =
 
 proc preRenderChromeAscii*(r: GpuTerminalRenderer) =
   for i in 32..126: discard r.chromeAtlas.getGlyph(uint32(i))
+  discard r.chromeAtlas.getGlyph(0x25B2'u32)  ## ▲
+  discard r.chromeAtlas.getGlyph(0x25BC'u32)  ## ▼
   r.updateChromeAtlasTexture()
 
 proc newGpuTerminalRenderer*(atlas: GlyphAtlas, chromeAtlas: GlyphAtlas = nil, gpu = noopGpuRelays()): GpuTerminalRenderer =
@@ -218,9 +224,9 @@ proc addRect(r: GpuTerminalRenderer, x, y, w, h, winWidth, winHeight: int, color
 
 proc addChromeText(r: GpuTerminalRenderer, x, y, winWidth, winHeight: int, text: string, color: RgbaColor, maxChars: int = int.high) =
   var col = 0
-  for ch in text:
+  for rune in text.runes:
     if col >= maxChars: break
-    let glyph = r.chromeAtlas.getGlyph(uint32(ch))
+    let glyph = r.chromeAtlas.getGlyph(uint32(rune))
     r.batcher.addTile(
       ndcX(x + col * r.chromeAtlas.cellWidth, winWidth),
       ndcY(y, winHeight),
@@ -233,15 +239,21 @@ proc addChromeText(r: GpuTerminalRenderer, x, y, winWidth, winHeight: int, text:
 
 proc prepareChromeText(r: GpuTerminalRenderer, text: string, maxChars: int = int.high) =
   var col = 0
-  for ch in text:
+  for rune in text.runes:
     if col >= maxChars: break
-    discard r.chromeAtlas.getGlyph(uint32(ch))
+    discard r.chromeAtlas.getGlyph(uint32(rune))
     inc col
 
-proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titleBarHeight, tabBarHeight: int, title = "Waymark - Built with Nim") =
-  if winWidth <= 0 or winHeight <= 0 or titleBarHeight <= 0 or tabBarHeight <= 0: return
-
-  let headerHeight = titleBarHeight + tabBarHeight
+proc drawChrome*(
+    r: GpuTerminalRenderer,
+    tabs: TabSet,
+    winWidth, winHeight, titleBarHeight, tabBarHeight: int,
+    activeSurface: AppSurfaceId,
+    title = "Waymark - Built with Nim",
+) =
+  if winWidth <= 0 or winHeight <= 0 or titleBarHeight <= 0: return
+  let showTabs = activeSurface == asPrimary and tabBarHeight > 0
+  let headerHeight = if showTabs: titleBarHeight + tabBarHeight else: titleBarHeight
   let titleBg = tile_batcher_lib.rgba(0.11, 0.12, 0.13, 1.0)
   let bg = tile_batcher_lib.rgba(0.07, 0.08, 0.09, 1.0)
   let border = tile_batcher_lib.rgba(0.24, 0.28, 0.32, 1.0)
@@ -256,8 +268,36 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
   r.batcher.beginBatch()
   r.addRect(0, 0, winWidth, titleBarHeight, winWidth, winHeight, titleBg)
   r.addRect(0, titleBarHeight - 1, winWidth, 1, winWidth, winHeight, nimYellow)
-  r.addRect(0, titleBarHeight, winWidth, tabBarHeight, winWidth, winHeight, bg)
+  if showTabs:
+    r.addRect(0, titleBarHeight, winWidth, tabBarHeight, winWidth, winHeight, bg)
   r.addRect(0, headerHeight - 1, winWidth, 1, winWidth, winHeight, border)
+
+  let toggle = surfaceToggleRect(winWidth, titleBarHeight)
+  let toggleActive = activeSurface == asWorkspace
+  let toggleBg = if toggleActive: activeBg else: inactiveBg
+  r.addRect(toggle.x, toggle.y, toggle.width, toggle.height, winWidth, winHeight, toggleBg)
+
+  if not showTabs:
+    r.finishBatch()
+    r.batcher.textureId = r.chromeTexId
+    r.batcher.beginBatch()
+    let titleTextY = max(1, (titleBarHeight - r.chromeAtlas.cellHeight) div 2)
+    let titleTextX = 8
+    let titleCols = max(0, (toggle.x - titleTextX - 12) div max(1, r.chromeAtlas.cellWidth))
+    r.prepareChromeText(title, titleCols)
+    r.prepareChromeText("Terminal")
+    r.prepareChromeText("Cartograph")
+    if r.chromeAtlas.isDirty:
+      r.updateChromeAtlasTexture()
+    r.addChromeText(titleTextX, titleTextY, winWidth, winHeight, title, text, titleCols)
+    let toggleText = if toggleActive: "Cartograph" else: "Terminal"
+    let toggleTextX = toggle.x + max(8, (toggle.width - toggleText.len * r.chromeAtlas.cellWidth) div 2)
+    let toggleTextY = toggle.y + max(1, (toggle.height - r.chromeAtlas.cellHeight) div 2)
+    r.addChromeText(toggleTextX, toggleTextY, winWidth, winHeight, toggleText, if toggleActive: text else: muted, 16)
+    r.finishBatch()
+    return
+
+  if tabBarHeight <= 0: return
 
   let plusWidth = max(32, tabBarHeight)
   let tabCount = max(1, tabs.tabs.len)
@@ -327,6 +367,239 @@ proc drawChrome*(r: GpuTerminalRenderer, tabs: TabSet, winWidth, winHeight, titl
 
   let plusX = tabAreaWidth + max(0, (plusWidth - r.chromeAtlas.cellWidth) div 2)
   r.addChromeText(plusX, textY, winWidth, winHeight, "+", text, 1)
+  let toggleText = if toggleActive: "Cartograph" else: "Terminal"
+  let toggleTextX = toggle.x + max(8, (toggle.width - toggleText.len * r.chromeAtlas.cellWidth) div 2)
+  let toggleTextY = toggle.y + max(1, (toggle.height - r.chromeAtlas.cellHeight) div 2)
+  r.prepareChromeText(toggleText)
+  r.addChromeText(toggleTextX, toggleTextY, winWidth, winHeight, toggleText, if toggleActive: text else: muted, 16)
+  r.finishBatch()
+
+proc catalogListSubtitle(entry: widget_catalog.CatalogEntry): string =
+  if entry.language.len > 0 and entry.domain.len > 0:
+    entry.language & " - " & entry.domain
+  elif entry.language.len > 0:
+    entry.language
+  elif entry.domain.len > 0:
+    entry.domain
+  else:
+    entry.id
+
+proc drawCartographShell*(
+    r: GpuTerminalRenderer,
+    winWidth, winHeight: int,
+    regions: ThreeColumnRegions,
+    catalog: widget_catalog.WidgetCatalog,
+    selectedIndex: int,
+    catalogScrollRow: int,
+    actionBarHeight: int,
+) =
+  if r == nil or winWidth <= 0 or winHeight <= 0:
+    return
+  let panelBg = tile_batcher_lib.rgba(0.10, 0.12, 0.16, 1.0)
+  let railBg = tile_batcher_lib.rgba(0.08, 0.09, 0.11, 1.0)
+  let accent = tile_batcher_lib.rgba(0.95, 0.76, 0.23, 1.0)
+  let textColor = tile_batcher_lib.rgba(0.88, 0.91, 0.92, 1.0)
+  let muted = tile_batcher_lib.rgba(0.58, 0.63, 0.67, 1.0)
+  let border = tile_batcher_lib.rgba(0.24, 0.28, 0.32, 1.0)
+  let selectedBg = tile_batcher_lib.rgba(0.16, 0.18, 0.22, 1.0)
+  let scrollArrowBg = tile_batcher_lib.rgba(0.12, 0.14, 0.18, 1.0)
+  let pad = 10
+  let cellHeight = r.chromeAtlas.cellHeight
+  let layout = computeCatalogListLayout(
+    regions.catalog.x,
+    regions.catalog.y,
+    regions.catalog.w,
+    regions.catalog.h,
+    cellHeight,
+    r.chromeAtlas.cellWidth,
+    pad,
+    catalogScrollRow,
+    catalog.entries.len,
+  )
+  let titleY = layout.titleY
+  let catalogListY = layout.listY
+  let stride = layout.stride
+  let maxCatalogRows = layout.visibleRows
+  let scrollRow = max(0, min(catalogScrollRow, max(0, catalog.entries.len - maxCatalogRows)))
+  let visibleCount = min(catalog.entries.len - scrollRow, maxCatalogRows)
+
+  ## Phase 1: every solid-color rect in one batch (backgrounds, selection, buttons).
+  r.batcher.textureId = r.bgTexId
+  r.batcher.beginBatch()
+  if regions.catalog.w > 0:
+    r.addRect(regions.catalog.x, regions.catalog.y, regions.catalog.w, regions.catalog.h, winWidth, winHeight, railBg)
+    r.addRect(regions.catalog.x, regions.catalog.y, 1, regions.catalog.h, winWidth, winHeight, border)
+    r.addRect(regions.catalog.x, regions.catalog.y + regions.catalog.h - 1, regions.catalog.w, 1, winWidth, winHeight, border)
+  if regions.inspector.w > 0:
+    r.addRect(regions.inspector.x, regions.inspector.y, regions.inspector.w, regions.inspector.h, winWidth, winHeight, railBg)
+  let centerPanel = contentAboveActionBar(regions.center, actionBarHeight)
+  if centerPanel.w > 0 and centerPanel.h > 0:
+    let centerBg = tile_batcher_lib.rgba(0.05, 0.06, 0.08, 1.0)
+    r.addRect(centerPanel.x, centerPanel.y, centerPanel.w, centerPanel.h, winWidth, winHeight, centerBg)
+    r.addRect(centerPanel.x, centerPanel.y, 1, centerPanel.h, winWidth, winHeight, border)
+    r.addRect(centerPanel.x + centerPanel.w - 1, centerPanel.y, 1, centerPanel.h, winWidth, winHeight, border)
+  if actionBarHeight > 0:
+    let fullBar = WorkspaceRect(
+      x: regions.center.x,
+      y: regions.center.y + regions.center.h - actionBarHeight,
+      w: regions.center.w,
+      h: actionBarHeight,
+    )
+    r.addRect(fullBar.x, fullBar.y, fullBar.w, fullBar.h, winWidth, winHeight, panelBg)
+    r.addRect(fullBar.x, fullBar.y, fullBar.w, 1, winWidth, winHeight, border)
+  if regions.catalog.w > 0 and catalog.entries.len > 0:
+    var rowY = catalogListY
+    for local in 0 ..< visibleCount:
+      let entryIndex = scrollRow + local
+      if entryIndex == selectedIndex:
+        r.addRect(layout.contentX, rowY - 2, layout.contentW, catalogRowHeight(cellHeight) + 4, winWidth, winHeight, selectedBg)
+      rowY += stride
+  if layout.showScrollUp:
+    r.addRect(layout.scrollUp.x, layout.scrollUp.y, layout.scrollUp.w, layout.scrollUp.h, winWidth, winHeight, scrollArrowBg)
+  if layout.showScrollDown:
+    r.addRect(layout.scrollDown.x, layout.scrollDown.y, layout.scrollDown.w, layout.scrollDown.h, winWidth, winHeight, scrollArrowBg)
+  var inspectorBtnY = 0
+  if regions.inspector.w > 0 and selectedIndex >= 0 and selectedIndex < catalog.entries.len:
+    let insX = regions.inspector.x + pad
+    inspectorBtnY = regions.inspector.y + regions.inspector.h - actionBarHeight - 40
+    r.addRect(insX, inspectorBtnY, 80, 24, winWidth, winHeight, selectedBg)
+    r.addRect(insX + 88, inspectorBtnY, 80, 24, winWidth, winHeight, selectedBg)
+  r.finishBatch()
+
+  ## Phase 2: prepare glyphs, then draw all chrome text in one batch.
+  r.gpu.enableAlphaBlending()
+  r.prepareChromeText("Installed")
+  r.prepareChromeText("Inspector")
+  r.prepareChromeText("Validate")
+  r.prepareChromeText("Checkin")
+  r.prepareChromeText("Search registry...")
+  r.prepareChromeText("No widgets found in cg/")
+  if layout.showScrollUp:
+    r.prepareChromeText("▲")
+  if layout.showScrollDown:
+    r.prepareChromeText("▼")
+  for local in 0 ..< visibleCount:
+    let entry = catalog.entries[scrollRow + local]
+    let label = if entry.name.len > 0: entry.name else: entry.id
+    r.prepareChromeText(label, layout.textCols)
+    r.prepareChromeText(catalogListSubtitle(entry), layout.textCols)
+  if selectedIndex >= 0 and selectedIndex < catalog.entries.len:
+    let entry = catalog.entries[selectedIndex]
+    r.prepareChromeText(entry.description)
+    r.prepareChromeText("v" & entry.version)
+    r.prepareChromeText(if entry.validated: "validated" else: "not validated")
+    r.prepareChromeText(if entry.name.len > 0: entry.name else: entry.id)
+    r.prepareChromeText(entry.domain)
+  if r.chromeAtlas.isDirty:
+    r.updateChromeAtlasTexture()
+
+  r.batcher.textureId = r.chromeTexId
+  r.batcher.beginBatch()
+  let labelCols = if layout.textCols > 0: layout.textCols else: 1
+  if regions.catalog.w > 0:
+    r.addChromeText(regions.catalog.x + pad, titleY, winWidth, winHeight, "Installed", textColor, labelCols)
+    var rowY = catalogListY
+    if catalog.entries.len == 0:
+      r.addChromeText(regions.catalog.x + pad, rowY, winWidth, winHeight, "No widgets found in cg/", muted, labelCols)
+    else:
+      for local in 0 ..< visibleCount:
+        let entryIndex = scrollRow + local
+        let entry = catalog.entries[entryIndex]
+        let selected = entryIndex == selectedIndex
+        let label = if entry.name.len > 0: entry.name else: entry.id
+        r.addChromeText(layout.contentX, rowY, winWidth, winHeight, label, if selected: textColor else: muted, labelCols)
+        r.addChromeText(
+          layout.contentX,
+          rowY + r.chromeAtlas.cellHeight + 2,
+          winWidth,
+          winHeight,
+          catalogListSubtitle(entry),
+          muted,
+          labelCols,
+        )
+        rowY += stride
+      if layout.showScrollUp:
+        let upX = layout.scrollUp.x + (layout.scrollUp.w - r.chromeAtlas.cellWidth) div 2
+        let upY = layout.scrollUp.y + max(1, (layout.scrollUp.h - r.chromeAtlas.cellHeight) div 2)
+        r.addChromeText(upX, upY, winWidth, winHeight, "▲", accent, 1)
+      if layout.showScrollDown:
+        let downX = layout.scrollDown.x + (layout.scrollDown.w - r.chromeAtlas.cellWidth) div 2
+        let downY = layout.scrollDown.y + max(1, layout.scrollDown.h - r.chromeAtlas.cellHeight - 1)
+        r.addChromeText(downX, downY, winWidth, winHeight, "▼", accent, 1)
+
+  if regions.inspector.w > 0:
+    let insX = regions.inspector.x + pad
+    r.addChromeText(insX, regions.inspector.y + pad, winWidth, winHeight, "Inspector", textColor, 24)
+    if selectedIndex >= 0 and selectedIndex < catalog.entries.len:
+      let entry = catalog.entries[selectedIndex]
+      var lineY = regions.inspector.y + pad + r.chromeAtlas.cellHeight + 10
+      let cols = max(1, (regions.inspector.w - pad * 2) div max(1, r.chromeAtlas.cellWidth))
+      r.addChromeText(insX, lineY, winWidth, winHeight, entry.id, accent, cols)
+      lineY += r.chromeAtlas.cellHeight + 6
+      r.addChromeText(insX, lineY, winWidth, winHeight, entry.domain & "  v" & entry.version, muted, cols)
+      lineY += r.chromeAtlas.cellHeight + 8
+      r.addChromeText(insX, lineY, winWidth, winHeight, if entry.validated: "validated" else: "not validated", muted, cols)
+      lineY += r.chromeAtlas.cellHeight + 10
+      r.addChromeText(insX, lineY, winWidth, winHeight, entry.description, textColor, cols)
+      if inspectorBtnY > 0:
+        r.addChromeText(insX + 12, inspectorBtnY + 5, winWidth, winHeight, "Validate", textColor, 10)
+        r.addChromeText(insX + 100, inspectorBtnY + 5, winWidth, winHeight, "Checkin", textColor, 10)
+
+  if actionBarHeight > 0:
+    let barY = regions.center.y + regions.center.h - actionBarHeight + 8
+    r.addChromeText(regions.center.x + pad, barY, winWidth, winHeight, "Search registry...", muted, 48)
+
+  r.finishBatch()
+
+proc drawWorkspacePlaceholder*(
+    r: GpuTerminalRenderer,
+    winWidth, winHeight, headerHeight: int,
+) =
+  if winWidth <= 0 or winHeight <= 0:
+    return
+  let panelBg = tile_batcher_lib.rgba(0.10, 0.12, 0.16, 1.0)
+  let accent = tile_batcher_lib.rgba(0.95, 0.76, 0.23, 1.0)
+  let text = tile_batcher_lib.rgba(0.88, 0.91, 0.92, 1.0)
+  let muted = tile_batcher_lib.rgba(0.58, 0.63, 0.67, 1.0)
+  let pad = 24
+  let top = headerHeight + pad
+  let panelW = max(120, winWidth - pad * 2)
+  let panelH = max(80, winHeight - top - pad)
+
+  r.batcher.textureId = r.bgTexId
+  r.batcher.beginBatch()
+  r.addRect(pad, top, panelW, panelH, winWidth, winHeight, panelBg)
+  r.addRect(pad, top, panelW, 3, winWidth, winHeight, accent)
+  r.finishBatch()
+
+  r.gpu.enableAlphaBlending()
+  r.batcher.textureId = r.chromeTexId
+  r.batcher.beginBatch()
+  let lineY = top + 20
+  r.prepareChromeText("Cartograph Workspace")
+  r.prepareChromeText("Terminal panes embed in center column.")
+  r.prepareChromeText("Ctrl+Shift+A or header toggle -> Terminal")
+  if r.chromeAtlas.isDirty:
+    r.updateChromeAtlasTexture()
+  r.addChromeText(pad + 16, lineY, winWidth, winHeight, "Cartograph Workspace", text, 32)
+  r.addChromeText(
+    pad + 16,
+    lineY + r.chromeAtlas.cellHeight + 8,
+    winWidth,
+    winHeight,
+    "Waymark engine. Terminal panes embed in center column.",
+    muted,
+    48,
+  )
+  r.addChromeText(
+    pad + 16,
+    lineY + (r.chromeAtlas.cellHeight + 8) * 2,
+    winWidth,
+    winHeight,
+    "Ctrl+Shift+A or header toggle -> Terminal",
+    muted,
+    56,
+  )
   r.finishBatch()
 
 proc drawPaneBorder*(r: GpuTerminalRenderer, x, y, w, h, winWidth, winHeight: int, active: bool) =
@@ -396,16 +669,14 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
   for row in 0 ..< rows:
     visibleRowTexts[row] = s.absoluteLineText(t.viewport.viewportToBuffer(row))
   let composerHighlight = defaultComposerHighlightStyle()
-  let composerRect = codexComposerHighlightRect(
+  let composerRects = codexPromptHighlightRects(
     visibleRowTexts,
-    cursorViewportRow = cvr,
     cellHeight = r.atlas.cellHeight,
     viewport = PixelRect(x: x, y: y, w: w, h: h),
     cursorVisible = s.cursor.visible and not s.cursor.pendingWrap,
     style = composerHighlight,
   )
-  if composerRect.isSome:
-    let rect = composerRect.get()
+  for rect in composerRects:
     r.addRect(rect.x, rect.y, rect.w, rect.h, winWidth, winHeight, toRgba(composerHighlight.color))
 
   for row in 0 ..< rows:

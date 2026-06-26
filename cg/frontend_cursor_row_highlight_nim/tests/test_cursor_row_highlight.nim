@@ -58,3 +58,31 @@ suite "cursor row highlight policy":
       "shell output",
     ]
     check codexComposerHighlightRect(rows, 0, 18, PixelRect(x: 0, y: 0, w: 400, h: 80)).isNone
+
+  test "codex prompt highlights include transcript prompts":
+    let rows = [
+      "› earlier request",
+      "",
+      "• earlier answer",
+      "",
+      "› current request",
+      "",
+      "  gpt-5.5 medium · ~/project",
+    ]
+    let rects = codexPromptHighlightRects(rows, 20, PixelRect(x: 2, y: 4, w: 500, h: 180))
+    check rects.len == 2
+    check rects[0] == PixelRect(x: 2, y: 4, w: 500, h: 20)
+    check rects[1] == PixelRect(x: 2, y: 84, w: 500, h: 40)
+
+  test "codex prompt highlights respect hidden cursor policy":
+    let rows = [
+      "› earlier request",
+      "",
+      "  gpt-5.5 medium · ~/project",
+    ]
+    check codexPromptHighlightRects(
+      rows,
+      20,
+      PixelRect(x: 0, y: 0, w: 500, h: 100),
+      cursorVisible = false,
+    ).len == 0

@@ -34,6 +34,10 @@ import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
 from ../cg/universal_clipboard_provider_nim/src/clipboard_provider_lib as clipboard_provider_lib import nil
 from ../cg/backend_system_clipboard_nim/src/system_clipboard_lib as system_clipboard_lib import nil
 import ../cg/data_terminal_scroll_policy_nim/src/terminal_scroll_policy_lib
+import ../cg/data_terminal_profile_nim/src/terminal_profile_lib
+import ../cg/frontend_app_surface_relays_nim/src/app_surface_relays_lib
+import ../cg/frontend_workspace_chrome_nim/src/workspace_chrome_lib
+import cartograph_surface
 
 const
   DefaultWindowTitle = "Waymark - Built with Nim"
@@ -55,6 +59,11 @@ const
   MaxGlyphAtlasSize = 4096
   ZoomContextRowsAbove = 2
   PaneBorderPx = 1
+  CartographSidebarWidth = 300
+  CartographCatalogHeightMax = 360
+  CartographActionBarHeight = 36
+  CartographRailPad = 10
+  DefaultCatalogPollSec = 1.0
   PanePadXPx = 8
   PanePadYPx = 4
   DefaultFallbackFontPaths = [
@@ -101,8 +110,17 @@ type
     altWheelPolicy: AltWheelPolicy
     normalWheelPolicy: NormalWheelPolicy
     meaningfulHistoryRows: int
+    profileMode: ProfileMode
+    shortcutPreset: ShortcutPreset
+    chrome: set[ChromeFeature]
 
 var
+  appProfile: TerminalProfileState
+  surfaceStack: AppSurfaceStack = newAppSurfaceStack()
+  cartographWorkspace: CartographWorkspace
+  catalogRootPath = DefaultCatalogRoot
+  lastCatalogScanCwd = ""
+  lastCatalogPollTime = 0.0
   config = TerminalConfig(
     title: DefaultWindowTitle,
     shellProgram: when defined(windows): "cmd.exe" else: getEnv("SHELL", "/bin/sh"),
@@ -121,7 +139,10 @@ var
     altScreenScrollback: assPassive,
     altWheelPolicy: awpTerminal,
     normalWheelPolicy: nwpTerminal,
-    meaningfulHistoryRows: 3,
+    meaningfulHistoryRows: DefaultMeaningfulHistoryRows,
+    profileMode: pmStandard,
+    shortcutPreset: spStandard,
+    chrome: {},
   )
   tabs = newTabSet()
   workspaces: seq[TerminalWorkspace] = @[]
@@ -189,57 +210,122 @@ proc parseIntOr(value: string, fallback: int): int =
   except ValueError:
     result = fallback
 
+proc applyProfileSnapshot(cfg: var TerminalConfig; snap: TerminalProfileSnapshot) =
+  cfg.profileMode = snap.mode
+  cfg.maxPanes = snap.maxPanes
+  cfg.diagnosticsCapacity = snap.diagnosticsCapacity
+  cfg.meaningfulHistoryRows = snap.meaningfulHistoryRows
+  cfg.shortcutPreset = snap.shortcutPreset
+  cfg.chrome = snap.chrome
+  cfg.altScreenScrollback = parseAltScreenScrollbackMode(
+    snap.altScreenScrollback,
+    cfg.altScreenScrollback,
+  )
+  cfg.altWheelPolicy = parseAltWheelPolicy(snap.altWheelPolicy, cfg.altWheelPolicy)
+  cfg.normalWheelPolicy = parseNormalWheelPolicy(snap.normalWheelPolicy, cfg.normalWheelPolicy)
+  cfg.scrollback = snap.scrollback
+
+proc reapplyActiveProfile() =
+  applyProfileSnapshot(config, snapshot(appProfile))
+
+proc refreshSessionShortcutMaps() =
+  let preset = config.shortcutPreset
+  for workspace in workspaces:
+    for session in workspace.sessions:
+      session.terminal.shortcuts = newShortcutMap()
+      populateShortcutMap(session.terminal.shortcuts, preset)
+
 proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
   result = config
-  if not fileExists(path):
-    return
-  try:
-    let dict = loadConfig(path)
-    result.title = dict.getSectionValue("app", "title", result.title)
-    result.logoPath = resolveCandidatePath(dict.getSectionValue("app", "logo", result.logoPath), getCurrentDir())
+  var dict: Config
+  var hasFile = fileExists(path)
+  if hasFile:
+    try:
+      dict = loadConfig(path)
+    except CatchableError as e:
+      echo "Config warning: ", e.msg
+      hasFile = false
 
-    let shell = dict.getSectionValue("shell", "program", result.shellProgram).strip()
-    if shell.len > 0:
-      result.shellProgram = shell
-    let startDirectory = dict.getSectionValue("shell", "start_directory", result.startDirectory).strip()
-    if startDirectory.len > 0:
-      result.startDirectory = startDirectory
+  proc lookup(section, key: string): string =
+    if hasFile:
+      dict.getSectionValue(section, key)
+    else:
+      ""
 
-    result.fontSize = max(4.0, parseFloatOr(dict.getSectionValue("font", "size", $result.fontSize), result.fontSize))
-    let fontCandidate = dict.getSectionValue("font", "primary", result.fontPath)
-    result.fontPath = firstExistingPath([fontCandidate, result.fontPath], getCurrentDir()).get(result.fontPath)
+  if hasFile:
+    try:
+      result.title = dict.getSectionValue("app", "title", result.title)
+      result.logoPath = resolveCandidatePath(dict.getSectionValue("app", "logo", result.logoPath), getCurrentDir())
 
-    let configuredFallbacks = splitList(dict.getSectionValue("font", "fallbacks", ""))
-    if configuredFallbacks.len > 0:
-      result.fallbackFontPaths = configuredFallbacks
+      let shell = dict.getSectionValue("shell", "program", result.shellProgram).strip()
+      if shell.len > 0:
+        result.shellProgram = shell
+      let startDirectory = dict.getSectionValue("shell", "start_directory", result.startDirectory).strip()
+      if startDirectory.len > 0:
+        result.startDirectory = startDirectory
 
-    result.titleBarHeight = max(24, parseIntOr(dict.getSectionValue("chrome", "title_bar_height", $result.titleBarHeight), result.titleBarHeight))
-    result.tabBarHeight = max(22, parseIntOr(dict.getSectionValue("chrome", "tab_bar_height", $result.tabBarHeight), result.tabBarHeight))
-    result.backgroundColor = dict.getSectionValue("theme", "background", result.backgroundColor)
-    let requestedScrollback = max(100, parseIntOr(dict.getSectionValue("terminal", "scrollback", $result.scrollback), result.scrollback))
-    result.scrollback = int(recommendedCap(resourceLimit("scrollback", DefaultScrollback, MaxScrollback), requestedScrollback.int64))
-    result.maxPanes = max(1, parseIntOr(dict.getSectionValue("terminal", "max_panes", $result.maxPanes), result.maxPanes))
-    result.diagnosticsCapacity = max(0, parseIntOr(dict.getSectionValue("diagnostics", "capacity", $result.diagnosticsCapacity), result.diagnosticsCapacity))
-    let requestedAtlas = max(256, parseIntOr(dict.getSectionValue("resources", "glyph_atlas_size", $result.glyphAtlasSize), result.glyphAtlasSize))
-    result.glyphAtlasSize = int(recommendedCap(resourceLimit("glyph_atlas", DefaultGlyphAtlasSize, MaxGlyphAtlasSize), requestedAtlas.int64))
-    result.altScreenScrollback = parseAltScreenScrollbackMode(
-      dict.getSectionValue("scroll", "alternate_screen_scrollback", "passive").strip().toLowerAscii(),
-      result.altScreenScrollback,
-    )
-    result.altWheelPolicy = parseAltWheelPolicy(
-      dict.getSectionValue("scroll", "wheel_in_alt_screen", "terminal").strip().toLowerAscii(),
-      result.altWheelPolicy,
-    )
-    result.normalWheelPolicy = parseNormalWheelPolicy(
-      dict.getSectionValue("scroll", "wheel_in_normal_screen", "terminal").strip().toLowerAscii(),
-      result.normalWheelPolicy,
-    )
-    result.meaningfulHistoryRows = max(1, parseIntOr(
-      dict.getSectionValue("scroll", "meaningful_history_rows", $result.meaningfulHistoryRows),
-      result.meaningfulHistoryRows,
-    ))
-  except CatchableError as e:
-    echo "Config warning: ", e.msg
+      result.fontSize = max(4.0, parseFloatOr(dict.getSectionValue("font", "size", $result.fontSize), result.fontSize))
+      let fontCandidate = dict.getSectionValue("font", "primary", result.fontPath)
+      result.fontPath = firstExistingPath([fontCandidate, result.fontPath], getCurrentDir()).get(result.fontPath)
+
+      let configuredFallbacks = splitList(dict.getSectionValue("font", "fallbacks", ""))
+      if configuredFallbacks.len > 0:
+        result.fallbackFontPaths = configuredFallbacks
+
+      result.titleBarHeight = max(24, parseIntOr(dict.getSectionValue("chrome", "title_bar_height", $result.titleBarHeight), result.titleBarHeight))
+      result.tabBarHeight = max(22, parseIntOr(dict.getSectionValue("chrome", "tab_bar_height", $result.tabBarHeight), result.tabBarHeight))
+      result.backgroundColor = dict.getSectionValue("theme", "background", result.backgroundColor)
+      let requestedAtlas = max(256, parseIntOr(dict.getSectionValue("resources", "glyph_atlas_size", $result.glyphAtlasSize), result.glyphAtlasSize))
+      result.glyphAtlasSize = int(recommendedCap(resourceLimit("glyph_atlas", DefaultGlyphAtlasSize, MaxGlyphAtlasSize), requestedAtlas.int64))
+    except CatchableError as e:
+      echo "Config warning: ", e.msg
+
+  appProfile = resolveTerminalProfile(lookup, getEnv("WAYMARK_MODE", ""))
+  applyProfileSnapshot(result, snapshot(appProfile))
+  result.scrollback = int(recommendedCap(
+    resourceLimit("scrollback", DefaultScrollback, MaxScrollback),
+    result.scrollback.int64,
+  ))
+
+proc configFileBaseDir(): string =
+  if fileExists(ConfigPath):
+    splitFile(absolutePath(ConfigPath)).dir
+  else:
+    getCurrentDir()
+
+proc catalogPollIntervalSec(): float =
+  block:
+    let raw = getEnv("WAYMARK_CATALOG_POLL_SEC", $DefaultCatalogPollSec)
+    try:
+      max(0.5, parseFloat(raw))
+    except CatchableError:
+      DefaultCatalogPollSec
+
+proc resolveCatalogRoot(primaryCwd: string = ""): string =
+  let envRoot = getEnv("WAYMARK_CATALOG_ROOT", "").strip()
+  if envRoot.len > 0:
+    let resolved = absolutePath(resolveCandidatePath(envRoot, getCurrentDir()))
+    if dirExists(resolved):
+      return resolved
+  var bases: seq[string] = @[]
+  if primaryCwd.len > 0:
+    let expanded = absolutePath(expandTilde(primaryCwd.strip()))
+    if expanded.len > 0:
+      bases.add expanded
+  let launchDir = getCurrentDir()
+  if launchDir.len > 0 and launchDir notin bases:
+    bases.add launchDir
+  let cfgBase = configFileBaseDir()
+  if cfgBase.len > 0 and cfgBase notin bases:
+    bases.add cfgBase
+  for base in bases:
+    let candidate = resolveCandidatePath(DefaultCatalogRoot, base)
+    if dirExists(candidate):
+      return absolutePath(candidate)
+  if bases.len > 0:
+    absolutePath(resolveCandidatePath(DefaultCatalogRoot, bases[0]))
+  else:
+    absolutePath(DefaultCatalogRoot)
 
 func toChildWheelEncoding(kind: ScrollInputKind): ChildWheelEncoding =
   case kind
@@ -278,6 +364,20 @@ proc activeTerm(): Terminal =
   if workspace == nil: return nil
   let idx = workspace[].activeSessionIndex()
   if idx < 0: nil else: workspace[].sessions[idx].terminal
+
+proc pollActiveShellCwd(): string =
+  let workspace = activeWorkspace()
+  if workspace == nil:
+    return ""
+  let idx = workspace[].activeSessionIndex()
+  if idx < 0:
+    return ""
+  when not defined(windows):
+    let live = processCwd(workspace[].sessions[idx].terminal.host.pid)
+    if live.isSome:
+      workspace[].sessions[idx].cwd = live.get()
+      return live.get()
+  workspace[].sessions[idx].cwd
 
 proc activeWorkspaceSyncUpdateActive(): bool =
   let workspace = activeWorkspace()
@@ -338,7 +438,10 @@ proc refreshWorkspaceTabLabel(wi: int): bool =
   else:
     result = false
 
-proc contentHeight(): int = max(1, winHeight - headerHeight)
+proc chromeHeaderHeight(): int =
+  workspaceHeaderHeight(titleBarHeight, tabBarHeight, surfaceStack.active)
+
+proc contentHeight(): int = max(1, winHeight - chromeHeaderHeight())
 
 proc paneInnerRect(area: PaneRect): PaneRect =
   let insetX = min(area.w div 3, PaneBorderPx + PanePadXPx)
@@ -353,8 +456,130 @@ proc paneRows(area: PaneRect): int =
   if rend == nil or rend.atlas == nil or rend.atlas.cellHeight <= 0: return 1
   max(1, paneInnerRect(area).h div rend.atlas.cellHeight)
 
-proc contentRect(): PaneRect =
-  pane_tree.rect(0, headerHeight, winWidth, contentHeight())
+proc fullContentRect(): pane_tree.Rect =
+  pane_tree.rect(0, chromeHeaderHeight(), winWidth, contentHeight())
+
+proc cartographRegions(): ThreeColumnRegions =
+  let full = fullContentRect()
+  let bounds = WorkspaceRect(x: full.x, y: full.y, w: full.w, h: full.h)
+  let catalogH = min(CartographCatalogHeightMax, max(160, bounds.h * 42 div 100))
+  stackedSidebarRegions(
+    bounds,
+    sidebarWidth = CartographSidebarWidth,
+    catalogHeight = catalogH,
+    minCenterWidth = 320,
+  )
+
+proc contentRect(): pane_tree.Rect =
+  if surfaceStack.active != asWorkspace:
+    fullContentRect()
+  else:
+    let center = contentAboveActionBar(cartographRegions().center, CartographActionBarHeight)
+    pane_tree.rect(center.x, center.y, center.w, center.h)
+
+proc catalogListLayout(): CatalogListLayout =
+  let regions = cartographRegions()
+  if regions.catalog.w <= 0 or rend == nil or rend.chromeAtlas == nil:
+    return CatalogListLayout()
+  computeCatalogListLayout(
+    regions.catalog.x,
+    regions.catalog.y,
+    regions.catalog.w,
+    regions.catalog.h,
+    rend.chromeAtlas.cellHeight,
+    rend.chromeAtlas.cellWidth,
+    CartographRailPad,
+    cartographWorkspace.catalogScrollRow,
+    cartographWorkspace.catalog.entries.len,
+  )
+
+proc pointInCatalogList(x, y: int): bool =
+  let regions = cartographRegions()
+  if regions.catalog.w <= 0:
+    return false
+  let layout = catalogListLayout()
+  if layout.visibleRows <= 0:
+    return false
+  x >= layout.contentX and x < layout.contentX + layout.contentW and
+    y >= layout.listY and y < layout.listY + layout.visibleRows * layout.stride
+
+proc pointInCatalogScrollRegion(x, y: int): bool =
+  let regions = cartographRegions()
+  if regions.catalog.w <= 0:
+    return false
+  if x < regions.catalog.x or x >= regions.catalog.x + regions.catalog.w:
+    return false
+  let layout = catalogListLayout()
+  if layout.showScrollUp and pointInCatalogScrollArea(x, y, layout.scrollUp):
+    return true
+  if layout.showScrollDown and pointInCatalogScrollArea(x, y, layout.scrollDown):
+    return true
+  pointInCatalogList(x, y)
+
+proc handleCatalogScrollArrow(x, y: int): bool =
+  if surfaceStack.active != asWorkspace:
+    return false
+  let layout = catalogListLayout()
+  if layout.showScrollUp and pointInCatalogScrollArea(x, y, layout.scrollUp):
+    scrollCartographCatalog(cartographWorkspace, -1, layout.visibleRows)
+    return true
+  if layout.showScrollDown and pointInCatalogScrollArea(x, y, layout.scrollDown):
+    scrollCartographCatalog(cartographWorkspace, 1, layout.visibleRows)
+    return true
+  false
+
+proc handleCatalogWheel(x, y: int; yoffset: float): bool =
+  if surfaceStack.active != asWorkspace or abs(yoffset) < 0.01:
+    return false
+  if not pointInCatalogScrollRegion(x, y):
+    return false
+  let layout = catalogListLayout()
+  if layout.visibleRows <= 0:
+    return false
+  let steps = max(1, int(abs(yoffset)))
+  let deltaRows = if yoffset > 0: -steps else: steps
+  scrollCartographCatalog(cartographWorkspace, deltaRows, layout.visibleRows)
+  true
+
+proc catalogEntryIndexAt(x, y: int): int =
+  if surfaceStack.active != asWorkspace or cartographWorkspace.catalog.entries.len == 0:
+    return -1
+  let layout = catalogListLayout()
+  if x < layout.contentX or x >= layout.contentX + layout.contentW:
+    return -1
+  if not pointInCatalogList(x, y):
+    return -1
+  var rowY = layout.listY
+  for local in 0 ..< min(
+      cartographWorkspace.catalog.entries.len - cartographWorkspace.catalogScrollRow,
+      layout.visibleRows,
+    ):
+    if y >= rowY - 2 and y < rowY + catalogRowHeight(rend.chromeAtlas.cellHeight) + 4:
+      return cartographWorkspace.catalogScrollRow + local
+    rowY += layout.stride
+  -1
+
+proc pointInRect(x, y: int; area: PaneRect): bool =
+  x >= area.x and x < area.x + area.w and y >= area.y and y < area.y + area.h
+
+proc handleCartographPointer(x, y: int): bool =
+  if surfaceStack.active != asWorkspace:
+    return false
+  if handleCatalogScrollArrow(x, y):
+    return true
+  let entryIdx = catalogEntryIndexAt(x, y)
+  if entryIdx >= 0:
+    selectCartographEntry(cartographWorkspace, entryIdx, catalogListLayout().visibleRows)
+    return true
+  let regions = cartographRegions()
+  if regions.inspector.w > 0 and x >= regions.inspector.x and x < regions.inspector.x + regions.inspector.w:
+    return true
+  if y >= regions.center.y + regions.center.h - CartographActionBarHeight:
+    return true
+  if pointInRect(x, y, contentRect()):
+    return false
+  x >= regions.catalog.x and x < regions.catalog.x + regions.catalog.w or
+    x >= regions.inspector.x and x < regions.inspector.x + regions.inspector.w
 
 proc activePaneLayouts(): seq[PaneLayout] =
   let idx = activeWorkspaceIndex()
@@ -441,11 +666,36 @@ proc activeSessionCwd(fallback = ""): string =
   let idx = workspace[].activeSessionIndex()
   if idx < 0:
     return if fallback.len > 0: fallback else: config.startDirectory
-  when not defined(windows):
-    let live = processCwd(workspace[].sessions[idx].terminal.host.pid)
-    if live.isSome:
-      workspace[].sessions[idx].cwd = live.get()
-  workspace[].sessions[idx].cwd
+  let cached = workspace[].sessions[idx].cwd
+  if cached.len > 0:
+    cached
+  elif fallback.len > 0:
+    fallback
+  else:
+    config.startDirectory
+
+proc refreshCatalogForActiveCwd(force = false): bool =
+  if surfaceStack.active != asWorkspace:
+    return false
+  let now = epochTime()
+  if not force and (now - lastCatalogPollTime) < catalogPollIntervalSec():
+    return false
+  if not force:
+    lastCatalogPollTime = now
+  let cwd = pollActiveShellCwd()
+  if not force and cwd.len > 0 and cwd == lastCatalogScanCwd and
+      catalogRootPath.len > 0 and dirExists(catalogRootPath) and
+      cartographWorkspace.catalog.entries.len > 0:
+    return false
+  if cwd.len > 0:
+    lastCatalogScanCwd = cwd
+  let candidate = resolveCatalogRoot(if cwd.len > 0: cwd else: lastCatalogScanCwd)
+  if not force and candidate == catalogRootPath and dirExists(candidate):
+    return false
+  catalogRootPath = candidate
+  refreshCartographCatalog(cartographWorkspace, catalogRootPath)
+  clampCartographCatalogScroll(cartographWorkspace, catalogListLayout().visibleRows)
+  true
 
 proc validSessionCwd(candidate: string): string =
   let expanded = expandTilde(candidate.strip())
@@ -560,6 +810,7 @@ proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
     rows = paneRows(area),
     scrollback = config.scrollback,
     diagnosticsCapacity = config.diagnosticsCapacity,
+    shortcutPreset = config.shortcutPreset,
   )
   term.screen.altScrollbackEnabled = altScrollbackEnabled(config.altScreenScrollback)
   applyConfiguredTheme(term)
@@ -638,22 +889,35 @@ proc closeActivePane() =
   if term != nil: term.damage.markAll()
 
 proc removeTerminalTab(id: TabId) =
-  if workspaces.len <= 1: return
+  var workspaceIdx = -1
   for i, workspace in workspaces:
     if workspace.id == id:
-      for session in workspace.sessions:
-        session.terminal.close()
-      workspaces.delete(i)
-      discard tabs.close(id)
-      let term = activeTerm()
-      if term != nil: term.damage.markAll()
-      return
+      workspaceIdx = i
+      break
+  if workspaceIdx < 0: return
+  if workspaces.len <= 1:
+    window_relay_lib.requestClose(windowRelays)
+    return
+  for session in workspaces[workspaceIdx].sessions:
+    session.terminal.close()
+  workspaces.delete(workspaceIdx)
+  discard tabs.close(id)
+  let term = activeTerm()
+  if term != nil: term.damage.markAll()
+
+proc closeActivePaneOrTab() =
+  let workspace = activeWorkspace()
+  if workspace == nil: return
+  if workspace[].sessions.len > 1:
+    closeActivePane()
+  elif workspaces.len > 1 and tabs.activeId.isSome:
+    removeTerminalTab(tabs.activeId.get())
 
 proc inTitleBar(y: int): bool =
   y >= 0 and y < titleBarHeight
 
 proc inTabBar(y: int): bool =
-  y >= titleBarHeight and y < headerHeight
+  surfaceStack.active == asPrimary and y >= titleBarHeight and y < chromeHeaderHeight()
 
 proc localCol(area: PaneRect, x: cdouble): int =
   max(0, (int(x) - area.x) div rend.atlas.cellWidth)
@@ -856,6 +1120,46 @@ when defined(waymarkSdl3):
       )
     )
 
+proc drawCartographMode() =
+  let wi = activeWorkspaceIndex()
+  if wi < 0: return
+  let activeIdx = workspaces[wi].activeSessionIndex()
+  if activeIdx < 0: return
+  clampCartographCatalogScroll(cartographWorkspace, catalogListLayout().visibleRows)
+  let regions = cartographRegions()
+  let bg = workspaces[wi].sessions[activeIdx].terminal.screen.theme.background
+  render_relay_lib.beginFrame(frameRelays, render_relay_lib.size2d(winWidth, winHeight), toRenderColor(bg))
+  rend.drawCartographShell(
+    winWidth,
+    winHeight,
+    regions,
+    cartographWorkspace.catalog,
+    cartographWorkspace.selectedIndex,
+    cartographWorkspace.catalogScrollRow,
+    CartographActionBarHeight,
+  )
+  let termArea = contentRect()
+  let layouts = workspaces[wi].panes.layouts(termArea)
+  for item in layouts:
+    let idx = workspaces[wi].sessionIndex(item.id)
+    if idx < 0: continue
+    rend.drawPaneBackground(workspaces[wi].sessions[idx].terminal, item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight)
+    let inner = paneInnerRect(item.rect)
+    rend.drawInRect(
+      workspaces[wi].sessions[idx].terminal,
+      winWidth,
+      winHeight,
+      inner.x,
+      inner.y,
+      inner.w,
+      inner.h,
+      showCursor = item.id == workspaces[wi].panes.active,
+    )
+  if workspaces[wi].panes.len > 1:
+    for item in layouts:
+      rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
+  clearCartographDirty(cartographWorkspace)
+
 proc drawActiveWorkspace() =
   let wi = activeWorkspaceIndex()
   if wi < 0: return
@@ -882,6 +1186,73 @@ proc drawActiveWorkspace() =
   if workspaces[wi].panes.len > 1:
     for item in layouts:
       rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
+
+proc pumpTerminalSessions(): int =
+  var n = 0
+  for workspace in workspaces.mitems:
+    for session in workspace.sessions:
+      let readCount = session.terminal.step()
+      if readCount > 0:
+        session.terminal.refreshViewport(stickToBottom = true)
+      n += readCount
+  n
+
+proc toggleSurface() =
+  if surfaceStack.active == asPrimary:
+    switchSurface(surfaceStack, asWorkspace)
+  else:
+    switchSurface(surfaceStack, asPrimary)
+  markCartographDirty(cartographWorkspace)
+  resizeTerminals()
+  let term = activeTerm()
+  if term != nil:
+    term.damage.markAll()
+
+proc installAppSurfaces() =
+  var initial = asPrimary
+  let envSurface = getEnv("WAYMARK_SURFACE", "").strip()
+  if envSurface.len > 0:
+    initial = parseAppSurfaceId(envSurface)
+  elif fileExists(ConfigPath):
+    try:
+      let dict = loadConfig(ConfigPath)
+      initial = parseAppSurfaceId(dict.getSectionValue("surface", "default", "primary"))
+    except CatchableError:
+      discard
+  surfaceStack = newAppSurfaceStack(asPrimary)
+  cartographWorkspace = newCartographWorkspace()
+  catalogRootPath = resolveCatalogRoot(pollActiveShellCwd())
+  lastCatalogScanCwd = pollActiveShellCwd()
+  refreshCartographCatalog(cartographWorkspace, catalogRootPath)
+  surfaceStack.registerSurface(SurfaceRelays(
+    id: asPrimary,
+    label: "Terminal",
+    tick: proc (): int =
+      pumpTerminalSessions(),
+    draw: proc () =
+      drawActiveWorkspace(),
+    needsRedraw: proc (): bool =
+      activeWorkspaceDirty(),
+  ))
+  surfaceStack.registerSurface(SurfaceRelays(
+    id: asWorkspace,
+    label: "Cartograph",
+    activate: proc () =
+      discard refreshCatalogForActiveCwd(force = true)
+      markCartographDirty(cartographWorkspace)
+      resizeTerminals()
+      let term = activeTerm()
+      if term != nil:
+        term.damage.markAll(),
+    tick: proc (): int =
+      pumpTerminalSessions(),
+    draw: proc () =
+      drawCartographMode(),
+    needsRedraw: proc (): bool =
+      cartographNeedsRedraw(cartographWorkspace) or activeWorkspaceDirty(),
+  ))
+  if initial == asWorkspace:
+    switchSurface(surfaceStack, asWorkspace)
 
 proc loadFallbackTypefaces(): seq[Typeface] =
   for path in config.fallbackFontPaths:
@@ -1130,6 +1501,11 @@ proc handleShortcutAction(term: Terminal; action: string): bool =
     let text = pasteFromClipboard()
     if text.len > 0:
       discard term.sendPaste(text)
+  of "close-tab":
+    if tabs.activeId.isSome:
+      removeTerminalTab(tabs.activeId.get())
+  of "switch-surface":
+    toggleSurface()
   of "zoom-in":
     fontSize += 1.0
     rebuildAtlas()
@@ -1153,10 +1529,13 @@ proc closeAllWorkspaces() =
   tabs = newTabSet()
 
 proc renderOnce() =
-  drawActiveWorkspace()
-  rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
+  surfaceStack.drawActive()
+  rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active, config.title)
   render_relay_lib.endFrame(frameRelays)
   writeGpuSnapshot()
+  let term = activeTerm()
+  if term != nil:
+    writeScreenSnapshot(term)
 
 when defined(waymarkSdl3):
   proc pollEvents()
@@ -1221,6 +1600,11 @@ when not defined(waymarkSdl3):
   
   proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
     if action == PRESS or action == REPEAT:
+      let m = castSet(mods)
+      if terminal.modCtrl in m and terminal.modShift in m and key == KEY_A:
+        toggleSurface()
+        return
+    if action == PRESS or action == REPEAT:
       let term = activeTerm()
       if term == nil: return
       let m = castSet(mods)
@@ -1233,7 +1617,7 @@ when not defined(waymarkSdl3):
         splitActivePane()
         return
       if terminal.modCtrl in m and terminal.modShift in m and key == KEY_W:
-        closeActivePane()
+        closeActivePaneOrTab()
         return
       if terminal.modCtrl in m and key == KEY_TAB:
         if terminal.modShift in m: discard tabs.activatePrevious()
@@ -1291,6 +1675,9 @@ when not defined(waymarkSdl3):
       draggingWindow = false
   
     if button == MOUSE_BUTTON_LEFT and action == PRESS and inTitleBar(int(y)):
+      if surfaceToggleHitTest(int(x), int(y), winWidth, titleBarHeight):
+        toggleSurface()
+        return
       draggingWindow = true
       dragStartMouseX = x
       dragStartMouseY = y
@@ -1320,7 +1707,9 @@ when not defined(waymarkSdl3):
         if term != nil: term.damage.markAll()
         return
   
-    if int(y) < headerHeight: return
+    if int(y) < chromeHeaderHeight(): return
+    if handleCartographPointer(int(x), int(y)):
+      return
     var paneFocusChanged = false
     let session = focusPaneAt(int(x), int(y), paneFocusChanged)
     if session == nil: return
@@ -1377,7 +1766,7 @@ when not defined(waymarkSdl3):
     let sessionIdx = workspaces[wi].sessionIndex(activeId)
     if sessionIdx < 0: return
     let term = workspaces[wi].sessions[sessionIdx].terminal
-    if int(y) < headerHeight and term.drag.state == dsIdle:
+    if int(y) < chromeHeaderHeight() and term.drag.state == dsIdle:
       if term.activeLink.isSome:
         term.activeLink = none(ActiveLink)
         term.damage.markAll()
@@ -1439,7 +1828,9 @@ when not defined(waymarkSdl3):
   
   proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
     var x, y: cdouble; getCursorPos(win, addr x, addr y)
-    let session = if int(y) >= headerHeight: focusPaneAt(int(x), int(y)) else: nil
+    if handleCatalogWheel(int(x), int(y), yoffset):
+      return
+    let session = if int(y) >= chromeHeaderHeight(): focusPaneAt(int(x), int(y)) else: nil
     let term = if session == nil: activeTerm() else: session[].terminal
     if term == nil: return
     let ctrlDown = (getKey(window, KEY_LEFT_CONTROL) == PRESS or getKey(window, KEY_RIGHT_CONTROL) == PRESS)
@@ -1647,8 +2038,7 @@ when defined(waymarkSdl3):
         shortcut_map_lib.kNone
   
   proc handleTextInput(text: cstring) =
-    if text == nil: return
-    if keyTextFallback: return
+    if text == nil or keyTextFallback: return
     let term = activeTerm()
     if term == nil: return
     for r in ($text).runes:
@@ -1657,10 +2047,13 @@ when defined(waymarkSdl3):
   
   proc handleSdlKey(event: sdl.KeyboardEvent) =
     if not event.down: return
-    let term = activeTerm()
-    if term == nil: return
     let mods = toTerminalMods(event.`mod`)
     let sc = event.scancode
+    if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_A:
+      toggleSurface()
+      return
+    let term = activeTerm()
+    if term == nil: return
   
     if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_T:
       addTerminalTab()
@@ -1669,7 +2062,7 @@ when defined(waymarkSdl3):
       splitActivePane()
       return
     if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_W:
-      closeActivePane()
+      closeActivePaneOrTab()
       return
     if terminal.modCtrl in mods and sc == sdl.SCANCODE_TAB:
       if terminal.modShift in mods: discard tabs.activatePrevious()
@@ -1700,6 +2093,9 @@ when defined(waymarkSdl3):
       draggingWindow = false
   
     if button == sdl.BUTTON_LEFT and down and inTitleBar(int(y)):
+      if surfaceToggleHitTest(int(x), int(y), winWidth, titleBarHeight):
+        toggleSurface()
+        return
       draggingWindow = true
       dragStartMouseX = x
       dragStartMouseY = y
@@ -1729,7 +2125,9 @@ when defined(waymarkSdl3):
         if term != nil: term.damage.markAll()
         return
   
-    if int(y) < headerHeight: return
+    if int(y) < chromeHeaderHeight(): return
+    if handleCartographPointer(int(x), int(y)):
+      return
     var paneFocusChanged = false
     let session = focusPaneAt(int(x), int(y), paneFocusChanged)
     if session == nil: return
@@ -1783,7 +2181,7 @@ when defined(waymarkSdl3):
     let sessionIdx = workspaces[wi].sessionIndex(activeId)
     if sessionIdx < 0: return
     let term = workspaces[wi].sessions[sessionIdx].terminal
-    if int(y) < headerHeight and term.drag.state == dsIdle:
+    if int(y) < chromeHeaderHeight() and term.drag.state == dsIdle:
       if term.activeLink.isSome:
         term.activeLink = none(ActiveLink)
         term.damage.markAll()
@@ -1839,7 +2237,9 @@ when defined(waymarkSdl3):
         discard term.sendMouse(mouse(kind, btn, row, col, {}))
   
   proc handleScrollAt(x, y: float; yoffset: float; mods: set[terminal.Modifier]) =
-    let session = if int(y) >= headerHeight: focusPaneAt(int(x), int(y)) else: nil
+    if handleCatalogWheel(int(x), int(y), yoffset):
+      return
+    let session = if int(y) >= chromeHeaderHeight(): focusPaneAt(int(x), int(y)) else: nil
     let term = if session == nil: activeTerm() else: session[].terminal
     if term == nil: return
     let ctrlDown = terminal.modCtrl in mods
@@ -2028,6 +2428,7 @@ rend = newGpuTerminalRenderer(atlas, chromeAtlas, gpuRelays)
 rend.loadLogoTexture(config.logoPath)
 updateChromeHeights()
 addTerminalTab()
+installAppSurfaces()
 
 when not defined(waymarkSdl3):
   discard window.setCharCallback(onChar); discard window.setKeyCallback(onKey)
@@ -2071,28 +2472,34 @@ while true:
   let frameStart = epochTime()
   perf.beginFrame()
   let resized = syncFramebufferSize()
-  var n = 0
-  for workspace in workspaces.mitems:
-    for session in workspace.sessions.mitems:
-      let readCount = session.terminal.step()
-      if readCount > 0:
-        session.terminal.refreshViewport(stickToBottom = true)
-      n += readCount
+  if resized:
+    markCartographDirty(cartographWorkspace)
+    if surfaceStack.active == asWorkspace:
+      clampCartographCatalogScroll(cartographWorkspace, catalogListLayout().visibleRows)
+  resizeTerminals()
+  let n = surfaceStack.tickActive()
   let term = activeTerm()
-  if term == nil: break
+  if term == nil and surfaceStack.active == asPrimary:
+    break
   let atlasWasDirty = atlas.isDirty
   let chromeAtlasWasDirty = chromeAtlas.isDirty
   if atlasWasDirty: rend.updateAtlasTexture()
   if chromeAtlasWasDirty: rend.updateChromeAtlasTexture()
-  let tabLabelsChanged = refreshTabCwdLabels()
+  let tabLabelsChanged =
+    if surfaceStack.active == asPrimary: refreshTabCwdLabels() else: false
+  let catalogChanged =
+    if surfaceStack.active == asWorkspace: refreshCatalogForActiveCwd() else: false
   let blockedBySyncUpdate = activeWorkspaceSyncUpdateActive()
-  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or activeWorkspaceDirty() or tabLabelsChanged) and not blockedBySyncUpdate
+  let surfaceDirty =
+    if surfaceStack.active == asPrimary: activeWorkspaceDirty() else: surfaceStack.activeNeedsRedraw()
+  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or surfaceDirty or tabLabelsChanged or catalogChanged) and not blockedBySyncUpdate
   if changed:
-    drawActiveWorkspace()
-    rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, config.title)
+    surfaceStack.drawActive()
+    rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active, config.title)
     render_relay_lib.endFrame(frameRelays)
     writeGpuSnapshot()
-    writeScreenSnapshot(term)
+    if term != nil:
+      writeScreenSnapshot(term)
   pollEvents(); perf.endFrame()
   if perf.shouldReport(2.0):
     let s = perf.takeReport()

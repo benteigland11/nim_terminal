@@ -32,8 +32,15 @@ suite "shortcut map":
     let m = newShortcutMap()
     m.addStandardTerminalShortcuts()
     check m.lookup(shortcutKey('c'), {modCtrl, modShift}).get() == "copy"
+    check m.lookup(shortcutKey('w'), {modCtrl}).get() == "close-tab"
     check m.lookup(shortcutKey('1'), {modAlt}).get() == "tab-1"
     check m.lookup(shortcutKey('9'), {modAlt}).get() == "tab-9"
     check m.lookup(kEqual, {modCtrl}).get() == "zoom-in"
     check m.lookup(kEqual, {modCtrl, modShift}).get() == "zoom-in"
     check m.lookup(kPlus, {modCtrl, modShift}).get() == "zoom-in"
+
+  test "agent terminal shortcuts":
+    let m = newShortcutMap()
+    m.addAgentTerminalShortcuts()
+    check m.lookup(shortcutKey('A'), {modCtrl, modShift}).get() == "switch-surface"
+    check m.lookup(shortcutKey('c'), {modCtrl, modShift}).get() == "copy"

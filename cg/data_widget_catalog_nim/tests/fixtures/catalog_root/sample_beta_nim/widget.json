@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "id": "sample-beta-nim",
+    "name": "Sample Beta",
+    "version": "0.2.0",
+    "domain": "universal"
+  },
+  "description": "Beta fixture with search keyword beta-gamma.",
+  "tech_stack": { "language": "nim", "dependencies": [] }
+}

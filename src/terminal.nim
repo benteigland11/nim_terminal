@@ -17,6 +17,7 @@ import ../cg/universal_color_parser_nim/src/color_parser_lib
 import ../cg/universal_viewport_nim/src/viewport_lib
 import ../cg/backend_pty_async_nim/src/pty_async_lib
 import ../cg/universal_drag_controller_nim/src/drag_controller_lib
+import ../cg/data_terminal_profile_nim/src/terminal_profile_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/data_semantic_history_nim/src/semantic_history_lib
 import ../cg/universal_link_detector_nim/src/link_detector_lib
@@ -40,7 +41,7 @@ export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
        drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib,
        semantic_history_lib, link_detector_lib, terminal_output_footprint_lib,
-       terminal_sync_update_lib
+       terminal_sync_update_lib, terminal_profile_lib
 export vt_diag
 
 type
@@ -83,6 +84,13 @@ type
     onDcsPassthrough*: proc(cmd: VtCommand)
     onClipboardRequest*: proc(selector, text: string)
 
+proc populateShortcutMap*(m: ShortcutMap; preset: ShortcutPreset) =
+  case preset
+  of spStandard:
+    m.addStandardTerminalShortcuts()
+  of spAgent:
+    m.addAgentTerminalShortcuts()
+
 proc newTerminal*(
     program: string,
     args: openArray[string] = [],
@@ -90,7 +98,8 @@ proc newTerminal*(
     cols: int = 80,
     rows: int = 24,
     scrollback: int = DefaultScrollback,
-    diagnosticsCapacity: int = 128
+    diagnosticsCapacity: int = 128,
+    shortcutPreset: ShortcutPreset = spStandard,
 ): Terminal =
   when defined(posix):
     let backend = newPosixBackend()
@@ -101,7 +110,7 @@ proc newTerminal*(
 
   let host = spawn(backend, program, args, cwd, rows, cols)
   let sMap = newShortcutMap()
-  sMap.addStandardTerminalShortcuts()
+  populateShortcutMap(sMap, shortcutPreset)
   
   Terminal(
     backend: backend,
