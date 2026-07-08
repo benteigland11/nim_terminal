@@ -79,7 +79,7 @@ proc activeNeedsRedraw*(stack: AppSurfaceStack): bool =
 
 func parseAppSurfaceId*(value: string; fallback = asPrimary): AppSurfaceId =
   case value.strip().toLowerAscii()
-  of "workspace", "agent", "power", "power_user", "power-user":
+  of "workspace", "cartograph", "agent", "power", "power_user", "power-user":
     asWorkspace
   of "primary", "terminal", "standard", "base", "default":
     asPrimary

@@ -11,6 +11,8 @@ suite "terminal profile":
     let snap = presetSnapshot(pmStandard)
     check snap.maxPanes == StandardMaxPanes
     check snap.altWheelPolicy == StandardAltWheelPolicy
+    check snap.normalWheelPolicy == StandardNormalWheelPolicy
+    check snap.normalWheelPolicy == "smart"
     check snap.shortcutPreset == spStandard
     check snap.chrome == {}
 
@@ -18,6 +20,8 @@ suite "terminal profile":
     let snap = presetSnapshot(pmAgent)
     check snap.maxPanes == AgentMaxPanes
     check snap.altWheelPolicy == AgentAltWheelPolicy
+    check snap.normalWheelPolicy == AgentNormalWheelPolicy
+    check snap.normalWheelPolicy == "smart"
     check snap.shortcutPreset == spAgent
     check cfHistoryRail in snap.chrome
     check cfDiagnosticsHud in snap.chrome

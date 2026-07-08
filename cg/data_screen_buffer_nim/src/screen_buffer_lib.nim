@@ -376,11 +376,195 @@ proc clearGrid(grid: var seq[seq[Cell]], startRow, endRow: int, cols: int, attrs
     for c in 0 ..< cols: grid[r][c] = emptyCell(attrs)
 
 proc addScrollbackRow(rows: var seq[seq[Cell]], wraps: var seq[bool], row: seq[Cell], wrapped: bool, cap: int) =
+  if cap <= 0:
+    return
   rows.add row
   wraps.add wrapped
   if rows.len > cap:
     rows.delete(0)
     if wraps.len > 0: wraps.delete(0)
+
+func rowHasContent(row: seq[Cell]): bool =
+  for cell in row:
+    if cell.isContinuation:
+      continue
+    if Rune(cell.rune) != Rune(' '):
+      return true
+  false
+
+func rowText(row: seq[Cell]): string =
+  result = newStringOfCap(row.len)
+  for cell in row:
+    if cell.isContinuation:
+      continue
+    result.add Rune(cell.rune)
+
+func isVolatileInlineStatusRow(row: seq[Cell]): bool =
+  let text = rowText(row).strip()
+  if text.len == 0:
+    return false
+  if text.startsWith("• Booting MCP server:") or
+      text.startsWith("• Starting MCP servers"):
+    return true
+  if text.contains("/model to change") or
+      text.contains("choose what model and reasoning effort to use") or
+      text.contains("1.5x speed, increased usage") or
+      text.contains("include current selection, open files, and other context from your IDE") or
+      text.contains("choose what Codex is allowed to do") or
+      text.contains("remap TUI shortcuts") or
+      text.contains("toggle Vim mode for the composer") or
+      text.contains("toggle experimental features") or
+      text.contains("approve one retry of a recent auto-review denial") or
+      text.contains("review my current changes and find issues") or
+      text.contains("rename the current thread") or
+      text.contains("resume a saved chat") or
+      text.contains("toggle raw scrollback mode for copy-friendly terminal selection"):
+    return true
+  if (text.startsWith("Working (") or text.startsWith("• Working (")) and
+      text.contains("esc to interrupt"):
+    return true
+  if text.contains(" · Workspace · ") and text.contains(" · Approve for me"):
+    return true
+  if text.startsWith("• Explored") or text.startsWith("• Read") or
+      text.startsWith("• Ran") or text.startsWith("• Edited") or
+      text.startsWith("• Updated"):
+    return true
+  if text.startsWith("└ Read ") or text.startsWith("└ Ran ") or
+      text.startsWith("└ Edited "):
+    return true
+  if text.startsWith("› "):
+    return true
+  false
+
+func sameColor(a, b: Color): bool =
+  if a.kind != b.kind:
+    return false
+  case a.kind
+  of ckDefault:
+    true
+  of ckIndexed:
+    a.index == b.index
+  of ckRgb:
+    a.r == b.r and a.g == b.g and a.b == b.b
+
+func sameAttrs(a, b: Attrs): bool =
+  sameColor(a.fg, b.fg) and
+    sameColor(a.bg, b.bg) and
+    a.flags == b.flags and
+    a.underlineStyle == b.underlineStyle
+
+func sameCell(a, b: Cell): bool =
+  a.rune == b.rune and a.width == b.width and sameAttrs(a.attrs, b.attrs)
+
+func sameRow(a, b: seq[Cell]): bool =
+  if a.len != b.len:
+    return false
+  for i in 0 ..< a.len:
+    if not sameCell(a[i], b[i]):
+      return false
+  true
+
+proc addScrollbackRowDedup(rows: var seq[seq[Cell]], wraps: var seq[bool], row: seq[Cell], wrapped: bool, cap: int) =
+  if rows.len > 0 and sameRow(rows[^1], row):
+    if wraps.len > 0:
+      wraps[^1] = wrapped
+    return
+  addScrollbackRow(rows, wraps, row, wrapped, cap)
+
+proc addArchivedRow(rows: var seq[seq[Cell]], wraps: var seq[bool], row: seq[Cell], wrapped: bool, cap: int): bool =
+  if not rowHasContent(row):
+    return false
+  if isVolatileInlineStatusRow(row):
+    return false
+  addScrollbackRowDedup(rows, wraps, row, wrapped, cap)
+  true
+
+proc archiveRowForHistory*(s: Screen, row: int): bool =
+  ## Preserve one visible row before a destructive in-place update erases it.
+  ## Inline TUIs often redraw by clearing rows instead of physically scrolling;
+  ## this gives the viewport retained history for those overwritten rows.
+  if row < 0 or row >= s.rows:
+    return false
+  if s.usingAlt and not s.altScrollbackEnabled:
+    return false
+
+  let g = if s.usingAlt: addr s.altGrid else: addr s.grid
+  let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
+
+  if s.usingAlt:
+    return addArchivedRow(
+      s.altScrollback,
+      s.altScrollbackSoftWrap,
+      g[][row],
+      wraps[][row],
+      s.scrollbackCap,
+    )
+  else:
+    return addArchivedRow(
+      s.scrollback,
+      s.scrollbackSoftWrap,
+      g[][row],
+      wraps[][row],
+      s.scrollbackCap,
+    )
+
+proc archiveVisibleRows(s: Screen): int =
+  ## Preserve the current visible frame before a destructive full-screen clear.
+  ## Full-screen TUIs often redraw in place, so no physical rows scroll off the
+  ## top. Archiving the non-empty visible span gives the viewport real history.
+  let g = if s.usingAlt: addr s.altGrid else: addr s.grid
+  let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
+  if s.usingAlt and not s.altScrollbackEnabled:
+    return 0
+
+  var first = -1
+  var last = -1
+  for r in 0 ..< s.rows:
+    if rowHasContent(g[][r]) and not isVolatileInlineStatusRow(g[][r]):
+      if first < 0:
+        first = r
+      last = r
+  if first < 0:
+    return 0
+
+  for r in first .. last:
+    var archived = false
+    if not rowHasContent(g[][r]):
+      if s.usingAlt:
+        addScrollbackRowDedup(
+          s.altScrollback,
+          s.altScrollbackSoftWrap,
+          g[][r],
+          wraps[][r],
+          s.scrollbackCap,
+        )
+      else:
+        addScrollbackRowDedup(
+          s.scrollback,
+          s.scrollbackSoftWrap,
+          g[][r],
+          wraps[][r],
+          s.scrollbackCap,
+        )
+      archived = true
+    elif s.usingAlt:
+      archived = addArchivedRow(
+        s.altScrollback,
+        s.altScrollbackSoftWrap,
+        g[][r],
+        wraps[][r],
+        s.scrollbackCap,
+      )
+    else:
+      archived = addArchivedRow(
+        s.scrollback,
+        s.scrollbackSoftWrap,
+        g[][r],
+        wraps[][r],
+        s.scrollbackCap,
+      )
+    if archived:
+      inc result
 
 proc resizeScrollbackRows(rows: var seq[seq[Cell]], oldCols, cols: int, attrs: Attrs) =
   for row in rows.mitems:
@@ -964,6 +1148,7 @@ proc eraseInDisplay*(s: Screen, mode: EraseMode) =
       clearGrid(g[], 0, s.cursor.row - 1, s.cols, s.cursor.attrs)
       for r in 0 .. s.cursor.row - 1: wraps[][r] = false
   of emAll:
+    discard s.archiveVisibleRows()
     clearGrid(g[], 0, s.rows - 1, s.cols, s.cursor.attrs)
     for r in 0 ..< s.rows: wraps[][r] = false
   of emScrollback:

@@ -59,10 +59,10 @@ const
   DefaultMeaningfulHistoryRows* = 3
   StandardAltScreenScrollback* = "passive"
   StandardAltWheelPolicy* = "terminal"
-  StandardNormalWheelPolicy* = "terminal"
+  StandardNormalWheelPolicy* = "smart"
   AgentAltScreenScrollback* = "passive"
   AgentAltWheelPolicy* = "app"
-  AgentNormalWheelPolicy* = "terminal"
+  AgentNormalWheelPolicy* = "smart"
 
 func parseProfileMode*(value: string; fallback = pmStandard): ProfileMode =
   case value.strip().toLowerAscii()

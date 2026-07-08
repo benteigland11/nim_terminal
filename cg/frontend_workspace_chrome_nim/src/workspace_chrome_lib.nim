@@ -67,6 +67,23 @@ func stackedSidebarRegions*(
     h: max(0, bounds.h - catH),
   )
 
+func sidebarCatalogRegions*(
+    bounds: WorkspaceRect;
+    sidebarWidth: int;
+    catalogHeight: int;
+    minCenterWidth = 320,
+): ThreeColumnRegions =
+  ## Terminal on the left; capped-height widget catalog on the right.
+  let available = max(0, bounds.w)
+  let minCenter = max(1, minCenterWidth)
+  let sideW = clampRail(sidebarWidth, available, minCenter)
+  let centerW = max(0, available - sideW)
+  let sideX = bounds.x + centerW
+  let catH = max(80, min(catalogHeight, bounds.h))
+  result.center = WorkspaceRect(x: bounds.x, y: bounds.y, w: centerW, h: bounds.h)
+  result.catalog = WorkspaceRect(x: sideX, y: bounds.y, w: sideW, h: catH)
+  result.inspector = WorkspaceRect(x: sideX, y: bounds.y + catH, w: sideW, h: 0)
+
 func actionBarRegion*(bounds: WorkspaceRect; height: int): WorkspaceRect =
   let barH = max(0, min(height, bounds.h))
   WorkspaceRect(x: bounds.x, y: bounds.y + bounds.h - barH, w: bounds.w, h: barH)
@@ -74,6 +91,14 @@ func actionBarRegion*(bounds: WorkspaceRect; height: int): WorkspaceRect =
 func contentAboveActionBar*(bounds: WorkspaceRect; actionBarHeight: int): WorkspaceRect =
   let barH = max(0, min(actionBarHeight, bounds.h))
   WorkspaceRect(x: bounds.x, y: bounds.y, w: bounds.w, h: max(0, bounds.h - barH))
+
+func actionBarRegionTop*(bounds: WorkspaceRect; height: int): WorkspaceRect =
+  let barH = max(0, min(height, bounds.h))
+  WorkspaceRect(x: bounds.x, y: bounds.y, w: bounds.w, h: barH)
+
+func contentBelowActionBar*(bounds: WorkspaceRect; actionBarHeight: int): WorkspaceRect =
+  let barH = max(0, min(actionBarHeight, bounds.h))
+  WorkspaceRect(x: bounds.x, y: bounds.y + barH, w: bounds.w, h: max(0, bounds.h - barH))
 
 func insetRect*(
   bounds: WorkspaceRect;
@@ -149,35 +174,24 @@ proc scrollListLayout*(
     return
   let fullListSpace = max(0, panelBottom - baseListY)
   let maxRowsNoArrows = fullListSpace div result.stride
-  if entryCount <= maxRowsNoArrows:
+  if entryCount <= maxRowsNoArrows and entryCount <= 3:
     result.listY = baseListY
     result.visibleRows = maxRowsNoArrows
     return
   result.scrollable = true
-  var bottomArrow = true
-  for _ in 0 ..< 4:
-    let listY = baseListY + result.scrollArrowH
-    let listBottom =
-      if bottomArrow:
-        panelBottom - result.scrollArrowH
-      else:
-        panelBottom
-    let listSpace = max(0, listBottom - listY)
-    result.visibleRows = listSpace div result.stride
-    let newBottom = scrollRow + result.visibleRows < entryCount
-    if newBottom == bottomArrow:
-      break
-    bottomArrow = newBottom
+  let listY = baseListY + result.scrollArrowH
+  let listBottom = panelBottom - result.scrollArrowH
+  let listSpace = max(0, listBottom - listY)
+  result.visibleRows = listSpace div result.stride
   result.showScrollUp = scrollRow > 0
-  result.showScrollDown = bottomArrow
-  result.listY = baseListY + result.scrollArrowH
+  result.showScrollDown = scrollRow + result.visibleRows < entryCount
+  result.listY = listY
   result.scrollUp = ScrollListArea(
     x: result.contentX, y: baseListY, w: result.contentW, h: result.scrollArrowH,
   )
-  if bottomArrow:
-    result.scrollDown = ScrollListArea(
-      x: result.contentX,
-      y: panelBottom - result.scrollArrowH,
-      w: result.contentW,
-      h: result.scrollArrowH,
-    )
+  result.scrollDown = ScrollListArea(
+    x: result.contentX,
+    y: listBottom,
+    w: result.contentW,
+    h: result.scrollArrowH,
+  )

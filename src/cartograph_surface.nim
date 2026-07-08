@@ -5,12 +5,15 @@
 
 import ../cg/data_widget_catalog_nim/src/widget_catalog_lib as widget_catalog
 import ../cg/frontend_workspace_chrome_nim/src/workspace_chrome_lib as workspace_chrome
+import ../cg/frontend_text_field_nim/src/text_field_lib as text_field
 
 type
   CartographWorkspace* = ref object
     dirty*: bool
     catalog*: widget_catalog.WidgetCatalog
-    selectedIndex*: int
+    visibleEntries*: seq[widget_catalog.CatalogEntry]  ## Catalog filtered by `search`.
+    search*: text_field.TextField
+    selectedIndex*: int      ## Index into `visibleEntries`.
     catalogScrollRow*: int
 
   CatalogScrollArea* = workspace_chrome.ScrollListArea
@@ -44,7 +47,20 @@ proc computeCatalogListLayout*(
   )
 
 proc newCartographWorkspace*(): CartographWorkspace =
-  CartographWorkspace(dirty: true, selectedIndex: -1, catalogScrollRow: 0)
+  CartographWorkspace(
+    dirty: true,
+    selectedIndex: -1,
+    catalogScrollRow: 0,
+    search: text_field.newTextField(),
+    visibleEntries: @[],
+  )
+
+proc displayCatalog*(ws: CartographWorkspace): widget_catalog.WidgetCatalog =
+  ## Catalog view actually shown to the user (respects the active search filter).
+  if ws == nil:
+    widget_catalog.WidgetCatalog()
+  else:
+    widget_catalog.WidgetCatalog(root: ws.catalog.root, entries: ws.visibleEntries)
 
 proc markCartographDirty*(ws: CartographWorkspace) =
   if ws != nil:
@@ -57,22 +73,11 @@ proc clearCartographDirty*(ws: CartographWorkspace) =
 proc cartographNeedsRedraw*(ws: CartographWorkspace): bool =
   ws != nil and ws.dirty
 
-proc refreshCartographCatalog*(ws: CartographWorkspace; root: string) =
-  if ws == nil:
-    return
-  ws.catalog = widget_catalog.scanWidgetRoot(root)
-  if ws.catalog.entries.len == 0:
-    ws.selectedIndex = -1
-    ws.catalogScrollRow = 0
-  elif ws.selectedIndex < 0 or ws.selectedIndex >= ws.catalog.entries.len:
-    ws.selectedIndex = 0
-  ws.dirty = true
-
 proc catalogScrollMax*(ws: CartographWorkspace; visibleRows: int): int =
   if ws == nil or visibleRows <= 0:
     0
   else:
-    max(0, ws.catalog.entries.len - visibleRows)
+    max(0, ws.visibleEntries.len - visibleRows)
 
 proc clampCartographCatalogScroll*(ws: CartographWorkspace; visibleRows: int) =
   if ws == nil:
@@ -95,16 +100,50 @@ proc scrollCartographCatalog*(ws: CartographWorkspace; deltaRows, visibleRows: i
   clampCartographCatalogScroll(ws, visibleRows)
   ws.dirty = true
 
-proc selectCartographEntry*(ws: CartographWorkspace; index: int; visibleRows = 0) =
-  if ws == nil or ws.catalog.entries.len == 0:
+proc applyCatalogFilter*(ws: CartographWorkspace; visibleRows = 0) =
+  ## Recompute the visible entry list from the current search query, keeping
+  ## the previously selected widget selected when it survives the filter.
+  if ws == nil:
     return
-  ws.selectedIndex = max(0, min(index, ws.catalog.entries.len - 1))
+  let prevDir =
+    if ws.selectedIndex >= 0 and ws.selectedIndex < ws.visibleEntries.len:
+      ws.visibleEntries[ws.selectedIndex].dirName
+    else:
+      ""
+  ws.visibleEntries = ws.catalog.entries
+  if ws.visibleEntries.len == 0:
+    ws.selectedIndex = -1
+    ws.catalogScrollRow = 0
+  else:
+    var newIndex = 0
+    if prevDir.len > 0:
+      for i, entry in ws.visibleEntries:
+        if entry.dirName == prevDir:
+          newIndex = i
+          break
+    ws.selectedIndex = newIndex
+    if visibleRows > 0:
+      ensureCartographSelectionVisible(ws, visibleRows)
+    else:
+      clampCartographCatalogScroll(ws, ws.visibleEntries.len)
+  ws.dirty = true
+
+proc refreshCartographCatalog*(ws: CartographWorkspace; root: string) =
+  if ws == nil:
+    return
+  ws.catalog = widget_catalog.scanWidgetRoot(root)
+  applyCatalogFilter(ws)
+
+proc selectCartographEntry*(ws: CartographWorkspace; index: int; visibleRows = 0) =
+  if ws == nil or ws.visibleEntries.len == 0:
+    return
+  ws.selectedIndex = max(0, min(index, ws.visibleEntries.len - 1))
   if visibleRows > 0:
     ensureCartographSelectionVisible(ws, visibleRows)
   ws.dirty = true
 
 proc selectedCartographEntry*(ws: CartographWorkspace): widget_catalog.CatalogEntry =
-  if ws == nil or ws.selectedIndex < 0 or ws.selectedIndex >= ws.catalog.entries.len:
+  if ws == nil or ws.selectedIndex < 0 or ws.selectedIndex >= ws.visibleEntries.len:
     widget_catalog.CatalogEntry()
   else:
-    ws.catalog.entries[ws.selectedIndex]
+    ws.visibleEntries[ws.selectedIndex]

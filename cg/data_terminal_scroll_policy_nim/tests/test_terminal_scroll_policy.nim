@@ -2,7 +2,7 @@ import std/unittest
 import terminal_scroll_policy_lib
 
 suite "terminal scroll policy":
-  test "normal buffer scrolls terminal unless child requested wheel":
+  test "normal buffer scrolls terminal when child did not request wheel":
     check decideWheelAction(ScrollPolicyInput(
       usingAltScreen: false,
       childWantsWheel: false,
@@ -13,6 +13,7 @@ suite "terminal scroll policy":
       altWheelPolicy: awpApp,
     )) == saScrollViewport
 
+  test "normal terminal policy prefers retained history over child wheel":
     check decideWheelAction(ScrollPolicyInput(
       usingAltScreen: false,
       childWantsWheel: true,
@@ -22,6 +23,47 @@ suite "terminal scroll policy":
       scrollingTowardHistory: true,
       altScrollbackMode: assPassive,
       altWheelPolicy: awpApp,
+      normalWheelPolicy: nwpTerminal,
+    )) == saScrollViewport
+
+  test "normal terminal policy owns retained history in both wheel directions":
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: false,
+      childWantsWheel: true,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: false,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpApp,
+      normalWheelPolicy: nwpTerminal,
+    )) == saScrollViewport
+
+  test "normal terminal policy routes child wheel when no history exists":
+
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: false,
+      childWantsWheel: true,
+      viewportHasHistory: false,
+      viewportHasMeaningfulHistory: false,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: true,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpApp,
+      normalWheelPolicy: nwpTerminal,
+    )) == saRouteMouseWheel
+
+  test "normal tui fallback preserves explicit child wheel":
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: false,
+      childWantsWheel: true,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: true,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpApp,
+      normalWheelPolicy: nwpTuiFallback,
     )) == saRouteMouseWheel
 
   test "alternate screen off routes wheel to child when requested":
@@ -160,13 +202,28 @@ suite "terminal scroll policy":
       normalWheelPolicy: nwpTuiFallback,
     )) == saScrollViewport
 
-  test "normal-screen smart routes live-edge tui wheel to cursor keys":
+  test "normal-screen smart keeps meaningful history owned by viewport at live edge":
     check decideWheelAction(ScrollPolicyInput(
       usingAltScreen: false,
       childWantsWheel: false,
       childWheelEncoding: cweNone,
       viewportHasHistory: true,
       viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: false,
+      normalScreenTuiLikely: true,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpApp,
+      normalWheelPolicy: nwpSmart,
+    )) == saScrollViewport
+
+  test "normal-screen smart routes thin live-edge tui wheel to cursor keys":
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: false,
+      childWantsWheel: false,
+      childWheelEncoding: cweNone,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: false,
       viewportAtLiveEnd: true,
       scrollingTowardHistory: false,
       normalScreenTuiLikely: true,

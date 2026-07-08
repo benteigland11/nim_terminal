@@ -161,6 +161,9 @@ func absoluteCursorRow(t: Terminal): int =
 proc trackOutputFootprint(t: Terminal, row: int) =
   t.outputFootprint.recordRow(row, activeAlternate = t.screen.usingAlt)
 
+proc trackOutputFootprintLineErase(t: Terminal, row: int) =
+  t.outputFootprint.recordLineErase(row, activeAlternate = t.screen.usingAlt)
+
 proc trackOutputFootprint(t: Terminal, firstRow, lastRow: int) =
   t.outputFootprint.recordRows(firstRow, lastRow, activeAlternate = t.screen.usingAlt)
 
@@ -335,7 +338,11 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdCursorTo:       (t.screen.cursorTo(cmd.row, cmd.col); t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row))
   of cmdCursorToColumn: (t.screen.cursorTo(t.screen.cursor.row, cmd.absCol); t.damage.markRow(t.screen.cursor.row))
   of cmdCursorToRow:    (t.screen.cursorTo(cmd.absRow, t.screen.cursor.col); t.damage.markRow(rowBefore); t.damage.markRow(t.screen.cursor.row))
-  of cmdEraseInLine:    (t.screen.eraseInLine(toScreenErase(cmd.eraseMode)); t.trackOutputFootprint(rowBefore); t.damage.markRow(rowBefore))
+  of cmdEraseInLine:
+    discard t.screen.archiveRowForHistory(rowBefore)
+    t.screen.eraseInLine(toScreenErase(cmd.eraseMode))
+    t.trackOutputFootprintLineErase(rowBefore)
+    t.damage.markRow(rowBefore)
   of cmdEraseInDisplay:
     t.screen.eraseInDisplay(toScreenErase(cmd.eraseMode))
     if cmd.eraseMode == vt_commands_lib.emAll:
@@ -543,7 +550,8 @@ proc sendPaste*(t: Terminal, text: string): int =
 proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusReporting: 0 else: t.sendReport(reportFocus(gained)))
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.sendReport(reportClipboard(selector, encoded)))
 func synchronizedUpdateActive*(t: Terminal): bool = t.syncUpdate.shouldDeferPresent()
-proc refreshViewport*(t: Terminal, stickToBottom: bool = true) = t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
+proc refreshViewport*(t: Terminal, stickToBottom: bool = true) =
+  t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())
 proc resizeView*(t: Terminal, cols, rows: int) = (t.screen.resizePreserveBottom(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.drag.height = rows; t.refreshViewport())
 

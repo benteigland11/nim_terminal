@@ -34,3 +34,8 @@ suite "app surface relays":
   test "workspace header is shorter than primary header":
     check workspaceHeaderHeight(30, 28, asPrimary) == 58
     check workspaceHeaderHeight(30, 28, asWorkspace) == 30
+
+  test "parseAppSurfaceId accepts cartograph alias":
+    check parseAppSurfaceId("cartograph") == asWorkspace
+    check parseAppSurfaceId("workspace") == asWorkspace
+    check parseAppSurfaceId("terminal") == asPrimary

@@ -12,6 +12,7 @@ type
     height*: int           ## Number of rows visible at once
     totalRows*: int        ## Total rows currently in the buffer (history + active)
     scrollOffset*: int     ## How many rows we are scrolled up (0 = bottom)
+    userHeld*: bool        ## True after user scrolls away from live output.
 
   ViewAnchor* = object
     topRow*: int
@@ -20,7 +21,7 @@ type
     atBottom*: bool
 
 func newViewport*(height: int): Viewport =
-  Viewport(height: height, totalRows: height, scrollOffset: 0)
+  Viewport(height: height, totalRows: height, scrollOffset: 0, userHeld: false)
 
 func maxScroll*(v: Viewport): int =
   ## Maximum valid scrollOffset.
@@ -34,13 +35,18 @@ func hasMeaningfulHistory*(v: Viewport, minRows: int = 3): bool =
 func scrollUp*(v: var Viewport, count: int = 1) =
   ## Scroll up (towards history).
   v.scrollOffset = min(v.maxScroll, v.scrollOffset + count)
+  if v.scrollOffset > 0:
+    v.userHeld = true
 
 func scrollDown*(v: var Viewport, count: int = 1) =
   ## Scroll down (towards active grid).
   v.scrollOffset = max(0, v.scrollOffset - count)
+  if v.scrollOffset == 0:
+    v.userHeld = false
 
 func scrollToBottom*(v: var Viewport) =
   v.scrollOffset = 0
+  v.userHeld = false
 
 func isAtBottom*(v: Viewport): bool = v.scrollOffset == 0
 
@@ -60,7 +66,7 @@ func updateBufferHeight*(v: var Viewport, totalRows: int, stickToBottom: bool = 
   let oldBottom = v.totalRows - 1 - v.scrollOffset
   let oldTop = oldBottom - (v.height - 1)
   v.totalRows = totalRows
-  if stickToBottom and wasAtBottom:
+  if stickToBottom and wasAtBottom and not v.userHeld:
     v.scrollToBottom()
   elif oldTop >= 0:
     let desiredOffset = v.totalRows - v.height - oldTop
@@ -68,6 +74,8 @@ func updateBufferHeight*(v: var Viewport, totalRows: int, stickToBottom: bool = 
   else:
     # Ensure offset is still valid
     v.scrollOffset = min(v.maxScroll, v.scrollOffset)
+  if v.scrollOffset == 0:
+    v.userHeld = false
 
 func viewportToBuffer*(v: Viewport, viewportRow: int): int =
   ## Map a row index from the viewport (0 = top row visible) to an

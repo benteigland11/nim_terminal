@@ -80,6 +80,14 @@ suite "terminal pipeline":
     t.feed("abcdef\e[2D\e[0K")
     check t.screen.lineText(0).strip() == "abcd"
 
+  test "erase-in-line archives overwritten row for viewport history":
+    let t = newMockTerminal(2, 10)
+    t.feed("old row")
+    t.feed("\e[1;1H\e[Knew")
+    check t.screen.scrollbackLen == 1
+    check t.screen.scrollbackText(0).strip() == "old row"
+    check t.screen.lineText(0).strip() == "new"
+
   test "absolute cursor position CSI H":
     let t = newMockTerminal(5, 10)
     t.feed("\e[2;3HX")

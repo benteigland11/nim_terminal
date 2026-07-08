@@ -1,0 +1,39 @@
+---
+description: Rebuild ./nim_terminal after Nim or widget source changes
+globs: "{src,cg}/**/*.{nim,nimble}"
+alwaysApply: false
+---
+
+# Build nim_terminal after code changes
+
+When you edit files under `src/` or `cg/` that affect the app, **rebuild before finishing** so `./nim_terminal` is never stale.
+
+## Required build command
+
+Run from the project root:
+
+```bash
+nim c -d:release -o:nim_terminal src/nim_terminal.nim
+```
+
+Do **not** use `nim c src/nim_terminal.nim` without `-o:nim_terminal` — that writes to `src/nim_terminal` and leaves the root binary outdated.
+
+Equivalent:
+
+```bash
+./scripts/build-linux.sh
+```
+
+## When to build
+
+- After any change to `src/**/*.nim` (app glue, renderer, cartograph UI)
+- After any change to `cg/**/*.nim` (installed widgets consumed by the app)
+- Before telling the user to run or test `./nim_terminal`
+
+## On failure
+
+If the build fails, fix compile errors and rebuild. Do not report the task as complete with a broken or missing root binary.
+
+## Verify
+
+Confirm `./nim_terminal` was updated (mtime newer than edited sources) when practical.

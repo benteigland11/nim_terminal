@@ -27,6 +27,19 @@ suite "Terminal output footprint":
     f.armAfterCursorRestore(cursorRow = 1)
     check not f.isArmed
 
+  test "arms after cursor restore above line-erased footprint":
+    var f = newOutputFootprint()
+    f.recordLineErase(2)
+    f.recordLineErase(4)
+    f.armAfterCursorRestore(cursorRow = 1)
+    check f.isArmed
+
+  test "does not arm after cursor restore for printed-only repaint":
+    var f = newOutputFootprint()
+    f.recordRows(2, 4)
+    f.armAfterCursorRestore(cursorRow = 1)
+    check not f.isArmed
+
   test "does not arm after cursor restore below footprint":
     var f = newOutputFootprint()
     f.markFullDisplayErase()

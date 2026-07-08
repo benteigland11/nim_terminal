@@ -15,9 +15,10 @@ type
     bottomRow: int
     armed: bool
     sawFullDisplayErase: bool
+    sawLineErase: bool
 
 func newOutputFootprint*(): OutputFootprint =
-  OutputFootprint(bottomRow: -1, armed: false, sawFullDisplayErase: false)
+  OutputFootprint(bottomRow: -1, armed: false, sawFullDisplayErase: false, sawLineErase: false)
 
 func bottomRow*(f: OutputFootprint): int = f.bottomRow
 
@@ -30,6 +31,7 @@ proc reset*(f: var OutputFootprint) =
   f.bottomRow = -1
   f.armed = false
   f.sawFullDisplayErase = false
+  f.sawLineErase = false
 
 proc markFullDisplayErase*(f: var OutputFootprint, activeAlternate = false) =
   if activeAlternate: return
@@ -38,6 +40,11 @@ proc markFullDisplayErase*(f: var OutputFootprint, activeAlternate = false) =
 proc recordRow*(f: var OutputFootprint, row: int, activeAlternate = false) =
   if activeAlternate or row < 0: return
   f.bottomRow = max(f.bottomRow, row)
+
+proc recordLineErase*(f: var OutputFootprint, row: int, activeAlternate = false) =
+  if activeAlternate or row < 0: return
+  f.sawLineErase = true
+  f.recordRow(row)
 
 proc recordRows*(
     f: var OutputFootprint,
@@ -55,7 +62,8 @@ proc armAfterCursorRestore*(
   if activeAlternate:
     f.armed = false
   else:
-    f.armed = f.sawFullDisplayErase and f.bottomRow >= 0 and cursorRow < f.bottomRow
+    f.armed = (f.sawFullDisplayErase or f.sawLineErase) and
+      f.bottomRow >= 0 and cursorRow < f.bottomRow
 
 proc consumeResume*(
     f: var OutputFootprint,

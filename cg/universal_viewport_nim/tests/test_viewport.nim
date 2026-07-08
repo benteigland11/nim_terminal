@@ -68,6 +68,31 @@ suite "universal viewport":
     check v.viewportToBuffer(0) == topBefore
     check v.viewportToBuffer(4) == bottomBefore
     check v.scrollOffset == 12
+    check v.userHeld
+
+  test "user-held scroll survives repeated stick-to-bottom refreshes":
+    var v = newViewport(5)
+    v.updateBufferHeight(20)
+    v.scrollUp(8)
+    let topBefore = v.viewportToBuffer(0)
+
+    v.updateBufferHeight(20, stickToBottom = true)
+    v.updateBufferHeight(24, stickToBottom = true)
+
+    check v.userHeld
+    check v.viewportToBuffer(0) == topBefore
+    check v.scrollOffset == 12
+
+  test "scrolling back to bottom releases user hold":
+    var v = newViewport(5)
+    v.updateBufferHeight(20)
+    v.scrollUp(8)
+    check v.userHeld
+
+    v.scrollDown(100)
+
+    check v.scrollOffset == 0
+    check not v.userHeld
 
   test "history growth at live end remains pinned":
     var v = newViewport(5)
