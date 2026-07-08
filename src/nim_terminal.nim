@@ -10,7 +10,7 @@ else:
 import opengl
 import pixie
 import os
-import std/[algorithm, json, options, parsecfg, strutils, times, unicode]
+import std/[algorithm, json, options, osproc, parsecfg, streams, strutils, times, unicode]
 import terminal
 import gpu_renderer
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
@@ -37,7 +37,15 @@ import ../cg/data_terminal_scroll_policy_nim/src/terminal_scroll_policy_lib
 import ../cg/data_terminal_profile_nim/src/terminal_profile_lib
 import ../cg/frontend_app_surface_relays_nim/src/app_surface_relays_lib
 import ../cg/frontend_workspace_chrome_nim/src/workspace_chrome_lib
+import ../cg/frontend_overlay_stack_nim/src/overlay_stack_lib as overlay_lib
 import cartograph_surface
+import overlay_surface
+import inspect_surface
+import ../cg/frontend_text_field_nim/src/text_field_lib as text_field
+import ../cg/frontend_focus_ring_nim/src/focus_ring_lib as focus_ring
+import ../cg/frontend_menu_nim/src/menu_lib as menu_lib
+import ../cg/frontend_scrollbar_nim/src/scrollbar_lib as scrollbar_lib
+import ../cg/frontend_toast_nim/src/toast_lib as toast_lib
 
 const
   DefaultWindowTitle = "Waymark - Built with Nim"
@@ -62,7 +70,9 @@ const
   CartographSidebarWidth = 300
   CartographCatalogHeightMax = 360
   CartographActionBarHeight = 36
+  CartographCatalogFooterHeight = 36
   CartographRailPad = 10
+  CatalogScrollbarWidth = 6
   DefaultCatalogPollSec = 1.0
   PanePadXPx = 8
   PanePadYPx = 4
@@ -117,7 +127,21 @@ type
 var
   appProfile: TerminalProfileState
   surfaceStack: AppSurfaceStack = newAppSurfaceStack()
+  overlayStack: overlay_lib.OverlayStack = overlay_lib.newOverlayStack()
+  inspectSession: InspectSession = newInspectSession()
   cartographWorkspace: CartographWorkspace
+  cartographFocus: focus_ring.FocusRing = focus_ring.newFocusRing(["search"])
+  catalogMenu: menu_lib.Menu = menu_lib.newMenu(@[
+    menu_lib.menuItem("inspect", "Inspect"),
+    menu_lib.menuItem("copy-id", "Copy id"),
+  ])
+  catalogMenuOpen = false
+  catalogMenuAnchorX = 0
+  catalogMenuAnchorY = 0
+  catalogScrollDrag: scrollbar_lib.ScrollbarDrag
+  appToasts: toast_lib.ToastQueue = toast_lib.newToastQueue()
+  activeSearchProcess: Process = nil
+  activeSearchQuery = ""
   catalogRootPath = DefaultCatalogRoot
   lastCatalogScanCwd = ""
   lastCatalogPollTime = 0.0
@@ -287,6 +311,26 @@ proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
     result.scrollback.int64,
   ))
 
+func appSurfaceConfigValue(id: AppSurfaceId): string =
+  case id
+  of asPrimary: "primary"
+  of asWorkspace: "workspace"
+
+proc persistActiveSurface(path = ConfigPath) =
+  var dict: Config
+  if fileExists(path):
+    try:
+      dict = loadConfig(path)
+    except CatchableError:
+      dict = Config()
+  else:
+    dict = Config()
+  dict.setSectionKey("surface", "default", appSurfaceConfigValue(surfaceStack.active))
+  try:
+    writeConfig(dict, path)
+  except CatchableError as e:
+    echo "Config warning: could not save surface state: ", e.msg
+
 proc configFileBaseDir(): string =
   if fileExists(ConfigPath):
     splitFile(absolutePath(ConfigPath)).dir
@@ -307,25 +351,8 @@ proc resolveCatalogRoot(primaryCwd: string = ""): string =
     let resolved = absolutePath(resolveCandidatePath(envRoot, getCurrentDir()))
     if dirExists(resolved):
       return resolved
-  var bases: seq[string] = @[]
-  if primaryCwd.len > 0:
-    let expanded = absolutePath(expandTilde(primaryCwd.strip()))
-    if expanded.len > 0:
-      bases.add expanded
-  let launchDir = getCurrentDir()
-  if launchDir.len > 0 and launchDir notin bases:
-    bases.add launchDir
-  let cfgBase = configFileBaseDir()
-  if cfgBase.len > 0 and cfgBase notin bases:
-    bases.add cfgBase
-  for base in bases:
-    let candidate = resolveCandidatePath(DefaultCatalogRoot, base)
-    if dirExists(candidate):
-      return absolutePath(candidate)
-  if bases.len > 0:
-    absolutePath(resolveCandidatePath(DefaultCatalogRoot, bases[0]))
-  else:
-    absolutePath(DefaultCatalogRoot)
+  let baseDir = if primaryCwd.len > 0: expandTilde(primaryCwd.strip()) else: getCurrentDir()
+  absolutePath(resolveCandidatePath(DefaultCatalogRoot, baseDir))
 
 func toChildWheelEncoding(kind: ScrollInputKind): ChildWheelEncoding =
   case kind
@@ -407,13 +434,13 @@ proc refreshWorkspaceTabLabel(wi: int): bool =
 
   var changed = false
   let session = addr workspaces[wi].sessions[activeIdx]
-  
+
   # 1. Update CWD
   when not defined(windows):
     let liveCwd = processCwd(session.terminal.host.pid)
     if liveCwd.isSome:
+      session.cwd = liveCwd.get()
       if session.title.updateCwd(liveCwd.get()):
-        session.cwd = liveCwd.get()
         changed = true
 
     # 2. Update Program Name
@@ -432,7 +459,7 @@ proc refreshWorkspaceTabLabel(wi: int): bool =
   let tabId = workspaces[wi].id
   let tabIdx = tabs.indexOf(tabId)
   if tabIdx < 0: return false
-  
+
   if tabs.tabs[tabIdx].label != label:
     result = tabs.rename(tabId, label)
   else:
@@ -459,11 +486,31 @@ proc paneRows(area: PaneRect): int =
 proc fullContentRect(): pane_tree.Rect =
   pane_tree.rect(0, chromeHeaderHeight(), winWidth, contentHeight())
 
+proc cartographCatalogFooterHeight(): int
+
 proc cartographRegions(): ThreeColumnRegions =
   let full = fullContentRect()
   let bounds = WorkspaceRect(x: full.x, y: full.y, w: full.w, h: full.h)
-  let catalogH = min(CartographCatalogHeightMax, max(160, bounds.h * 42 div 100))
-  stackedSidebarRegions(
+  var catalogH = min(CartographCatalogHeightMax, max(160, bounds.h * 42 div 100))
+  if cartographWorkspace != nil and rend != nil and rend.chromeAtlas != nil:
+    let entryCount = cartographWorkspace.visibleEntries.len
+    let cellHeight = rend.chromeAtlas.cellHeight
+    let stride = cellHeight * 2 + 10
+    let pad = 10
+    let titleArea = pad + cellHeight + 8
+    let footerArea = cartographCatalogFooterHeight()
+    let bottomPadding = pad
+    let scrollArrowH = max(18, cellHeight + 6)
+
+    let neededH =
+      if entryCount <= 3:
+        titleArea + entryCount * stride + bottomPadding + footerArea
+      else:
+        titleArea + 2 * scrollArrowH + 3 * stride + bottomPadding + footerArea
+
+    catalogH = min(bounds.h, max(neededH, 48))
+
+  sidebarCatalogRegions(
     bounds,
     sidebarWidth = CartographSidebarWidth,
     catalogHeight = catalogH,
@@ -474,23 +521,188 @@ proc contentRect(): pane_tree.Rect =
   if surfaceStack.active != asWorkspace:
     fullContentRect()
   else:
-    let center = contentAboveActionBar(cartographRegions().center, CartographActionBarHeight)
+    let center = contentBelowActionBar(cartographRegions().center, CartographActionBarHeight)
     pane_tree.rect(center.x, center.y, center.w, center.h)
+
+proc cartographCatalogFooterHeight(): int =
+  if cartographWorkspace.selectedIndex >= 0 and cartographWorkspace.visibleEntries.len > 0:
+    CartographCatalogFooterHeight
+  else:
+    0
+
+proc activeCatalogInspectButtonRect(): overlay_lib.OverlayRect =
+  let regions = cartographRegions()
+  if regions.catalog.w <= 0 or rend == nil or rend.chromeAtlas == nil:
+    overlay_lib.OverlayRect()
+  else:
+    overlay_surface.catalogInspectButtonRect(
+      overlay_lib.OverlayRect(
+        x: regions.catalog.x,
+        y: regions.catalog.y,
+        w: regions.catalog.w,
+        h: regions.catalog.h,
+      ),
+      cartographCatalogFooterHeight(),
+      rend.chromeAtlas.cellWidth,
+      rend.chromeAtlas.cellHeight,
+      CartographRailPad,
+    )
+
+proc activeModalLayout(): overlay_lib.ModalChromeLayout =
+  let top = overlay_lib.overlayTop(overlayStack)
+  let bounds = overlay_surface.overlayContentBounds(chromeHeaderHeight(), winWidth, winHeight)
+  var metrics = overlay_lib.defaultModalChromeMetrics(
+    rend.chromeAtlas.cellWidth,
+    rend.chromeAtlas.cellHeight,
+  )
+  if top.id == "search_registry":
+    metrics.maxPanelWidth = min(800, winWidth - 48)
+    metrics.minPanelWidth = min(600, winWidth - 48)
+  overlay_lib.computeModalChromeLayout(bounds, top.panel, metrics)
+
+proc activeExplorerLayout(): overlay_lib.ExplorerChromeLayout =
+  let top = overlay_lib.overlayTop(overlayStack)
+  let bounds = overlay_surface.overlayContentBounds(chromeHeaderHeight(), winWidth, winHeight)
+  let metrics = overlay_lib.defaultExplorerChromeMetrics(
+    rend.chromeAtlas.cellWidth,
+    rend.chromeAtlas.cellHeight,
+  )
+  overlay_lib.computeExplorerChromeLayout(bounds, top.title, metrics)
+
+proc dismissTopOverlay() =
+  let top = overlay_lib.overlayTop(overlayStack)
+  if top.kind == overlay_lib.okExplorer:
+    closeInspectSession(inspectSession)
+  elif top.id == "search_registry" or top.id == "search_error":
+    if activeSearchProcess != nil:
+      try:
+        activeSearchProcess.terminate()
+        activeSearchProcess.close()
+      except CatchableError:
+        discard
+      activeSearchProcess = nil
+  discard overlay_lib.overlayDismissTop(overlayStack)
+
+proc showInspectExplorer() =
+  let entry = selectedCartographEntry(cartographWorkspace)
+  if entry.dirName.len == 0:
+    return
+  let widgetPath = catalogRootPath / entry.dirName
+  if not dirExists(widgetPath):
+    return
+  let title =
+    if entry.name.len > 0:
+      "Inspect: " & entry.name
+    else:
+      "Inspect: " & entry.id
+  openInspectSession(inspectSession, widgetPath, title)
+  overlayStack.overlayPushExplorer("inspect-" & entry.id, title)
+
+proc handleOverlayPointer(x, y: int; down: bool): bool =
+  if not overlay_lib.overlayCapturesInput(overlayStack):
+    return false
+  if not down:
+    return true
+  let top = overlay_lib.overlayTop(overlayStack)
+  case top.kind
+  of overlay_lib.okConfirm:
+    let layout = activeModalLayout()
+    let hit = overlay_lib.overlayHitTestModal(layout, x, y, top.dismissOnBackdrop)
+    case hit.kind
+    of overlay_lib.ohBackdrop:
+      dismissTopOverlay()
+      return true
+    of overlay_lib.ohButton:
+      dismissTopOverlay()
+      return true
+    of overlay_lib.ohPanel, overlay_lib.ohNone:
+      return overlay_lib.pointInOverlayRect(layout.panel, x, y)
+  of overlay_lib.okExplorer:
+    let layout = activeExplorerLayout()
+    let backdropHit = overlay_lib.overlayHitTestExplorer(layout, x, y, top.dismissOnBackdrop)
+    if backdropHit.kind == overlay_lib.ohBackdrop:
+      dismissTopOverlay()
+      return true
+    return handleInspectExplorerPointer(
+      inspectSession,
+      layout,
+      x, y,
+      down,
+      rend.chromeAtlas.cellWidth,
+      rend.chromeAtlas.cellHeight,
+    )
+
+proc handleOverlayWheel(x, y: int; yoffset: float): bool =
+  if surfaceStack.active != asWorkspace:
+    return false
+  if not overlay_lib.overlayCapturesInput(overlayStack):
+    return false
+  let top = overlay_lib.overlayTop(overlayStack)
+  if top.kind != overlay_lib.okExplorer:
+    return true
+  let layout = activeExplorerLayout()
+  let cellW = rend.chromeAtlas.cellWidth
+  let cellH = rend.chromeAtlas.cellHeight
+  if overlay_lib.pointInOverlayRect(layout.treePane, x, y):
+    let treeLayout = inspectTreeLayout(inspectSession, layout.treePane, cellW, cellH)
+    if handleInspectTreeWheel(inspectSession, treeLayout, yoffset):
+      return true
+  if overlay_lib.pointInOverlayRect(layout.codePane, x, y):
+    if handleInspectCodeWheel(inspectSession, layout.codePane, cellW, cellH, yoffset):
+      return true
+  overlay_lib.pointInOverlayRect(layout.panel, x, y)
+
+proc handleOverlayEscape(): bool =
+  if not overlay_lib.overlayCapturesInput(overlayStack):
+    return false
+  let top = overlay_lib.overlayTop(overlayStack)
+  if top.dismissOnEscape:
+    dismissTopOverlay()
+    return true
+  false
+
+proc drawOverlays() =
+  if overlay_lib.overlayIsEmpty(overlayStack):
+    return
+  let top = overlay_lib.overlayTop(overlayStack)
+  case top.kind
+  of overlay_lib.okConfirm:
+    let layout = activeModalLayout()
+    rend.drawModalOverlay(winWidth, winHeight, layout, top.panel)
+  of overlay_lib.okExplorer:
+    let layout = activeExplorerLayout()
+    let cellW = rend.chromeAtlas.cellWidth
+    let cellH = rend.chromeAtlas.cellHeight
+    let treeLayout = inspectTreeLayout(inspectSession, layout.treePane, cellW, cellH)
+    let treeRows = inspectTreeRows(inspectSession)
+    let codeViewport = inspectCodeViewport(inspectSession, layout.codePane, cellW, cellH)
+    rend.drawExplorerOverlay(
+      winWidth,
+      winHeight,
+      layout,
+      top.title,
+      treeLayout,
+      treeRows,
+      codeViewport,
+      inspectSession.previewPath,
+      inspectSession.tree.selectedIndex,
+    )
 
 proc catalogListLayout(): CatalogListLayout =
   let regions = cartographRegions()
   if regions.catalog.w <= 0 or rend == nil or rend.chromeAtlas == nil:
     return CatalogListLayout()
+  let listH = max(0, regions.catalog.h - cartographCatalogFooterHeight())
   computeCatalogListLayout(
     regions.catalog.x,
     regions.catalog.y,
     regions.catalog.w,
-    regions.catalog.h,
+    listH,
     rend.chromeAtlas.cellHeight,
     rend.chromeAtlas.cellWidth,
     CartographRailPad,
     cartographWorkspace.catalogScrollRow,
-    cartographWorkspace.catalog.entries.len,
+    cartographWorkspace.visibleEntries.len,
   )
 
 proc pointInCatalogList(x, y: int): bool =
@@ -503,46 +715,8 @@ proc pointInCatalogList(x, y: int): bool =
   x >= layout.contentX and x < layout.contentX + layout.contentW and
     y >= layout.listY and y < layout.listY + layout.visibleRows * layout.stride
 
-proc pointInCatalogScrollRegion(x, y: int): bool =
-  let regions = cartographRegions()
-  if regions.catalog.w <= 0:
-    return false
-  if x < regions.catalog.x or x >= regions.catalog.x + regions.catalog.w:
-    return false
-  let layout = catalogListLayout()
-  if layout.showScrollUp and pointInCatalogScrollArea(x, y, layout.scrollUp):
-    return true
-  if layout.showScrollDown and pointInCatalogScrollArea(x, y, layout.scrollDown):
-    return true
-  pointInCatalogList(x, y)
-
-proc handleCatalogScrollArrow(x, y: int): bool =
-  if surfaceStack.active != asWorkspace:
-    return false
-  let layout = catalogListLayout()
-  if layout.showScrollUp and pointInCatalogScrollArea(x, y, layout.scrollUp):
-    scrollCartographCatalog(cartographWorkspace, -1, layout.visibleRows)
-    return true
-  if layout.showScrollDown and pointInCatalogScrollArea(x, y, layout.scrollDown):
-    scrollCartographCatalog(cartographWorkspace, 1, layout.visibleRows)
-    return true
-  false
-
-proc handleCatalogWheel(x, y: int; yoffset: float): bool =
-  if surfaceStack.active != asWorkspace or abs(yoffset) < 0.01:
-    return false
-  if not pointInCatalogScrollRegion(x, y):
-    return false
-  let layout = catalogListLayout()
-  if layout.visibleRows <= 0:
-    return false
-  let steps = max(1, int(abs(yoffset)))
-  let deltaRows = if yoffset > 0: -steps else: steps
-  scrollCartographCatalog(cartographWorkspace, deltaRows, layout.visibleRows)
-  true
-
 proc catalogEntryIndexAt(x, y: int): int =
-  if surfaceStack.active != asWorkspace or cartographWorkspace.catalog.entries.len == 0:
+  if surfaceStack.active != asWorkspace or cartographWorkspace.visibleEntries.len == 0:
     return -1
   let layout = catalogListLayout()
   if x < layout.contentX or x >= layout.contentX + layout.contentW:
@@ -551,7 +725,7 @@ proc catalogEntryIndexAt(x, y: int): int =
     return -1
   var rowY = layout.listY
   for local in 0 ..< min(
-      cartographWorkspace.catalog.entries.len - cartographWorkspace.catalogScrollRow,
+      cartographWorkspace.visibleEntries.len - cartographWorkspace.catalogScrollRow,
       layout.visibleRows,
     ):
     if y >= rowY - 2 and y < rowY + catalogRowHeight(rend.chromeAtlas.cellHeight) + 4:
@@ -562,24 +736,296 @@ proc catalogEntryIndexAt(x, y: int): int =
 proc pointInRect(x, y: int; area: PaneRect): bool =
   x >= area.x and x < area.x + area.w and y >= area.y and y < area.y + area.h
 
-proc handleCartographPointer(x, y: int): bool =
+proc searchInputActive(): bool =
+  ## True when the Cartograph search field currently owns keyboard input.
+  surfaceStack.active == asWorkspace and
+    not overlay_lib.overlayCapturesInput(overlayStack) and
+    cartographFocus.isFocused("search")
+
+proc refreshCatalogFilter() =
+  applyCatalogFilter(cartographWorkspace, catalogListLayout().visibleRows)
+  markCartographDirty(cartographWorkspace)
+
+proc focusCartographSearch() =
+  discard cartographFocus.focus("search")
+  markCartographDirty(cartographWorkspace)
+
+proc blurCartographSearch() =
+  if cartographFocus.hasFocus():
+    cartographFocus.clearFocus()
+    markCartographDirty(cartographWorkspace)
+
+proc searchInsertRune(r: Rune) =
+  if not searchInputActive():
+    return
+  cartographWorkspace.search.insertRune(r)
+  refreshCatalogFilter()
+
+proc searchInsertText(text: string) {.used.} =
+  ## Used by the SDL text-input path; unused under the GLFW build config.
+  if not searchInputActive():
+    return
+  for r in text.runes:
+    cartographWorkspace.search.insertRune(r)
+  refreshCatalogFilter()
+
+proc triggerSearchModal(query: string) =
+  let q = query.strip()
+  if q.len == 0:
+    return
+
+  if activeSearchProcess != nil:
+    try:
+      activeSearchProcess.terminate()
+      activeSearchProcess.close()
+    except CatchableError:
+      discard
+    activeSearchProcess = nil
+
+  try:
+    activeSearchProcess = startProcess(
+      command = "cartograph",
+      args = @["search", q],
+      options = {poUsePath, poStdErrToStdOut}
+    )
+    activeSearchQuery = q
+  except CatchableError as e:
+    activeSearchProcess = nil
+    let errPanel = overlay_lib.OverlayPanel(
+      title: "Registry Search Error",
+      body: "Could not start cartograph search:\n\n" & e.msg,
+      buttons: @[
+        overlay_lib.OverlayButton(label: "Close", actionId: "close_search_error", primary: true)
+      ]
+    )
+    overlayStack.overlayPushModal("search_error", errPanel)
+    markCartographDirty(cartographWorkspace)
+    return
+
+  let searchingPanel = overlay_lib.OverlayPanel(
+    title: "Search Cartograph Registry",
+    body: "Searching registry for: '" & q & "'...\n\nPlease wait a moment.",
+    buttons: @[
+      overlay_lib.OverlayButton(label: "Cancel", actionId: "cancel_search", primary: true)
+    ]
+  )
+  overlayStack.overlayPushModal("search_registry", searchingPanel)
+  markCartographDirty(cartographWorkspace)
+
+proc checkSearchProcess() =
+  if activeSearchProcess != nil:
+    if not activeSearchProcess.running():
+      var output = ""
+      try:
+        output = activeSearchProcess.outputStream.readAll()
+      except CatchableError as e:
+        output = "Error reading output: " & e.msg
+
+      try:
+        activeSearchProcess.close()
+      except CatchableError:
+        discard
+      activeSearchProcess = nil
+
+      var title = "Registry Search Results"
+      var body = ""
+
+      try:
+        let jsonNode = parseJson(output)
+        let localNode = jsonNode{"local"}
+        let registryNode = jsonNode{"registry"}
+
+        var results: seq[string] = @[]
+
+        proc formatWidgets(node: JsonNode; header: string) =
+          if node != nil:
+            let count = if node{"count"} != nil and node{"count"}.kind == JInt: node{"count"}.num.int else: 0
+            let widgets = node{"widgets"}
+            if widgets != nil and widgets.kind == JArray and widgets.len > 0:
+              if results.len > 0:
+                results.add ""
+              results.add "=== " & header & " (" & $count & ") ==="
+              for widget in widgets:
+                let id = if widget{"id"} != nil and widget{"id"}.kind == JString: widget{"id"}.str else: ""
+                let desc = if widget{"description"} != nil and widget{"description"}.kind == JString: widget{"description"}.str else: ""
+                let lang = if widget{"language"} != nil and widget{"language"}.kind == JString: widget{"language"}.str else: ""
+                if id.len > 0:
+                  results.add "* " & id & " [" & lang & "]"
+                  if desc.len > 0:
+                    let shortDesc = if desc.len > 120: desc[0..117] & "..." else: desc
+                    results.add "  " & shortDesc.strip().replace("\n", " ")
+
+        formatWidgets(localNode, "Installed Widgets")
+        formatWidgets(registryNode, "Registry Widgets")
+
+        if results.len == 0:
+          body = "No widgets found matching '" & activeSearchQuery & "'."
+        else:
+          body = results.join("\n")
+      except CatchableError as e:
+        body = "Search Output for '" & activeSearchQuery & "':\n\n" & output.strip()
+
+      # Update the active modal overlay!
+      if not overlayStack.overlayIsEmpty():
+        let topIdx = overlayStack.layers.len - 1
+        if overlayStack.layers[topIdx].id == "search_registry":
+          overlayStack.layers[topIdx].panel.title = title
+          overlayStack.layers[topIdx].panel.body = body
+          overlayStack.layers[topIdx].panel.buttons = @[
+            overlay_lib.OverlayButton(label: "Close", actionId: "close_search", primary: true)
+          ]
+          markCartographDirty(cartographWorkspace)
+
+type SearchEditKey = enum
+  sekBackspace, sekDelete, sekLeft, sekRight, sekHome, sekEnd, sekEscape, sekEnter
+
+proc handleSearchEditKey(k: SearchEditKey): bool =
+  ## Apply an editing/navigation key to the focused search field.
+  ## Returns true when the key was consumed (must not reach the terminal).
+  if not searchInputActive():
+    return false
+  case k
+  of sekBackspace:
+    if cartographWorkspace.search.backspace(): refreshCatalogFilter()
+  of sekDelete:
+    if cartographWorkspace.search.deleteForward(): refreshCatalogFilter()
+  of sekLeft:
+    cartographWorkspace.search.moveLeft()
+    markCartographDirty(cartographWorkspace)
+  of sekRight:
+    cartographWorkspace.search.moveRight()
+    markCartographDirty(cartographWorkspace)
+  of sekHome:
+    cartographWorkspace.search.moveHome()
+    markCartographDirty(cartographWorkspace)
+  of sekEnd:
+    cartographWorkspace.search.moveEnd()
+    markCartographDirty(cartographWorkspace)
+  of sekEscape:
+    blurCartographSearch()
+  of sekEnter:
+    let q = cartographWorkspace.search.text
+    blurCartographSearch()
+    triggerSearchModal(q)
+  true
+
+proc executeCatalogMenuAction(itemId: string)  ## Defined after clipboard glue.
+
+proc catalogMenuLayout(): menu_lib.MenuLayout =
+  let cellH = if rend != nil and rend.chromeAtlas != nil: rend.chromeAtlas.cellHeight else: 16
+  let cellW = if rend != nil and rend.chromeAtlas != nil: rend.chromeAtlas.cellWidth else: 8
+  menu_lib.computeMenuLayout(
+    catalogMenuAnchorX, catalogMenuAnchorY, winWidth, winHeight,
+    catalogMenu.items, cellW, menu_lib.defaultMenuMetrics(cellH))
+
+proc dismissCatalogMenu() =
+  if catalogMenuOpen:
+    catalogMenuOpen = false
+    catalogMenu.highlighted = -1
+    markCartographDirty(cartographWorkspace)
+
+proc openCatalogMenuAt(x, y: int): bool =
+  ## Open the catalog context menu when the pointer is over a widget row.
+  if surfaceStack.active != asWorkspace or overlay_lib.overlayCapturesInput(overlayStack):
+    return false
+  let idx = catalogEntryIndexAt(x, y)
+  if idx < 0:
+    return false
+  selectCartographEntry(cartographWorkspace, idx, catalogListLayout().visibleRows)
+  catalogMenuAnchorX = x
+  catalogMenuAnchorY = y
+  catalogMenuOpen = true
+  catalogMenu.highlighted = -1
+  blurCartographSearch()
+  markCartographDirty(cartographWorkspace)
+  true
+
+proc handleCatalogMenuClick(x, y: int): bool =
+  ## Route a left click while the menu is open: run the row action or dismiss.
+  if not catalogMenuOpen:
+    return false
+  let layout = catalogMenuLayout()
+  let row = menu_lib.menuRowAt(layout, catalogMenu.items, x, y)
+  let itemId = if row >= 0: catalogMenu.items[row].id else: ""
+  dismissCatalogMenu()
+  if itemId.len > 0:
+    executeCatalogMenuAction(itemId)
+  true
+
+proc updateCatalogMenuHover(x, y: int) =
+  if not catalogMenuOpen:
+    return
+  let layout = catalogMenuLayout()
+  let prev = catalogMenu.highlighted
+  catalogMenu.highlightAt(layout, x, y)
+  if catalogMenu.highlighted != prev:
+    markCartographDirty(cartographWorkspace)
+
+proc catalogScrollMetrics(): scrollbar_lib.ScrollMetrics =
+  let layout = catalogListLayout()
+  let stride = max(1, layout.stride)
+  scrollbar_lib.scrollMetrics(
+    contentSize = cartographWorkspace.visibleEntries.len * stride,
+    viewportSize = layout.visibleRows * stride,
+    offset = cartographWorkspace.catalogScrollRow * stride)
+
+proc catalogScrollbarTrack(): scrollbar_lib.ScrollbarTrack =
+  let regions = cartographRegions()
+  let layout = catalogListLayout()
+  scrollbar_lib.ScrollbarTrack(
+    x: regions.catalog.x + regions.catalog.w - CatalogScrollbarWidth - 2,
+    y: layout.listY,
+    w: CatalogScrollbarWidth,
+    h: max(0, layout.visibleRows * max(1, layout.stride)))
+
+proc setCatalogScrollFromOffset(offset: int) =
+  let layout = catalogListLayout()
+  let stride = max(1, layout.stride)
+  let row = offset div stride
+  cartographWorkspace.catalogScrollRow =
+    max(0, min(row, catalogScrollMax(cartographWorkspace, layout.visibleRows)))
+  markCartographDirty(cartographWorkspace)
+
+proc updateCatalogScrollDrag(y: int) =
+  if not catalogScrollDrag.active:
+    return
+  let m = catalogScrollMetrics()
+  let track = catalogScrollbarTrack()
+  setCatalogScrollFromOffset(scrollbar_lib.offsetForDrag(catalogScrollDrag, track, m, y))
+
+proc handleCartographPointer(x, y: int; down: bool): bool =
   if surfaceStack.active != asWorkspace:
     return false
-  if handleCatalogScrollArrow(x, y):
+  if handleOverlayPointer(x, y, down):
+    return true
+  if not down:
+    return false
+  let layout = catalogListLayout()
+  if layout.scrollable:
+    if layout.showScrollUp and pointInCatalogScrollArea(x, y, layout.scrollUp):
+      scrollCartographCatalog(cartographWorkspace, -1, layout.visibleRows)
+      return true
+    if layout.showScrollDown and pointInCatalogScrollArea(x, y, layout.scrollDown):
+      scrollCartographCatalog(cartographWorkspace, 1, layout.visibleRows)
+      return true
+  let regions = cartographRegions()
+  if y >= regions.center.y and y < regions.center.y + CartographActionBarHeight and
+      x >= regions.center.x and x < regions.center.x + regions.center.w:
+    focusCartographSearch()
+    return true
+  ## Any click outside the search bar returns keyboard control to the terminal.
+  blurCartographSearch()
+  let inspectBtn = activeCatalogInspectButtonRect()
+  if overlay_lib.pointInOverlayRect(inspectBtn, x, y):
+    showInspectExplorer()
     return true
   let entryIdx = catalogEntryIndexAt(x, y)
   if entryIdx >= 0:
     selectCartographEntry(cartographWorkspace, entryIdx, catalogListLayout().visibleRows)
     return true
-  let regions = cartographRegions()
-  if regions.inspector.w > 0 and x >= regions.inspector.x and x < regions.inspector.x + regions.inspector.w:
-    return true
-  if y >= regions.center.y + regions.center.h - CartographActionBarHeight:
-    return true
   if pointInRect(x, y, contentRect()):
     return false
-  x >= regions.catalog.x and x < regions.catalog.x + regions.catalog.w or
-    x >= regions.inspector.x and x < regions.inspector.x + regions.inspector.w
+  x >= regions.catalog.x and x < regions.catalog.x + regions.catalog.w
 
 proc activePaneLayouts(): seq[PaneLayout] =
   let idx = activeWorkspaceIndex()
@@ -666,6 +1112,11 @@ proc activeSessionCwd(fallback = ""): string =
   let idx = workspace[].activeSessionIndex()
   if idx < 0:
     return if fallback.len > 0: fallback else: config.startDirectory
+  when not defined(windows):
+    let liveCwd = processCwd(workspace[].sessions[idx].terminal.host.pid)
+    if liveCwd.isSome:
+      workspace[].sessions[idx].cwd = liveCwd.get()
+      return liveCwd.get()
   let cached = workspace[].sessions[idx].cwd
   if cached.len > 0:
     cached
@@ -723,6 +1174,10 @@ proc validSessionCwd(candidate: string): string =
   ""
 
 proc startupSessionCwd(): string =
+  if paramCount() > 0:
+    let dir = paramStr(1)
+    if dirExists(dir):
+      return validSessionCwd(dir)
   validSessionCwd(config.startDirectory)
 
 proc shellArgsFor(cwd: string): seq[string] =
@@ -774,7 +1229,7 @@ proc resizeTerminalViewsPreservingView(anchors: seq[ViewAnchor] = @[]) =
         contextRowsAbove = ZoomContextRowsAbove,
         pinBottom = false,
       )
-      if item.id == workspace.panes.active:
+      if item.id == workspace.panes.active and not workspace.sessions[idx].terminal.viewport.userHeld:
         workspace.sessions[idx].terminal.viewport.ensureVisible(
           workspace.sessions[idx].terminal.screen.absoluteCursorRow(),
           ZoomContextRowsAbove,
@@ -1129,14 +1584,33 @@ proc drawCartographMode() =
   let regions = cartographRegions()
   let bg = workspaces[wi].sessions[activeIdx].terminal.screen.theme.background
   render_relay_lib.beginFrame(frameRelays, render_relay_lib.size2d(winWidth, winHeight), toRenderColor(bg))
+  let searchCellW =
+    if rend != nil and rend.chromeAtlas != nil: max(1, rend.chromeAtlas.cellWidth)
+    else: 8
+  let searchCols = max(1, (regions.center.w - CartographRailPad * 2) div searchCellW)
+  let searchView = cartographWorkspace.search.viewport(searchCols)
+  let searchFocusedNow = cartographFocus.isFocused("search")
+  let sbMetrics = catalogScrollMetrics()
+  let sbVisible = scrollbar_lib.scrollbarVisible(sbMetrics)
+  let sbTrack = catalogScrollbarTrack()
+  let sbThumb =
+    if sbVisible: scrollbar_lib.computeThumb(sbTrack, sbMetrics)
+    else: scrollbar_lib.ScrollbarThumb()
   rend.drawCartographShell(
     winWidth,
     winHeight,
     regions,
-    cartographWorkspace.catalog,
+    displayCatalog(cartographWorkspace),
     cartographWorkspace.selectedIndex,
     cartographWorkspace.catalogScrollRow,
     CartographActionBarHeight,
+    cartographCatalogFooterHeight(),
+    searchView.text,
+    (if searchFocusedNow: searchView.caretCol else: -1),
+    searchFocusedNow,
+    false,
+    sbTrack,
+    sbThumb,
   )
   let termArea = contentRect()
   let layouts = workspaces[wi].panes.layouts(termArea)
@@ -1158,6 +1632,14 @@ proc drawCartographMode() =
   if workspaces[wi].panes.len > 1:
     for item in layouts:
       rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
+  if catalogMenuOpen:
+    rend.drawContextMenu(winWidth, winHeight, catalogMenuLayout(), catalogMenu.items, catalogMenu.highlighted)
+  block toasts:
+    let now = epochTime()
+    toast_lib.prune(appToasts, now)
+    let visible = toast_lib.visibleToasts(appToasts, now)
+    if visible.len > 0:
+      rend.drawToasts(winWidth, winHeight, visible, now)
   clearCartographDirty(cartographWorkspace)
 
 proc drawActiveWorkspace() =
@@ -1188,6 +1670,7 @@ proc drawActiveWorkspace() =
       rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
 
 proc pumpTerminalSessions(): int =
+  checkSearchProcess()
   var n = 0
   for workspace in workspaces.mitems:
     for session in workspace.sessions:
@@ -1201,7 +1684,13 @@ proc toggleSurface() =
   if surfaceStack.active == asPrimary:
     switchSurface(surfaceStack, asWorkspace)
   else:
+    while overlay_lib.overlayCapturesInput(overlayStack):
+      dismissTopOverlay()
     switchSurface(surfaceStack, asPrimary)
+  ## Leave the terminal in charge of the keyboard whenever surfaces switch.
+  cartographFocus.clearFocus()
+  dismissCatalogMenu()
+  persistActiveSurface()
   markCartographDirty(cartographWorkspace)
   resizeTerminals()
   let term = activeTerm()
@@ -1341,6 +1830,9 @@ proc writeScreenSnapshot(term: Terminal) =
     lines.add "using_alt=" & $term.screen.usingAlt
     lines.add "scroll_region=" & $term.screen.scrollTop & "," & $term.screen.scrollBottom
     lines.add "total_rows=" & $term.screen.totalRows & " viewport_max_scroll=" & $term.viewport.maxScroll
+    lines.add "viewport_scroll_offset=" & $term.viewport.scrollOffset &
+      " viewport_top=" & $term.viewport.viewportToBuffer(0) &
+      " viewport_bottom=" & $term.viewport.viewportToBuffer(term.viewport.height - 1)
     let mode = term.inputMode.snapshot(term.screen.usingAlt)
     lines.add "input_mouse_mode=" & $mode.mouseMode
     lines.add "input_sgr_mouse=" & $mode.sgrMouse
@@ -1479,6 +1971,22 @@ proc installClipboardProviders() =
 proc copyToClipboard(text: string) =
   discard clipboard_provider_lib.writeText(clipboardProviders, text, clipboardPolicy)
 
+proc pushToast(text: string) =
+  appToasts.push(text, epochTime())
+  markCartographDirty(cartographWorkspace)
+
+proc executeCatalogMenuAction(itemId: string) =
+  let entry = selectedCartographEntry(cartographWorkspace)
+  case itemId
+  of "inspect":
+    showInspectExplorer()
+  of "copy-id":
+    if entry.id.len > 0:
+      copyToClipboard(entry.id)
+      pushToast("Copied " & entry.id)
+  else:
+    discard
+
 proc pasteFromClipboard(): string =
   let text = clipboard_provider_lib.readText(clipboardProviders, clipboardPolicy)
   if clipboard_provider_lib.success(text):
@@ -1591,27 +2099,66 @@ proc runLifecycleChaos(cycles: int) =
 
 when not defined(waymarkSdl3):
   proc onChar(win: Window, codepoint: cuint) {.cdecl.} =
+    if overlay_lib.overlayCapturesInput(overlayStack) and surfaceStack.active == asWorkspace: return
     if keyTextFallback: return
+    if searchInputActive():
+      searchInsertRune(Rune(codepoint.int32))
+      return
     let term = activeTerm()
     if term == nil: return
     let sent = term.sendKey(keyChar(uint32(codepoint)))
     if inputDebug: echo "[input] char codepoint=", codepoint, " queued=", sent
     term.damage.markAll()
-  
+
   proc onKey(win: Window, key, scancode, action, mods: cint) {.cdecl.} =
+    if action == PRESS and key == KEY_ESCAPE and catalogMenuOpen:
+      dismissCatalogMenu()
+      return
+    if action == PRESS and key == KEY_ESCAPE and handleOverlayEscape():
+      return
+    if overlay_lib.overlayCapturesInput(overlayStack) and surfaceStack.active == asWorkspace and
+        (action == PRESS or action == REPEAT):
+      return
     if action == PRESS or action == REPEAT:
       let m = castSet(mods)
       if terminal.modCtrl in m and terminal.modShift in m and key == KEY_A:
         toggleSurface()
         return
+    if (action == PRESS or action == REPEAT) and searchInputActive():
+      let m = castSet(mods)
+      case key
+      of KEY_ESCAPE: blurCartographSearch(); return
+      of KEY_BACKSPACE: discard handleSearchEditKey(sekBackspace); return
+      of KEY_DELETE: discard handleSearchEditKey(sekDelete); return
+      of KEY_LEFT: discard handleSearchEditKey(sekLeft); return
+      of KEY_RIGHT: discard handleSearchEditKey(sekRight); return
+      of KEY_HOME: discard handleSearchEditKey(sekHome); return
+      of KEY_END: discard handleSearchEditKey(sekEnd); return
+      of KEY_ENTER, KEY_KP_ENTER: discard handleSearchEditKey(sekEnter); return
+      else:
+        if keyTextFallback:
+          let ch = toPrintableRune(key, mods)
+          if ch.isSome:
+            searchInsertRune(Rune(ch.get().int32))
+            return
+        ## Swallow other unmodified keys so typing never leaks to the terminal.
+        if terminal.modCtrl notin m and terminal.modAlt notin m:
+          return
     if action == PRESS or action == REPEAT:
       let term = activeTerm()
       if term == nil: return
       let m = castSet(mods)
       if inputDebug: echo "[input] key key=", key, " action=", action, " mods=", mods
-  
+
       if terminal.modCtrl in m and terminal.modShift in m and key == KEY_T:
         addTerminalTab()
+        return
+      if terminal.modCtrl in m and terminal.modShift in m and key == KEY_N:
+        let activeCwd = validSessionCwd(activeSessionCwd())
+        try:
+          discard startProcess(getAppFilename(), args = @[activeCwd], options = {poParentStreams})
+        except CatchableError:
+          discard
         return
       if terminal.modCtrl in m and terminal.modShift in m and (key == KEY_ENTER or key == KEY_KP_ENTER):
         splitActivePane()
@@ -1625,7 +2172,7 @@ when not defined(waymarkSdl3):
         let term = activeTerm()
         if term != nil: term.damage.markAll()
         return
-  
+
       # 1. Map GLFW key to ShortcutMap.KeyCode
       var sk: shortcut_map_lib.KeyCode
       case key
@@ -1637,13 +2184,13 @@ when not defined(waymarkSdl3):
       else:
         if key >= 32 and key <= 126: sk = shortcut_map_lib.shortcutKey(char(key))
         else: sk = shortcut_map_lib.kNone
-  
+
       # 2. Lookup high-level actions
       let actionName = term.shortcuts.lookup(sk, cast[set[shortcut_map_lib.Modifier]](m))
       if actionName.isSome:
         if handleShortcutAction(term, actionName.get()):
           return
-  
+
       # GLFW's char callback does not reliably emit Ctrl/Alt character
       # combinations. Send those from the key callback so Ctrl+C, Ctrl+D,
       # Alt+letter, etc. reach the child process.
@@ -1661,19 +2208,28 @@ when not defined(waymarkSdl3):
           if inputDebug: echo "[input] fallback printable codepoint=", ch.get(), " queued=", sent
           term.damage.markAll()
           return
-  
+
       # 3. Standard keys
       let tk = toKeyCode(key).int
       if tk != 0 and tk != 1: # 0 = kNone, 1 = kChar
         let sent = term.sendKey(terminal.key(cast[terminal.KeyCode](tk), m))
         if inputDebug: echo "[input] special key=", tk, " queued=", sent
         term.damage.markAll()
-  
+
   proc onMouseButton(win: Window, button, action, mods: cint) {.cdecl.} =
     var x, y: cdouble; getCursorPos(win, addr x, addr y)
+    if button == MOUSE_BUTTON_LEFT and handleOverlayPointer(int(x), int(y), action == PRESS):
+      return
+    if catalogMenuOpen and button == MOUSE_BUTTON_LEFT and action == PRESS:
+      if handleCatalogMenuClick(int(x), int(y)):
+        return
+    if button == MOUSE_BUTTON_RIGHT and action == PRESS:
+      if openCatalogMenuAt(int(x), int(y)):
+        return
     if button == MOUSE_BUTTON_LEFT and action == RELEASE:
       draggingWindow = false
-  
+      catalogScrollDrag.active = false
+
     if button == MOUSE_BUTTON_LEFT and action == PRESS and inTitleBar(int(y)):
       if surfaceToggleHitTest(int(x), int(y), winWidth, titleBarHeight):
         toggleSurface()
@@ -1691,7 +2247,7 @@ when not defined(waymarkSdl3):
         term.activeLink = none(ActiveLink)
         term.damage.markAll()
       return
-  
+
     if button == MOUSE_BUTTON_LEFT and action == PRESS and inTabBar(int(y)):
       let closeId = tabs.closeTabAtX(int(x), winWidth, tabBarHeight)
       if closeId.isSome:
@@ -1706,9 +2262,9 @@ when not defined(waymarkSdl3):
         let term = activeTerm()
         if term != nil: term.damage.markAll()
         return
-  
+
     if int(y) < chromeHeaderHeight(): return
-    if handleCartographPointer(int(x), int(y)):
+    if handleCartographPointer(int(x), int(y), action == PRESS):
       return
     var paneFocusChanged = false
     let session = focusPaneAt(int(x), int(y), paneFocusChanged)
@@ -1728,12 +2284,12 @@ when not defined(waymarkSdl3):
     if term.inputMode.shouldIntercept(castSet(mods)):
       if button == MOUSE_BUTTON_LEFT:
         let isDown = action == PRESS
-  
+
         # Handle link clicking
         if not isDown and term.activeLink.isSome:
           launchUri(term.activeLink.get().link.text)
           return
-  
+
         term.drag.update(row, col, isDown)
         if isDown:
           let wi = activeWorkspaceIndex()
@@ -1745,7 +2301,7 @@ when not defined(waymarkSdl3):
       if tmb != terminal.mbRelease.int: # skip only the unknown-button sentinel
         lastMouseReportRow = row; lastMouseReportCol = col
         discard term.sendMouse(mouse(if action == PRESS: mePress else: meRelease, cast[terminal.MouseButton](tmb), row, col, castSet(mods)))
-  
+
   proc onCursorPos(win: Window, x, y: cdouble) {.cdecl.} =
     if draggingWindow:
       let pos = window_relay_lib.getPosition(windowRelays)
@@ -1759,7 +2315,12 @@ when not defined(waymarkSdl3):
         )
       )
       return
-  
+    if catalogScrollDrag.active:
+      updateCatalogScrollDrag(int(y))
+      return
+    if catalogMenuOpen:
+      updateCatalogMenuHover(int(x), int(y))
+
     let wi = activeWorkspaceIndex()
     if wi < 0: return
     let activeId = workspaces[wi].panes.active
@@ -1776,7 +2337,7 @@ when not defined(waymarkSdl3):
     let col = localCol(area.get(), x)
     let row = localRow(area.get(), y)
     let rawRow = rawLocalRow(area.get(), y)
-  
+
     if term.drag.state != dsIdle:
       let leftDown = window_relay_lib.isMouseButtonDown(windowRelays, window_relay_lib.mbLeft)
       term.drag.update(rawRow, col, leftDown)
@@ -1810,7 +2371,7 @@ when not defined(waymarkSdl3):
       if newActive != term.activeLink:
         term.activeLink = newActive
         term.damage.markAll()
-  
+
       if not term.inputMode.shouldIntercept() and term.inputMode.trackingWantsMotion() and
          (row != lastMouseReportRow or col != lastMouseReportCol):
         # Only report motion on cell change (xterm behavior). Per-pixel reports
@@ -1825,10 +2386,10 @@ when not defined(waymarkSdl3):
         # not a phantom left-drag. mbRelease encodes to the no-button code.
         let btn = if leftDown: terminal.mbLeft else: terminal.mbRelease
         discard term.sendMouse(mouse(kind, btn, row, col, castSet(0)))
-  
+
   proc onScroll(win: Window, xoffset, yoffset: cdouble) {.cdecl.} =
     var x, y: cdouble; getCursorPos(win, addr x, addr y)
-    if handleCatalogWheel(int(x), int(y), yoffset):
+    if handleOverlayWheel(int(x), int(y), yoffset):
       return
     let session = if int(y) >= chromeHeaderHeight(): focusPaneAt(int(x), int(y)) else: nil
     let term = if session == nil: activeTerm() else: session[].terminal
@@ -1907,13 +2468,14 @@ when not defined(waymarkSdl3):
         discard term.sendKey(key(keyCode))
       of saIgnore:
         discard
-    term.refreshViewport(false); term.damage.markAll()
-  
+      term.refreshViewport(false)
+    term.damage.markAll()
+
   proc onWindowFocus(win: Window, focused: cint) {.cdecl.} =
     let term = activeTerm()
     if term == nil: return
     discard term.sendFocus(focused != 0)
-  
+
   proc resizeToFramebuffer(win: Window, fallbackWidth, fallbackHeight: cint) =
     let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
     let currentWindowSize = window_relay_lib.getWindowSize(windowRelays)
@@ -1949,10 +2511,10 @@ when not defined(waymarkSdl3):
           "grid=" & $paneCols(firstPane) & "x" & $paneRows(firstPane) & "\n")
       except CatchableError:
         discard
-  
+
   proc onResize(win: Window, width, height: cint) {.cdecl.} =
     resizeToFramebuffer(win, width, height)
-  
+
   proc syncFramebufferSize(): bool =
     if window == nil:
       return false
@@ -1969,7 +2531,7 @@ when not defined(waymarkSdl3):
       return false
     resizeToFramebuffer(window, cint(report.chosen.width), cint(report.chosen.height))
     true
-  
+
 when defined(waymarkSdl3):
   func toTerminalMods(mods: sdl.Keymod): set[terminal.Modifier] =
     let raw = mods.uint32
@@ -1977,10 +2539,10 @@ when defined(waymarkSdl3):
     if (raw and sdl.KMOD_CTRL) != 0: result.incl terminal.modCtrl
     if (raw and sdl.KMOD_ALT) != 0: result.incl terminal.modAlt
     if (raw and sdl.KMOD_GUI) != 0: result.incl terminal.modSuper
-  
+
   func toShortcutMods(mods: set[terminal.Modifier]): set[shortcut_map_lib.Modifier] =
     cast[set[shortcut_map_lib.Modifier]](mods)
-  
+
   func toSdlKeyCode(scancode: sdl.Scancode): terminal.KeyCode =
     case scancode
     of sdl.SCANCODE_RETURN: kEnter
@@ -2011,20 +2573,20 @@ when defined(waymarkSdl3):
     of sdl.SCANCODE_F12: kF12
     of sdl.SCANCODE_KP_ENTER: kKeypadEnter
     else: kNone
-  
+
   func toSdlMouseButton(button: uint8): terminal.MouseButton =
     case button
     of sdl.BUTTON_LEFT: mbLeft
     of sdl.BUTTON_MIDDLE: mbMiddle
     of sdl.BUTTON_RIGHT: mbRight
     else: mbRelease
-  
+
   func printableFromSdlKey(keycode: sdl.Keycode): Option[uint32] =
     if keycode >= 32'u32 and keycode <= 126'u32:
       some(uint32(keycode))
     else:
       none(uint32)
-  
+
   func shortcutKeyFromSdl(keycode: sdl.Keycode): shortcut_map_lib.KeyCode =
     case keycode
     of sdl.SDLK_EQUALS: shortcut_map_lib.kEqual
@@ -2036,27 +2598,64 @@ when defined(waymarkSdl3):
         shortcut_map_lib.shortcutKey(char(keycode))
       else:
         shortcut_map_lib.kNone
-  
+
   proc handleTextInput(text: cstring) =
+    if overlay_lib.overlayCapturesInput(overlayStack) and surfaceStack.active == asWorkspace: return
     if text == nil or keyTextFallback: return
+    if searchInputActive():
+      searchInsertText($text)
+      return
     let term = activeTerm()
     if term == nil: return
     for r in ($text).runes:
       discard term.sendKey(keyChar(uint32(r)))
     term.damage.markAll()
-  
+
   proc handleSdlKey(event: sdl.KeyboardEvent) =
+    if event.down and event.scancode == sdl.SCANCODE_ESCAPE and catalogMenuOpen:
+      dismissCatalogMenu()
+      return
+    if event.down and event.scancode == sdl.SCANCODE_ESCAPE and handleOverlayEscape():
+      return
+    if overlay_lib.overlayCapturesInput(overlayStack) and surfaceStack.active == asWorkspace:
+      return
     if not event.down: return
     let mods = toTerminalMods(event.`mod`)
     let sc = event.scancode
     if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_A:
       toggleSurface()
       return
+    if searchInputActive():
+      case sc
+      of sdl.SCANCODE_ESCAPE: blurCartographSearch(); return
+      of sdl.SCANCODE_BACKSPACE: discard handleSearchEditKey(sekBackspace); return
+      of sdl.SCANCODE_DELETE: discard handleSearchEditKey(sekDelete); return
+      of sdl.SCANCODE_LEFT: discard handleSearchEditKey(sekLeft); return
+      of sdl.SCANCODE_RIGHT: discard handleSearchEditKey(sekRight); return
+      of sdl.SCANCODE_HOME: discard handleSearchEditKey(sekHome); return
+      of sdl.SCANCODE_END: discard handleSearchEditKey(sekEnd); return
+      of sdl.SCANCODE_RETURN, sdl.SCANCODE_KP_ENTER: discard handleSearchEditKey(sekEnter); return
+      else:
+        if keyTextFallback:
+          let ch = printableFromSdlKey(event.key)
+          if ch.isSome:
+            searchInsertRune(Rune(ch.get().int32))
+            return
+        ## Swallow other unmodified keys so typing never leaks to the terminal.
+        if terminal.modCtrl notin mods and terminal.modAlt notin mods:
+          return
     let term = activeTerm()
     if term == nil: return
-  
+
     if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_T:
       addTerminalTab()
+      return
+    if terminal.modCtrl in mods and terminal.modShift in mods and sc == sdl.SCANCODE_N:
+      let activeCwd = validSessionCwd(activeSessionCwd())
+      try:
+        discard startProcess(getAppFilename(), args = @[activeCwd], options = {poParentStreams})
+      except CatchableError:
+        discard
       return
     if terminal.modCtrl in mods and terminal.modShift in mods and (sc == sdl.SCANCODE_RETURN or sc == sdl.SCANCODE_KP_ENTER):
       splitActivePane()
@@ -2070,28 +2669,37 @@ when defined(waymarkSdl3):
       let term = activeTerm()
       if term != nil: term.damage.markAll()
       return
-  
+
     let actionName = term.shortcuts.lookup(shortcutKeyFromSdl(event.key), toShortcutMods(mods))
     if actionName.isSome:
       if handleShortcutAction(term, actionName.get()):
         return
-  
+
     if terminal.modCtrl in mods or terminal.modAlt in mods or keyTextFallback:
       let ch = printableFromSdlKey(event.key)
       if ch.isSome:
         discard term.sendKey(keyChar(ch.get(), mods))
         term.damage.markAll()
         return
-  
+
     let tk = toSdlKeyCode(sc)
     if tk != kNone and tk != kChar:
       discard term.sendKey(terminal.key(tk, mods))
       term.damage.markAll()
-  
+
   proc handleMouseButton(x, y: float; button: uint8; down: bool; mods: set[terminal.Modifier]) =
+    if button == sdl.BUTTON_LEFT and handleOverlayPointer(int(x), int(y), down):
+      return
+    if catalogMenuOpen and button == sdl.BUTTON_LEFT and down:
+      if handleCatalogMenuClick(int(x), int(y)):
+        return
+    if button == sdl.BUTTON_RIGHT and down:
+      if openCatalogMenuAt(int(x), int(y)):
+        return
     if button == sdl.BUTTON_LEFT and not down:
       draggingWindow = false
-  
+      catalogScrollDrag.active = false
+
     if button == sdl.BUTTON_LEFT and down and inTitleBar(int(y)):
       if surfaceToggleHitTest(int(x), int(y), winWidth, titleBarHeight):
         toggleSurface()
@@ -2109,7 +2717,7 @@ when defined(waymarkSdl3):
         term.activeLink = none(ActiveLink)
         term.damage.markAll()
       return
-  
+
     if button == sdl.BUTTON_LEFT and down and inTabBar(int(y)):
       let closeId = tabs.closeTabAtX(int(x), winWidth, tabBarHeight)
       if closeId.isSome:
@@ -2124,9 +2732,9 @@ when defined(waymarkSdl3):
         let term = activeTerm()
         if term != nil: term.damage.markAll()
         return
-  
+
     if int(y) < chromeHeaderHeight(): return
-    if handleCartographPointer(int(x), int(y)):
+    if handleCartographPointer(int(x), int(y), down):
       return
     var paneFocusChanged = false
     let session = focusPaneAt(int(x), int(y), paneFocusChanged)
@@ -2160,7 +2768,7 @@ when defined(waymarkSdl3):
       if tmb != mbRelease:
         lastMouseReportRow = row; lastMouseReportCol = col
         discard term.sendMouse(mouse(if down: mePress else: meRelease, tmb, row, col, mods))
-  
+
   proc handleMouseMove(x, y: float; state: uint32) =
     if draggingWindow:
       let pos = window_relay_lib.getPosition(windowRelays)
@@ -2174,7 +2782,12 @@ when defined(waymarkSdl3):
         )
       )
       return
-  
+    if catalogScrollDrag.active:
+      updateCatalogScrollDrag(int(y))
+      return
+    if catalogMenuOpen:
+      updateCatalogMenuHover(int(x), int(y))
+
     let wi = activeWorkspaceIndex()
     if wi < 0: return
     let activeId = workspaces[wi].panes.active
@@ -2191,7 +2804,7 @@ when defined(waymarkSdl3):
     let col = localCol(area.get(), x)
     let row = localRow(area.get(), y)
     let rawRow = rawLocalRow(area.get(), y)
-  
+
     if term.drag.state != dsIdle:
       let leftDown = window_relay_lib.isMouseButtonDown(windowRelays, window_relay_lib.mbLeft)
       term.drag.update(rawRow, col, leftDown)
@@ -2222,7 +2835,7 @@ when defined(waymarkSdl3):
       if newActive != term.activeLink:
         term.activeLink = newActive
         term.damage.markAll()
-  
+
       if not term.inputMode.shouldIntercept() and term.inputMode.trackingWantsMotion() and
          (row != lastMouseReportRow or col != lastMouseReportCol):
         # Only report motion on cell change (xterm behavior). Per-pixel reports
@@ -2235,9 +2848,9 @@ when defined(waymarkSdl3):
         # not a phantom left-drag. mbRelease encodes to the no-button code.
         let btn = if leftDown: terminal.mbLeft else: terminal.mbRelease
         discard term.sendMouse(mouse(kind, btn, row, col, {}))
-  
+
   proc handleScrollAt(x, y: float; yoffset: float; mods: set[terminal.Modifier]) =
-    if handleCatalogWheel(int(x), int(y), yoffset):
+    if handleOverlayWheel(int(x), int(y), yoffset):
       return
     let session = if int(y) >= chromeHeaderHeight(): focusPaneAt(int(x), int(y)) else: nil
     let term = if session == nil: activeTerm() else: session[].terminal
@@ -2307,9 +2920,9 @@ when defined(waymarkSdl3):
         discard term.sendKey(key(keyCode))
       of saIgnore:
         discard
-    term.refreshViewport(false)
+      term.refreshViewport(false)
     term.damage.markAll()
-  
+
   proc resizeToFramebuffer(fallbackWidth, fallbackHeight: cint) =
     let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
     let currentWindowSize = window_relay_lib.getWindowSize(windowRelays)
@@ -2326,7 +2939,7 @@ when defined(waymarkSdl3):
       if rend != nil and rend.atlas != nil:
         resizeTerminals()
     render_relay_lib.setViewport(frameRelays, render_relay_lib.size2d(winWidth, winHeight))
-  
+
   proc syncFramebufferSize(): bool =
     if window == nil: return false
     let drawableSize = window_relay_lib.getDrawableSize(windowRelays)
@@ -2340,12 +2953,12 @@ when defined(waymarkSdl3):
     if not report.changedFrom(size2d(winWidth, winHeight)): return false
     resizeToFramebuffer(cint(report.chosen.width), cint(report.chosen.height))
     true
-  
+
   proc onWindowFocus(focused: bool) =
     let term = activeTerm()
     if term == nil: return
     discard term.sendFocus(focused)
-  
+
   proc pollEvents() =
     var event: sdl.Event
     while sdl.pollEvent(event):
@@ -2368,7 +2981,7 @@ when defined(waymarkSdl3):
         handleMouseMove(event.motion.x, event.motion.y, event.motion.state)
       elif evType == uint32(sdl.EVENT_MOUSE_WHEEL):
         handleScrollAt(event.wheel.mouse_x, event.wheel.mouse_y, event.wheel.y, toTerminalMods(sdl.getModState()))
-  
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2492,9 +3105,12 @@ while true:
   let blockedBySyncUpdate = activeWorkspaceSyncUpdateActive()
   let surfaceDirty =
     if surfaceStack.active == asPrimary: activeWorkspaceDirty() else: surfaceStack.activeNeedsRedraw()
-  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or surfaceDirty or tabLabelsChanged or catalogChanged) and not blockedBySyncUpdate
+  let overlayOpen = not overlay_lib.overlayIsEmpty(overlayStack)
+  let toastsActive = surfaceStack.active == asWorkspace and toast_lib.hasActive(appToasts, epochTime())
+  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or surfaceDirty or tabLabelsChanged or catalogChanged or overlayOpen or toastsActive) and not blockedBySyncUpdate
   if changed:
     surfaceStack.drawActive()
+    drawOverlays()
     rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active, config.title)
     render_relay_lib.endFrame(frameRelays)
     writeGpuSnapshot()
@@ -2510,6 +3126,8 @@ while true:
   let frameSec = epochTime() - frameStart
   if frameSec < frameBudgetSec:
     os.sleep(int((frameBudgetSec - frameSec) * 1000.0))
+
+persistActiveSurface()
 
 if rend != nil:
   rend.dispose()

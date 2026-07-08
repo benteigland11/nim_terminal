@@ -84,6 +84,15 @@ func decideWheelAction*(input: ScrollPolicyInput): ScrollAction =
 
   if not input.usingAltScreen:
     if childEncoding != cweNone:
+      case input.normalWheelPolicy
+      of nwpTerminal:
+        if input.viewportHasHistory:
+          return saScrollViewport
+      of nwpSmart:
+        if input.viewportHasMeaningfulHistory:
+          return saScrollViewport
+      of nwpTuiFallback:
+        discard
       return routeForChildEncoding(childEncoding)
     if input.normalScreenTuiLikely:
       let hasMeaningfulHistory = input.viewportHasMeaningfulHistory
@@ -94,7 +103,7 @@ func decideWheelAction*(input: ScrollPolicyInput): ScrollAction =
         if not hasMeaningfulHistory:
           return saRouteCursorKeys
       of nwpSmart:
-        if input.canScrollTerminal(meaningful = true):
+        if hasMeaningfulHistory:
           return saScrollViewport
         return saRouteCursorKeys
     return saScrollViewport

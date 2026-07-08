@@ -348,10 +348,13 @@ suite "Resize":
 
 suite "Erase":
   test "EL clear-to-end blanks from cursor":
-    let s = newScreen(6, 1)
+    let s = newScreen(6, 1, scrollback = 10)
     s.writeString("abcdef")
     s.cursorTo(0, 3)
+    check s.archiveRowForHistory(0)
     s.eraseInLine(emToEnd)
+    check s.scrollbackLen == 1
+    check s.scrollbackText(0).strip() == "abcdef"
     check s.trimmedLine(0) == "abc"
 
   test "EL clear-to-start blanks through cursor":
@@ -361,12 +364,137 @@ suite "Erase":
     s.eraseInLine(emToStart)
     check s.lineText(0) == "   def"
 
+  test "line archive deduplicates repeated row history":
+    let s = newScreen(6, 1, scrollback = 10)
+    s.writeString("abcdef")
+
+    check s.archiveRowForHistory(0)
+    check s.archiveRowForHistory(0)
+
+    check s.scrollbackLen == 1
+    check s.scrollbackText(0).strip() == "abcdef"
+
+  test "line archive ignores volatile inline status rows":
+    let s = newScreen(80, 3, scrollback = 10)
+
+    s.writeString("• Explored")
+    check not s.archiveRowForHistory(0)
+
+    s.cursorTo(1, 0)
+    s.writeString("└ Read gpu_renderer.nim, README.md")
+    check not s.archiveRowForHistory(1)
+
+    s.cursorTo(2, 0)
+    s.writeString("Working (43s • esc to interrupt)")
+    check not s.archiveRowForHistory(2)
+
+    check s.scrollbackLen == 0
+
+  test "line archive ignores Codex startup and command palette rows":
+    let s = newScreen(120, 4, scrollback = 10)
+
+    s.writeString("• Booting MCP server: cartograph (0s • esc to interrupt)")
+    check not s.archiveRowForHistory(0)
+
+    s.cursorTo(1, 0)
+    s.writeString("• Starting MCP servers (1/2): codex_apps (0s • esc to interrupt)")
+    check not s.archiveRowForHistory(1)
+
+    s.cursorTo(2, 0)
+    s.writeString("/review  review my current changes and find issues")
+    check not s.archiveRowForHistory(2)
+
+    s.cursorTo(3, 0)
+    s.writeString("/resume  resume a saved chat")
+    check not s.archiveRowForHistory(3)
+
+    check s.scrollbackLen == 0
+
+  test "line archive ignores Codex footer row":
+    let s = newScreen(140, 1, scrollback = 10)
+    s.writeString("gpt-5.5 medium · ~/Cartograph-Showcase/nim_terminal · gpt-5.5 · medium · nim_terminal · main · No changes · Workspace · Approve for me")
+
+    check not s.archiveRowForHistory(0)
+    check s.scrollbackLen == 0
+
+  test "line archive ignores live composer prompt":
+    let s = newScreen(40, 1, scrollback = 10)
+    s.applySgr([sgr(1)])
+    s.writeString("› ")
+    s.applySgr([sgr(0), sgr(2)])
+    s.writeString("Summarize recent commits")
+
+    check not s.archiveRowForHistory(0)
+    check s.scrollbackLen == 0
+
+  test "line archive ignores typed live composer prompt":
+    let s = newScreen(40, 1, scrollback = 10)
+    s.writeString("› prior submitted prompt")
+
+    check not s.archiveRowForHistory(0)
+    check s.scrollbackLen == 0
+
   test "ED clear-all blanks the whole screen":
-    let s = newScreen(4, 2)
+    let s = newScreen(4, 2, scrollback = 10)
     s.writeString("ab"); s.linefeed(); s.writeString("cd")
     s.eraseInDisplay(emAll)
+    check s.scrollbackLen == 2
+    check s.scrollbackText(0).strip() == "ab"
+    check s.scrollbackText(1).strip() == "cd"
     check s.trimmedLine(0) == ""
     check s.trimmedLine(1) == ""
+
+  test "ED clear-all archives only visible non-empty span":
+    let s = newScreen(6, 4, scrollback = 10)
+    s.cursorTo(1, 0)
+    s.writeString("middle")
+
+    s.eraseInDisplay(emAll)
+
+    check s.scrollbackLen == 1
+    check s.scrollbackText(0).strip() == "middle"
+
+  test "ED clear-all ignores volatile Codex status frame":
+    let s = newScreen(140, 3, scrollback = 10)
+    s.writeString("• Working (4s • esc to interrupt)")
+    s.cursorTo(1, 0)
+    s.writeString("gpt-5.5 medium · ~/Cartograph-Showcase/nim_terminal · gpt-5.5 · medium · nim_terminal · main · No changes · Workspace · Approve for me")
+    s.cursorTo(2, 0)
+    s.writeString("• Working (4s • esc to interrupt)")
+
+    s.eraseInDisplay(emAll)
+
+    check s.scrollbackLen == 0
+
+  test "ED clear-all ignores Codex startup command palette frame":
+    let s = newScreen(120, 5, scrollback = 10)
+    s.writeString("• Starting MCP servers (0/2): cartograph, codex_apps (0s • esc to interrupt)")
+    s.cursorTo(1, 0)
+    s.writeString("/model    choose what model and reasoning effort to use")
+    s.cursorTo(2, 0)
+    s.writeString("/review   review my current changes and find issues")
+    s.cursorTo(3, 0)
+    s.writeString("/resume   resume a saved chat")
+    s.cursorTo(4, 0)
+    s.writeString("/raw      toggle raw scrollback mode for copy-friendly terminal selection")
+
+    s.eraseInDisplay(emAll)
+
+    check s.scrollbackLen == 0
+
+  test "ED clear-all ignores incremental typed live composer prompt":
+    let s = newScreen(40, 4, scrollback = 10)
+    s.writeString("› thank")
+    s.cursorTo(1, 0)
+    s.writeString("› thank y")
+    s.cursorTo(2, 0)
+    s.writeString("› thank yo")
+    s.cursorTo(3, 0)
+    s.writeString("› thank you")
+
+    s.eraseInDisplay(emAll)
+
+    check s.scrollbackLen == 0
 
   test "ED scrollback purge keeps visible screen":
     let s = newScreen(4, 2, scrollback = 10)
@@ -543,6 +671,48 @@ suite "Alternate screen":
     check leave.leftAlt
     check not leave.enteredAlt
     check leave.clearTransientUi
+
+  test "full display erase archives alternate screen frame when enabled":
+    let s = newScreen(8, 4, scrollback = 20)
+    s.altScrollbackEnabled = true
+    s.useAlternateScreen(true)
+    s.cursorTo(0, 0)
+    s.writeString("header")
+    s.cursorTo(2, 0)
+    s.writeString("body")
+
+    s.eraseInDisplay(emAll)
+
+    check s.totalRows == 7
+    check s.absoluteLineText(0).strip() == "header"
+    check s.absoluteLineText(1).strip() == ""
+    check s.absoluteLineText(2).strip() == "body"
+    check s.trimmedLine(0) == ""
+
+  test "full display erase does not archive disabled alternate screen frame":
+    let s = newScreen(8, 4, scrollback = 20)
+    s.useAlternateScreen(true)
+    s.cursorTo(0, 0)
+    s.writeString("header")
+
+    s.eraseInDisplay(emAll)
+
+    check s.totalRows == 4
+    check s.trimmedLine(0) == ""
+
+  test "line archive respects alternate screen scrollback policy":
+    let s = newScreen(8, 2, scrollback = 20)
+    s.useAlternateScreen(true)
+    s.cursorTo(0, 0)
+    s.writeString("hidden")
+
+    check not s.archiveRowForHistory(0)
+    check s.totalRows == 2
+
+    s.altScrollbackEnabled = true
+    check s.archiveRowForHistory(0)
+    check s.totalRows == 3
+    check s.absoluteLineText(0).strip() == "hidden"
 
 suite "Save / restore cursor":
   test "save/restore round-trips position and attrs":

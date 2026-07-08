@@ -25,6 +25,15 @@ suite "workspace chrome":
     let content = contentAboveActionBar(bounds, actionBarHeight = 36)
     check content.h == 264
 
+  test "actionBarRegionTop sits on top edge":
+    let bounds = WorkspaceRect(x: 10, y: 20, w: 400, h: 300)
+    let bar = actionBarRegionTop(bounds, height = 36)
+    check bar.h == 36
+    check bar.y == 20
+    let content = contentBelowActionBar(bounds, actionBarHeight = 36)
+    check content.y == 56
+    check content.h == 264
+
   test "stackedSidebarRegions puts catalog above inspector on the right":
     let bounds = WorkspaceRect(x: 0, y: 32, w: 1280, h: 688)
     let regions = stackedSidebarRegions(bounds, sidebarWidth = 300, catalogHeight = 320)
@@ -35,6 +44,14 @@ suite "workspace chrome":
     check regions.catalog.h == 320
     check regions.inspector.y == 32 + 320
     check regions.catalog.h + regions.inspector.h == 688
+
+  test "sidebarCatalogRegions caps catalog height without inspector":
+    let bounds = WorkspaceRect(x: 0, y: 32, w: 1280, h: 688)
+    let regions = sidebarCatalogRegions(bounds, sidebarWidth = 300, catalogHeight = 320)
+    check regions.center.w == 980
+    check regions.catalog.x == 980
+    check regions.catalog.h == 320
+    check regions.inspector.h == 0
 
   test "insetRect shrinks bounds on each edge":
     let inner = insetRect(WorkspaceRect(x: 10, y: 20, w: 100, h: 80), top = 5, right = 8, bottom = 7, left = 6)

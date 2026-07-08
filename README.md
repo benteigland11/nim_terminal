@@ -95,6 +95,7 @@ Alternate-screen history can still be retained by policy:
 [scroll]
 alternate_screen_scrollback = passive  # off, passive, always
 wheel_in_alt_screen = app              # app, terminal, smart
+wheel_in_normal_screen = smart         # terminal, smart, fallback
 ```
 
 Use `terminal` or `always` when you want Waymark to prefer its retained
