@@ -4,7 +4,7 @@
 ## Uses `TileBatcher` for efficiency and `GlyphAtlas` for UV mapping.
 
 import pixie
-import std/[options, os, unicode]
+import std/[options, os, times, unicode]
 import ../cg/data_screen_buffer_nim/src/screen_buffer_lib
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
 import ../cg/universal_tile_batcher_nim/src/tile_batcher_lib
@@ -26,6 +26,7 @@ import ../cg/frontend_menu_nim/src/menu_lib as menu_lib
 import ../cg/frontend_button_nim/src/button_lib as button_lib
 import ../cg/frontend_scrollbar_nim/src/scrollbar_lib as scrollbar_lib
 import ../cg/frontend_toast_nim/src/toast_lib as toast_lib
+import ../cg/frontend_underline_decoration_nim/src/underline_decoration_lib as underline_deco
 import terminal
 
 ## Single source of truth for chrome colors. Rebrand by reassigning this
@@ -265,6 +266,7 @@ proc drawChrome*(
     winWidth, winHeight, titleBarHeight, tabBarHeight: int,
     activeSurface: AppSurfaceId,
     title = "Waymark - Built with Nim",
+    progress: ProgressSnapshot = ProgressSnapshot(),
 ) =
   if winWidth <= 0 or winHeight <= 0 or titleBarHeight <= 0: return
   let showTabs = activeSurface == asPrimary and tabBarHeight > 0
@@ -278,11 +280,37 @@ proc drawChrome*(
   let closeBg = tile_batcher_lib.rgba(0.20, 0.22, 0.24, 1.0)
   let text = tile_batcher_lib.rgba(0.88, 0.91, 0.92, 1.0)
   let muted = tile_batcher_lib.rgba(0.58, 0.63, 0.67, 1.0)
+  let progressTrack = tile_batcher_lib.rgba(0.18, 0.20, 0.22, 1.0)
+  let progressFill =
+    case progress.state
+    of pbsError: tile_batcher_lib.rgba(0.86, 0.28, 0.28, 1.0)
+    of pbsPaused: tile_batcher_lib.rgba(0.95, 0.76, 0.23, 1.0)
+    of pbsIndeterminate: tile_batcher_lib.rgba(0.35, 0.62, 0.95, 1.0)
+    else: tile_batcher_lib.rgba(0.32, 0.72, 0.48, 1.0)
 
   r.batcher.textureId = r.bgTexId
   r.batcher.beginBatch()
   r.addRect(0, 0, winWidth, titleBarHeight, winWidth, winHeight, titleBg)
-  r.addRect(0, titleBarHeight - 1, winWidth, 1, winWidth, winHeight, nimYellow)
+  if progress.visible:
+    ## OSC 9;4 host progress — thin strip under the title (ConEmu/WT style).
+    let barH = max(2, min(4, titleBarHeight div 6))
+    let barY = titleBarHeight - barH
+    r.addRect(0, barY, winWidth, barH, winWidth, winHeight, progressTrack)
+    if progress.state == pbsIndeterminate:
+      ## Sliding chunk so long compact/busy work still looks alive.
+      let chunk = max(24, winWidth div 5)
+      let phase = int((epochTime() * 0.7) * float(winWidth + chunk)) mod (winWidth + chunk)
+      let x = phase - chunk
+      let drawX = max(0, x)
+      let drawW = min(winWidth - drawX, chunk - (drawX - x))
+      if drawW > 0:
+        r.addRect(drawX, barY, drawW, barH, winWidth, winHeight, progressFill)
+    else:
+      let fillW = max(0, min(winWidth, int(float(winWidth) * progress.fraction)))
+      if fillW > 0:
+        r.addRect(0, barY, fillW, barH, winWidth, winHeight, progressFill)
+  else:
+    r.addRect(0, titleBarHeight - 1, winWidth, 1, winWidth, winHeight, nimYellow)
   if showTabs:
     r.addRect(0, titleBarHeight, winWidth, tabBarHeight, winWidth, winHeight, bg)
     r.addRect(0, headerHeight - 1, winWidth, 1, winWidth, winHeight, border)
@@ -1118,22 +1146,62 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
     for col in 0 ..< min(cols, cells.len):
       let cell = cells[col]
       if cell.width == 0: continue
-      if cell.rune == uint32(' '): continue
       let flags = cell.attrs.flags
-      let drawSingleUnderline = afUnderline in flags and cell.attrs.underlineStyle == usSingle
-      if not drawSingleUnderline and afStrike notin flags and afOverline notin flags: continue
+      let hasUnderline = afUnderline in flags and cell.attrs.underlineStyle != usNone
+      let drawLinkUnderline = cell.linkId != 0
+      ## Spaces still get underlines/overlines/strikes when attributes demand it.
+      if cell.rune == uint32(' ') and not hasUnderline and not drawLinkUnderline and
+          afStrike notin flags and afOverline notin flags:
+        continue
+      if not hasUnderline and not drawLinkUnderline and afStrike notin flags and afOverline notin flags:
+        continue
       let resolved = render_attrs.resolveRenderAttrs(toRenderAttrs(cell.attrs), defaultFg, defaultBg, tAnsi)
       let color = toRgba(resolved.foreground)
-      let px = ndcX(x + col * r.atlas.cellWidth, winWidth)
-      let lineW = tw * float32(max(1, int(cell.width)))
-      let linePx = max(1, r.atlas.cellHeight div 14)
+      let linkColor = tile_batcher_lib.rgba(0.45, 0.70, 1.0, 1.0)
+      let cellPx = col * r.atlas.cellWidth
+      let cellPy = row * r.atlas.cellHeight
+      let cellW = r.atlas.cellWidth * max(1, int(cell.width))
+      let cellH = r.atlas.cellHeight
+      let linePx = underline_deco.underlineThickness(cellH)
       let lineH = ndcH(linePx, winHeight)
-      if drawSingleUnderline:
-        r.batcher.addTile(px, ndcY(y + row * r.atlas.cellHeight + r.atlas.cellHeight - linePx, winHeight), lineW, lineH, 0, 0, 1, 1, color)
-      if afStrike in flags:
-        r.batcher.addTile(px, ndcY(y + row * r.atlas.cellHeight + (r.atlas.cellHeight div 2), winHeight), lineW, lineH, 0, 0, 1, 1, color)
+      let lineW = tw * float32(max(1, int(cell.width)))
+      let px = ndcX(x + cellPx, winWidth)
+
+      if hasUnderline or drawLinkUnderline:
+        let kind =
+          if hasUnderline:
+            case cell.attrs.underlineStyle
+            of usNone: underline_deco.ukNone
+            of usSingle: underline_deco.ukSingle
+            of usDouble: underline_deco.ukDouble
+            of usCurly: underline_deco.ukCurly
+            of usDotted: underline_deco.ukDotted
+            of usDashed: underline_deco.ukDashed
+          else:
+            underline_deco.ukSingle
+        let ulColor =
+          if drawLinkUnderline and not hasUnderline: linkColor
+          else: color
+        let segs = underline_deco.underlineSegments(
+          kind,
+          cellX = x + cellPx,
+          cellY = y + cellPy,
+          cellW = cellW,
+          cellH = cellH,
+          thickness = linePx,
+        )
+        for seg in segs:
+          r.batcher.addTile(
+            ndcX(seg.x, winWidth),
+            ndcY(seg.y, winHeight),
+            ndcW(seg.w, winWidth),
+            ndcH(seg.h, winHeight),
+            0, 0, 1, 1, ulColor,
+          )
+      if afStrike in flags and cell.rune != uint32(' '):
+        r.batcher.addTile(px, ndcY(y + cellPy + (cellH div 2), winHeight), lineW, lineH, 0, 0, 1, 1, color)
       if afOverline in flags:
-        r.batcher.addTile(px, ndcY(y + row * r.atlas.cellHeight, winHeight), lineW, lineH, 0, 0, 1, 1, color)
+        r.batcher.addTile(px, ndcY(y + cellPy, winHeight), lineW, lineH, 0, 0, 1, 1, color)
 
   r.finishBatch()
 

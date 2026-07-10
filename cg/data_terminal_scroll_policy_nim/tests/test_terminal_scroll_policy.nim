@@ -126,6 +126,61 @@ suite "terminal scroll policy":
       altWheelPolicy: awpTerminal,
     )) == saIgnore
 
+  test "passive mode keeps child wheel at live edge after history accumulates":
+    ## Prolonged TUI redraws archive rows into passive alt scrollback. A
+    ## terminal-first wheel policy would then steal scroll from the app; passive
+    ## mode must keep routing to the child at the live edge.
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: true,
+      childWantsWheel: true,
+      childWheelEncoding: cweMouseWheel,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: true,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpTerminal,
+    )) == saRouteMouseWheel
+
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: true,
+      childWantsWheel: true,
+      childWheelEncoding: cweCursorKeys,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: true,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpTerminal,
+    )) == saRouteCursorKeys
+
+  test "passive mode still scrolls terminal history once user is scrolled back":
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: true,
+      childWantsWheel: true,
+      childWheelEncoding: cweMouseWheel,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: false,
+      scrollingTowardHistory: false,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpTerminal,
+    )) == saScrollViewport
+
+  test "passive mode allows forced terminal scroll at live edge":
+    check decideWheelAction(ScrollPolicyInput(
+      usingAltScreen: true,
+      childWantsWheel: true,
+      childWheelEncoding: cweMouseWheel,
+      viewportHasHistory: true,
+      viewportHasMeaningfulHistory: true,
+      viewportAtLiveEnd: true,
+      scrollingTowardHistory: true,
+      forceTerminalScroll: true,
+      altScrollbackMode: assPassive,
+      altWheelPolicy: awpTerminal,
+    )) == saScrollViewport
+
   test "smart policy returns to app at live edge":
     check decideWheelAction(ScrollPolicyInput(
       usingAltScreen: true,
@@ -134,7 +189,7 @@ suite "terminal scroll policy":
       viewportHasMeaningfulHistory: true,
       viewportAtLiveEnd: true,
       scrollingTowardHistory: true,
-      altScrollbackMode: assPassive,
+      altScrollbackMode: assAlways,
       altWheelPolicy: awpSmart,
     )) == saRouteMouseWheel
 
@@ -145,7 +200,7 @@ suite "terminal scroll policy":
       viewportHasMeaningfulHistory: true,
       viewportAtLiveEnd: false,
       scrollingTowardHistory: false,
-      altScrollbackMode: assPassive,
+      altScrollbackMode: assAlways,
       altWheelPolicy: awpSmart,
     )) == saScrollViewport
 

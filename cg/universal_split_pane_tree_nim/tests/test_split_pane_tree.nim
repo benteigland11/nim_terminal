@@ -90,3 +90,21 @@ suite "Split Pane Tree":
     var tree = newSplitPaneTree()
     check not tree.activate(paneId(99))
     check tree.activate(paneId(1))
+
+  test "canSplitActiveAppend rejects panes below min size":
+    var tree = newSplitPaneTree()
+    let area = rect(0, 0, 100, 40)
+    ## First vertical split of 100x40 → two 100x20 leaves; minH=18 fits.
+    check tree.canSplitActiveAppend(area, minW = 40, minH = 18)
+    discard tree.splitActiveAppend()
+    ## Next horizontal split of the bottom 100x20 → ~50x20; minW=60 does not fit.
+    check not tree.canSplitActiveAppend(area, minW = 60, minH = 18)
+    ## Wider allowance still fits.
+    check tree.canSplitActiveAppend(area, minW = 40, minH = 18)
+
+  test "canSplitActive does not mutate the live tree":
+    var tree = newSplitPaneTree()
+    let area = rect(0, 0, 80, 40)
+    check tree.canSplitActive(area, saHorizontal, minW = 30, minH = 20)
+    check tree.len == 1
+    check tree.active == paneId(1)

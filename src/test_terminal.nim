@@ -51,6 +51,8 @@ proc newMockTerminal*(rows, cols: int): Terminal =
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
     syncUpdate: newSyncUpdateState(),
+    progress: newTerminalProgress(),
+    notifyAsm: newNotificationAssembler(),
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 
@@ -240,19 +242,30 @@ suite "terminal pipeline":
   test "OSC 52 ignores malformed base64 without hiding callback failures":
     let t = newMockTerminal(5, 20)
     var called = false
+    var lastText = ""
     t.onClipboardRequest = proc(selector, text: string) =
       called = true
+      lastText = text
 
     t.feed("\e]52;c;@@@\a")
     check not called
 
     t.feed("\e]52;c;aGVsbG8=\a")
     check called
+    check lastText == "hello"
 
     t.onClipboardRequest = proc(selector, text: string) =
       raise newException(ValueError, "callback failed")
     expect ValueError:
       t.feed("\e]52;c;aGVsbG8=\a")
+
+  test "OSC 52 query replies with host clipboard text":
+    let t = newMockTerminal(5, 20)
+    t.onClipboardQuery = proc(selector: string): string =
+      discard selector
+      "paste-me"
+    t.feed("\e]52;c;?\a")
+    check t.async.queueLen > 0
 
   test "DECRQSS requests queue state-string replies":
     let t = newMockTerminal(5, 20)
@@ -274,6 +287,43 @@ suite "terminal pipeline":
     check t.inputMode.sgrMouse
     discard t.sendMouse(mouse(meDrag, mbLeft, 1, 2))
     check t.async.queueLen > 0
+
+  test "OSC 9;4 progress updates terminal progress state":
+    let t = newMockTerminal(5, 20)
+    t.feed("\e]9;4;1;40\e\\")
+    check t.progress.isVisible
+    check t.progress.percent == 40
+    t.feed("\e]9;4;3\e\\")
+    check t.progress.snapshot().state == pbsIndeterminate
+    t.feed("\e]9;4;0\e\\")
+    check not t.progress.isVisible
+
+  test "OSC 8 hyperlinks stamp cells and hit-test":
+    let t = newMockTerminal(3, 40)
+    t.feed("\e]8;;https://example.invalid/path\e\\linked\e]8;;\e\\ plain")
+    check t.screen.absoluteHyperlinkAt(0, 0) == "https://example.invalid/path"
+    check t.screen.absoluteHyperlinkAt(0, 5) == "https://example.invalid/path"
+    check t.screen.absoluteHyperlinkAt(0, 7) == ""
+    let hit = t.hitTestLink(0, 2)
+    check hit.isSome
+    check hit.get().link.text == "https://example.invalid/path"
+    check hit.get().startCol == 0
+    check hit.get().endCol == 6
+    check t.hitTestLink(0, 10).isNone
+
+  test "OSC 9/777/99 desktop notifications fire host callback":
+    let t = newMockTerminal(3, 40)
+    var notes: seq[string] = @[]
+    t.onDesktopNotify = proc(text: string) =
+      notes.add text
+    t.feed("\e]9;Build done\e\\")
+    check notes == @["Build done"]
+    t.feed("\e]777;notify;Title;Body text\e\\")
+    check notes[^1] == "Title — Body text"
+    t.feed("\e]99;i=1:d=0;Hello\e\\")
+    check notes.len == 2
+    t.feed("\e]99;i=1:p=body;World\e\\")
+    check notes[^1] == "Hello — World"
 
   test "full display erase alone does not push prompt to bottom":
     let t = newMockTerminal(6, 20)

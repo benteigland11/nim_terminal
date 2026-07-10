@@ -1,8 +1,14 @@
 ## Command-backed system clipboard helper.
 ##
 ## Tries common clipboard commands at runtime and returns structured results.
+## Paste paths are hard-bounded by an external `timeout` wrapper when available
+## so hung tools like `wl-paste` cannot freeze the host UI.
 
-import std/[options, os, osproc, streams]
+import std/[options, os, osproc, streams, strutils]
+
+const
+  DefaultPasteTimeoutMs* = 250
+  DefaultCopyTimeoutMs* = 1_000
 
 type
   ClipboardBackend* = object
@@ -48,7 +54,7 @@ func defaultCopyBackends*(): seq[ClipboardBackend] =
 
 func defaultPasteBackends*(): seq[ClipboardBackend] =
   @[
-    backend("wayland-wl-paste", "wl-paste", ["--no-newline"]),
+    backend("wayland-wl-paste", "wl-paste", ["--no-newline", "--type", "text"]),
     backend("x11-xclip", "xclip", ["-selection", "clipboard", "-out"]),
     backend("x11-xsel", "xsel", ["--clipboard", "--output"]),
     backend("macos-pbpaste", "pbpaste"),
@@ -75,7 +81,24 @@ proc firstAvailableBackend*(backends: openArray[ClipboardBackend]): Option[Clipb
       return some(item)
   none(ClipboardBackend)
 
-proc copyTextWith*(text: string; item: ClipboardBackend): ClipboardResult =
+func timeoutSecondsArg(timeoutMs: int): string =
+  let ms = max(50, timeoutMs)
+  ## GNU coreutils timeout accepts fractional seconds.
+  let whole = ms div 1000
+  let frac = ms mod 1000
+  if whole == 0:
+    "0." & intToStr(frac, 3)
+  elif frac == 0:
+    $whole
+  else:
+    $whole & "." & intToStr(frac, 3)
+
+proc copyTextWith*(
+    text: string;
+    item: ClipboardBackend;
+    timeoutMs = DefaultCopyTimeoutMs,
+): ClipboardResult =
+  discard timeoutMs
   if item.command.len == 0 or not commandAvailable(item.command):
     return ClipboardResult(
       status: csNoBackend,
@@ -92,6 +115,8 @@ proc copyTextWith*(text: string; item: ClipboardBackend): ClipboardResult =
     )
     process.inputStream.write(text)
     process.inputStream.close()
+    ## Many clipboard writers (wl-copy) keep running as a data source. If they
+    ## accepted stdin without exiting, treat that as success without waiting.
     let code = process.peekExitCode()
     if code == -1:
       result = ClipboardResult(
@@ -120,7 +145,11 @@ proc copyTextWith*(text: string; item: ClipboardBackend): ClipboardResult =
     if process != nil:
       process.close()
 
-proc copyText*(text: string; backends: openArray[ClipboardBackend] = defaultCopyBackends()): ClipboardResult =
+proc copyText*(
+    text: string;
+    backends: openArray[ClipboardBackend] = defaultCopyBackends();
+    timeoutMs = DefaultCopyTimeoutMs,
+): ClipboardResult =
   let selected = firstAvailableBackend(backends)
   if selected.isNone:
     return ClipboardResult(
@@ -129,9 +158,12 @@ proc copyText*(text: string; backends: openArray[ClipboardBackend] = defaultCopy
       exitCode: -1,
       message: "no clipboard backend command available",
     )
-  copyTextWith(text, selected.get())
+  copyTextWith(text, selected.get(), timeoutMs)
 
-proc pasteTextWith*(item: ClipboardBackend): ClipboardTextResult =
+proc pasteTextWith*(
+    item: ClipboardBackend;
+    timeoutMs = DefaultPasteTimeoutMs,
+): ClipboardTextResult =
   if item.command.len == 0 or not commandAvailable(item.command):
     return ClipboardTextResult(
       status: csNoBackend,
@@ -140,17 +172,44 @@ proc pasteTextWith*(item: ClipboardBackend): ClipboardTextResult =
       message: "clipboard command not available",
     )
   try:
-    let output = execProcess(
-      item.command,
-      args = item.args,
+    var cmd = item.command
+    var args = item.args
+    var usedTimeout = false
+    ## Prefer `timeout(1)` so a hung paste backend cannot block the host.
+    if commandAvailable("timeout"):
+      args = @["--kill-after=0.1s", timeoutSecondsArg(timeoutMs), item.command] & item.args
+      cmd = "timeout"
+      usedTimeout = true
+    var process = startProcess(
+      command = cmd,
+      args = args,
       options = {poUsePath, poStdErrToStdOut},
     )
-    result = ClipboardTextResult(
-      status: csSuccess,
-      backend: item.name,
-      exitCode: 0,
-      text: output,
-    )
+    let code = process.waitForExit()
+    let output = process.outputStream.readAll()
+    process.close()
+    if usedTimeout and code in {124, 137}:
+      return ClipboardTextResult(
+        status: csCommandFailed,
+        backend: item.name,
+        exitCode: code,
+        message: "clipboard paste timed out",
+      )
+    if code == 0:
+      result = ClipboardTextResult(
+        status: csSuccess,
+        backend: item.name,
+        exitCode: code,
+        text: output,
+      )
+    else:
+      result = ClipboardTextResult(
+        status: csCommandFailed,
+        backend: item.name,
+        exitCode: code,
+        message: "clipboard paste exited nonzero",
+        text: output,
+      )
   except CatchableError as error:
     result = ClipboardTextResult(
       status: csCommandFailed,
@@ -159,7 +218,12 @@ proc pasteTextWith*(item: ClipboardBackend): ClipboardTextResult =
       message: error.msg,
     )
 
-proc pasteText*(backends: openArray[ClipboardBackend] = defaultPasteBackends()): ClipboardTextResult =
+proc pasteText*(
+    backends: openArray[ClipboardBackend] = defaultPasteBackends();
+    timeoutMs = DefaultPasteTimeoutMs,
+): ClipboardTextResult =
+  ## Use the first available backend only. Cascading through hang-prone tools
+  ## multiplies latency; the host can install a native provider first instead.
   let selected = firstAvailableBackend(backends)
   if selected.isNone:
     return ClipboardTextResult(
@@ -168,4 +232,4 @@ proc pasteText*(backends: openArray[ClipboardBackend] = defaultPasteBackends()):
       exitCode: -1,
       message: "no clipboard backend command available",
     )
-  pasteTextWith(selected.get())
+  pasteTextWith(selected.get(), timeoutMs)

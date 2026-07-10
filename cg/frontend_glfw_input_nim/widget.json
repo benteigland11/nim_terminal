@@ -2,7 +2,7 @@
   "meta": {
     "id": "frontend-glfw-input-nim",
     "name": "Glfw Input",
-    "version": "1.1.1",
+    "version": "1.2.0",
     "domain": "frontend",
     "tags": [
       "glfw",
@@ -12,7 +12,7 @@
       "translation"
     ]
   },
-  "description": "Translates raw GLFW window events into standardized terminal input types.",
+  "description": "Translates raw GLFW window events into standardized terminal input types, including unified shortcut identity for main-row and keypad keys.",
   "tech_stack": {
     "language": "nim",
     "dependencies": [
@@ -27,7 +27,7 @@
   },
   "validation": {
     "engine_version": 3,
-    "validated_at": "2026-05-01T03:37:48.126461+00:00",
+    "validated_at": "2026-07-09T22:35:40.137203+00:00",
     "runtime": "nim 2.2.10"
   }
 }

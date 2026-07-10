@@ -1,6 +1,33 @@
 # Changelog
 
-## Unreleased
+## v0.1.5
+
+Modern TUI / agent-CLI compatibility pass for Waymark:
+
+- Fixed soft-archive scrollback dedup so Codex-style redraws no longer stack
+  duplicated conversation history (frame suffix + recent-window row dedup).
+- Refused pane splits that would leave TUI-unusable cell grids; collapse
+  padding on tiny panes.
+- Added OSC 9;4 ConEmu/Windows Terminal progress bar (Claude Code compact, etc.)
+  with a title-chrome progress strip.
+- Wired OSC 52 clipboard set/query to system clipboard providers; timed out
+  hung `wl-paste` so paste no longer freezes the UI.
+- Implemented OSC 8 hyperlinks (cell link stamping, hover, click, underlines).
+- Drew SGR underline styles: single, double, curly, dotted, dashed.
+- Added OSC 9 / 99 / 777 desktop notifications as in-app toasts (including
+  primary terminal surface).
+- Kept host text paste on Ctrl+Shift+V and Shift+Insert; left Ctrl+V for the
+  child so Claude Code image paste keeps working.
+- Fixed alt-screen wheel routing defaults so passive scrollback does not steal
+  wheel from full-screen TUIs; profile defaults prefer app-owned wheel on alt
+  screen.
+
+New / updated widgets published under `@benteigland11` include
+`data-screen-buffer-nim`, `data-terminal-progress-nim`,
+`data-terminal-notification-nim`, `data-vt-commands-nim`,
+`frontend-underline-decoration-nim`, `frontend-cursor-row-highlight-nim`,
+`backend-system-clipboard-nim`, `universal-split-pane-tree-nim`, and
+`universal-shortcut-map-nim`.
 
 ## v0.1.3
 

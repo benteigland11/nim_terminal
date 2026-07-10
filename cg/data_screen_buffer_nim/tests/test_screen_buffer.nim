@@ -374,6 +374,67 @@ suite "Erase":
     check s.scrollbackLen == 1
     check s.scrollbackText(0).strip() == "abcdef"
 
+  test "line archive skips rows already present in recent history":
+    let s = newScreen(8, 3, scrollback = 20)
+    s.writeString("alpha")
+    s.cursorTo(1, 0)
+    s.writeString("bravo")
+    s.cursorTo(2, 0)
+    s.writeString("charlie")
+
+    check s.archiveRowForHistory(0)
+    check s.archiveRowForHistory(1)
+    check s.archiveRowForHistory(2)
+    check s.scrollbackLen == 3
+
+    ## TUI redraw clears the same conversation rows again.
+    check s.archiveRowForHistory(0)
+    check s.archiveRowForHistory(1)
+    check s.archiveRowForHistory(2)
+
+    check s.scrollbackLen == 3
+    check s.scrollbackText(0).strip() == "alpha"
+    check s.scrollbackText(1).strip() == "bravo"
+    check s.scrollbackText(2).strip() == "charlie"
+
+  test "ED clear-all frame archive only appends newly revealed rows":
+    let s = newScreen(10, 4, scrollback = 20)
+    s.writeString("alpha")
+    s.cursorTo(1, 0)
+    s.writeString("bravo")
+    s.cursorTo(2, 0)
+    s.writeString("charlie")
+
+    s.eraseInDisplay(emAll)
+    check s.scrollbackLen == 3
+
+    ## Redraw the same frame and clear again — no growth.
+    s.cursorTo(0, 0)
+    s.writeString("alpha")
+    s.cursorTo(1, 0)
+    s.writeString("bravo")
+    s.cursorTo(2, 0)
+    s.writeString("charlie")
+    s.eraseInDisplay(emAll)
+    check s.scrollbackLen == 3
+
+    ## Grow the conversation; only the new tail is retained.
+    s.cursorTo(0, 0)
+    s.writeString("alpha")
+    s.cursorTo(1, 0)
+    s.writeString("bravo")
+    s.cursorTo(2, 0)
+    s.writeString("charlie")
+    s.cursorTo(3, 0)
+    s.writeString("delta")
+    s.eraseInDisplay(emAll)
+
+    check s.scrollbackLen == 4
+    check s.scrollbackText(0).strip() == "alpha"
+    check s.scrollbackText(1).strip() == "bravo"
+    check s.scrollbackText(2).strip() == "charlie"
+    check s.scrollbackText(3).strip() == "delta"
+
   test "line archive ignores volatile inline status rows":
     let s = newScreen(80, 3, scrollback = 10)
 
@@ -878,6 +939,34 @@ suite "SGR":
     check s.sgrReport() == "1;2;4;92;48;2;1;2;3m"
     s.setScrollRegion(1, 2)
     check s.scrollRegionReport() == "2;3r"
+
+suite "OSC 8 hyperlinks":
+  test "active hyperlink stamps cells until cleared":
+    let s = newScreen(20, 2, scrollback = 10)
+    s.setHyperlink("https://example.invalid/docs")
+    s.writeString("click me")
+    s.setHyperlink("")
+    s.writeString(" plain")
+
+    check s.cellAt(0, 0).linkId != 0
+    check s.cellAt(0, 7).linkId != 0
+    check s.absoluteHyperlinkAt(0, 2) == "https://example.invalid/docs"
+    check s.cellAt(0, 9).linkId == 0
+    check s.absoluteHyperlinkAt(0, 9) == ""
+
+    let span = s.absoluteHyperlinkSpan(0, 3)
+    check span.uri == "https://example.invalid/docs"
+    check span.startCol == 0
+    check span.endCol == 8
+
+  test "empty OSC 8 ends the span without clearing prior cells":
+    let s = newScreen(12, 1)
+    s.setHyperlink("file:///tmp/x")
+    s.writeString("path")
+    s.setHyperlink("")
+    check s.absoluteHyperlinkAt(0, 0) == "file:///tmp/x"
+    s.writeString("!")
+    check s.absoluteHyperlinkAt(0, 4) == ""
 
 suite "Resize":
   test "growing preserves content and adds blank rows":

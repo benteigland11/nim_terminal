@@ -58,7 +58,7 @@ const
   AgentDiagnosticsCapacity* = 256
   DefaultMeaningfulHistoryRows* = 3
   StandardAltScreenScrollback* = "passive"
-  StandardAltWheelPolicy* = "terminal"
+  StandardAltWheelPolicy* = "app"
   StandardNormalWheelPolicy* = "smart"
   AgentAltScreenScrollback* = "passive"
   AgentAltWheelPolicy* = "app"

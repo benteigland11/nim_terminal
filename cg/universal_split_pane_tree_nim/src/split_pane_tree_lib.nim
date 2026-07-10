@@ -155,7 +155,9 @@ proc close*(t: var SplitPaneTree, id: PaneId): bool =
   if result and t.active == id:
     t.active = if replacement.isSome: replacement.get() else: t.firstLeaf().get(paneId(1))
 
-func splitRect(r: Rect, axis: SplitAxis, ratio: float): tuple[first, second: Rect] =
+func splitRect*(r: Rect, axis: SplitAxis, ratio: float): tuple[first, second: Rect] =
+  ## Divide `r` along `axis` by `ratio` (clamped). Each side is at least 1px when
+  ## the parent has room, so callers can reason about minimum leaf sizes.
   let clamped = max(0.05, min(0.95, ratio))
   case axis
   of saHorizontal:
@@ -164,6 +166,17 @@ func splitRect(r: Rect, axis: SplitAxis, ratio: float): tuple[first, second: Rec
   of saVertical:
     let firstH = max(1, min(r.h - 1, int(float(r.h) * clamped)))
     (rect(r.x, r.y, r.w, firstH), rect(r.x, r.y + firstH, r.w, r.h - firstH))
+
+func cloneNode(n: PaneNode): PaneNode =
+  if n == nil: return nil
+  case n.kind
+  of pnkLeaf:
+    newLeaf(n.id)
+  of pnkSplit:
+    newSplit(n.axis, n.ratio, cloneNode(n.first), cloneNode(n.second))
+
+func cloneTree(t: SplitPaneTree): SplitPaneTree =
+  SplitPaneTree(root: cloneNode(t.root), active: t.active, nextId: t.nextId)
 
 proc collectLayouts(n: PaneNode, area: Rect, result: var seq[PaneLayout]) =
   if n == nil or area.w <= 0 or area.h <= 0: return
@@ -177,6 +190,46 @@ proc collectLayouts(n: PaneNode, area: Rect, result: var seq[PaneLayout]) =
 
 func layouts*(t: SplitPaneTree, area: Rect): seq[PaneLayout] =
   collectLayouts(t.root, area, result)
+
+func minLeafSize*(t: SplitPaneTree, area: Rect): tuple[w, h: int] =
+  ## Smallest leaf width/height under `area`, or (0,0) when nothing is laid out.
+  result = (high(int), high(int))
+  var any = false
+  for item in t.layouts(area):
+    any = true
+    result.w = min(result.w, item.rect.w)
+    result.h = min(result.h, item.rect.h)
+  if not any:
+    result = (0, 0)
+
+func canSplitActive*(
+    t: SplitPaneTree,
+    area: Rect,
+    axis: SplitAxis,
+    ratio = 0.5,
+    minW = 1,
+    minH = 1,
+): bool =
+  ## Preview splitting the active leaf and report whether every resulting leaf
+  ## would still be at least `minW` x `minH` pixels. Used to keep TUI panes
+  ## large enough for child apps when the window is already small or crowded.
+  if area.w < minW or area.h < minH:
+    return false
+  var probe = cloneTree(t)
+  discard probe.splitActive(axis, ratio)
+  if axis == saHorizontal:
+    normalizeAxis(probe.root, axis)
+  let sizes = probe.minLeafSize(area)
+  sizes.w >= minW and sizes.h >= minH
+
+func canSplitActiveAppend*(
+    t: SplitPaneTree,
+    area: Rect,
+    ratio = 0.5,
+    minW = 1,
+    minH = 1,
+): bool =
+  t.canSplitActive(area, t.nextAppendAxis(), ratio, minW, minH)
 
 func hitTest*(t: SplitPaneTree, area: Rect, x, y: int): Option[PaneId] =
   for item in t.layouts(area):

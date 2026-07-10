@@ -8,6 +8,19 @@ https://nim-lang.org/araq/relays.html. Prefer small injected relay surfaces
 for OS, window, input, clipboard, and render backend boundaries so reusable
 logic stays in widgets and app glue only installs concrete drivers.
 
+### Rebuild after every change
+
+Whenever you change app glue (`src/`), installed widgets under `cg/`, config
+that affects the binary, or anything else that should show up when the user
+runs Waymark, rebuild before you stop so they can test immediately:
+
+```bash
+nim c -d:release -o:nim_terminal src/nim_terminal.nim
+```
+
+Do this even if tests already passed. Widget validate/checkin is not a
+substitute for a fresh `nim_terminal` binary.
+
 Widget library manager. Widgets are reusable code modules with tests,
 examples, and metadata. Installed widgets live under `cg/<widget_id>/`.
 

@@ -264,6 +264,23 @@ suite "OSC":
     check translateOsc(bytesOf("133;A")).kind == cmdShellPromptStart
     check translateOsc(bytesOf("133;B")).kind == cmdShellCommandStart
     check translateOsc(bytesOf("133;C")).kind == cmdShellCommandExecuted
+    let progress = translateOsc(bytesOf("9;4;1;67"))
+    check progress.kind == cmdSetProgress
+    check progress.progressState == 1
+    check progress.progressPercent == 67
+    let busy = translateOsc(bytesOf("9;4;3"))
+    check busy.kind == cmdSetProgress
+    check busy.progressState == 3
+    let note = translateOsc(bytesOf("9;Build finished"))
+    check note.kind == cmdDesktopNotify
+    check note.notifyBody == "Build finished"
+    let n777 = translateOsc(bytesOf("777;notify;Hi;There"))
+    check n777.kind == cmdDesktopNotify
+    check n777.notifyTitle == "Hi"
+    check n777.notifyBody == "There"
+    let n99 = translateOsc(bytesOf("99;;Hello"))
+    check n99.kind == cmdDesktopNotify
+    check n99.notifySource == "osc99-raw"
     let d = translateOsc(bytesOf("133;D;12"))
     check d.kind == cmdShellCommandFinished
     check d.exitCode == 12

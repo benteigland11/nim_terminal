@@ -11,6 +11,7 @@ suite "terminal profile":
     let snap = presetSnapshot(pmStandard)
     check snap.maxPanes == StandardMaxPanes
     check snap.altWheelPolicy == StandardAltWheelPolicy
+    check snap.altWheelPolicy == "app"
     check snap.normalWheelPolicy == StandardNormalWheelPolicy
     check snap.normalWheelPolicy == "smart"
     check snap.shortcutPreset == spStandard

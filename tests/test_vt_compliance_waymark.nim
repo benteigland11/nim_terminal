@@ -21,6 +21,8 @@ proc newMockTerminal(rows, cols: int): Terminal =
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
     syncUpdate: newSyncUpdateState(),
+    progress: newTerminalProgress(),
+    notifyAsm: newNotificationAssembler(),
   )
   result.async = newAsyncPty[terminal.CurrentBackend](nil, 1)
 

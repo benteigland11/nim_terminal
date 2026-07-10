@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.3"
+version       = "0.1.5"
 author        = "benteigland11"
 description   = "A high-performance terminal emulator base written in Nim."
 license       = "MIT"

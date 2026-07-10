@@ -115,6 +115,8 @@ type
     cmdShellCommandStart  ## OSC 133 ; B
     cmdShellCommandExecuted ## OSC 133 ; C
     cmdShellCommandFinished ## OSC 133 ; D
+    cmdSetProgress        ## OSC 9 ; 4 ; st ; pr  (ConEmu progress)
+    cmdDesktopNotify      ## OSC 9/99/777 desktop notification (title/body)
     cmdReset              ## RIS (ESC c)
     cmdIgnored            ## known-good sequence the translator chose to drop
     cmdUnknown            ## not recognized — raw bytes exposed for tracing
@@ -181,6 +183,13 @@ type
     of cmdSelectCharset:
       charsetSlot*: char
       charsetFinal*: byte
+    of cmdSetProgress:
+      progressState*: int   ## 0 hide, 1 normal, 2 error, 3 indeterminate, 4 paused
+      progressPercent*: int ## 0..100 for determinate states
+    of cmdDesktopNotify:
+      notifyTitle*: string
+      notifyBody*: string
+      notifySource*: string ## "osc9", "osc99", "osc777"
     else:
       discard
 
@@ -460,6 +469,51 @@ func translateOsc*(data: openArray[byte]): VtCommand =
     # OSC 10/11/12 ; spec
     return VtCommand(kind: cmdSetThemeColor, themeColorItem: code,
                      themeColorSpec: asciiString(data, body, data.len))
+  of 9:
+    # OSC 9 ; … — progress is `4 ; st [; pr]`; otherwise iTerm2 notification text.
+    let payload = asciiString(data, body, data.len)
+    let parts = payload.split(';')
+    if parts.len >= 2 and parts[0].strip() == "4":
+      var state = 0
+      var percent = 0
+      try:
+        state = parseInt(parts[1].strip())
+      except ValueError:
+        return VtCommand(kind: cmdIgnored)
+      if parts.len >= 3 and parts[2].strip().len > 0:
+        try:
+          percent = parseInt(parts[2].strip())
+        except ValueError:
+          return VtCommand(kind: cmdIgnored)
+      return VtCommand(kind: cmdSetProgress, progressState: state, progressPercent: percent)
+    let msg = payload.strip()
+    if msg.len == 0:
+      return VtCommand(kind: cmdIgnored)
+    return VtCommand(kind: cmdDesktopNotify, notifyTitle: "", notifyBody: msg, notifySource: "osc9")
+  of 99:
+    # OSC 99 ; metadata ; payload — Kitty desktop notifications.
+    # Full multi-chunk assembly is host-side; translator forwards the raw body.
+    let payload = asciiString(data, body, data.len)
+    return VtCommand(kind: cmdDesktopNotify, notifyTitle: "", notifyBody: payload, notifySource: "osc99-raw")
+  of 777:
+    # OSC 777 ; notify ; title ; body  (urxvt / VTE)
+    let payload = asciiString(data, body, data.len)
+    let parts = payload.split(';')
+    if parts.len < 2 or parts[0].strip().toLowerAscii() != "notify":
+      return VtCommand(kind: cmdIgnored)
+    if parts.len >= 3:
+      return VtCommand(
+        kind: cmdDesktopNotify,
+        notifyTitle: parts[1].strip(),
+        notifyBody: parts[2 .. ^1].join(";").strip(),
+        notifySource: "osc777",
+      )
+    return VtCommand(
+      kind: cmdDesktopNotify,
+      notifyTitle: "",
+      notifyBody: parts[1].strip(),
+      notifySource: "osc777",
+    )
   of 133:
     # OSC 133 ; [A|B|C|D] [; args]
     let sep = findChar(data, ';', body)

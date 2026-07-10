@@ -1,13 +1,32 @@
 ## GLFW event → Standard input types translator.
 ##
 ## Maps GLFW's raw key and mouse constants into the platform-neutral
-## types used by the terminal pipeline.
+## types used by the terminal pipeline. Numpad digits and operators share
+## identity with the main key row for printables and shortcut bindings.
 
 import staticglfw
 import std/options
 import input_types
 
 export input_types
+
+type
+  ShortcutIdKind* = enum
+    siNone
+    siChar
+    siEnter
+    siEqual
+    siMinus
+    siPlus
+
+  ShortcutId* = object
+    ## Backend-neutral shortcut identity for one physical key.
+    ## Map into a framework-agnostic shortcut table in app/glue.
+    case kind*: ShortcutIdKind
+    of siChar:
+      ch*: char
+    else:
+      discard
 
 func toModifiers*(glfwMods: cint): set[Modifier] =
   ## Map GLFW modifier bitmask to our Modifier set.
@@ -56,11 +75,44 @@ func toMouseButton*(glfwBtn: cint): MouseButton =
   of MOUSE_BUTTON_RIGHT:  mbRight
   else: mbRelease
 
+func shortcutChar(c: char): char =
+  if c >= 'a' and c <= 'z':
+    char(ord(c) - ord('a') + ord('A'))
+  else:
+    c
+
+func toShortcutId*(glfwKey: cint): ShortcutId =
+  ## Map a physical GLFW key to a unified shortcut identity.
+  ##
+  ## Top-row digits and keypad digits both become `siChar` digits so one
+  ## Alt+1 binding matches both keys. Same for Enter/KP Enter and ±.
+  case glfwKey
+  of KEY_ENTER, KEY_KP_ENTER:
+    ShortcutId(kind: siEnter)
+  of KEY_EQUAL, KEY_KP_EQUAL:
+    ShortcutId(kind: siEqual)
+  of KEY_MINUS, KEY_KP_SUBTRACT:
+    ShortcutId(kind: siMinus)
+  of KEY_KP_ADD:
+    ShortcutId(kind: siPlus)
+  of KEY_0 .. KEY_9:
+    ShortcutId(kind: siChar, ch: char(ord('0') + (glfwKey - KEY_0)))
+  of KEY_KP_0 .. KEY_KP_9:
+    ShortcutId(kind: siChar, ch: char(ord('0') + (glfwKey - KEY_KP_0)))
+  of KEY_A .. KEY_Z:
+    ShortcutId(kind: siChar, ch: char(ord('A') + (glfwKey - KEY_A)))
+  else:
+    if glfwKey >= 32 and glfwKey <= 126:
+      ShortcutId(kind: siChar, ch: shortcutChar(char(glfwKey)))
+    else:
+      ShortcutId(kind: siNone)
+
 func toPrintableRune*(glfwKey: cint, glfwMods: cint): Option[uint32] =
   ## Map GLFW's physical printable keys plus shift state to a Unicode rune.
   ##
   ## This is useful for key paths where the GLFW character callback does not
   ## fire, such as Ctrl/Alt combinations that still need a printable base rune.
+  ## Keypad digits and operators use the same characters as the main set.
   let shifted = (glfwMods and MOD_SHIFT) != 0
   case glfwKey
   of KEY_SPACE: some(uint32(' '))
@@ -82,6 +134,20 @@ func toPrintableRune*(glfwKey: cint, glfwMods: cint): Option[uint32] =
       else: none(uint32)
     else:
       some(uint32(ord('0') + (glfwKey - KEY_0)))
+  of KEY_KP_0 .. KEY_KP_9:
+    some(uint32(ord('0') + (glfwKey - KEY_KP_0)))
+  of KEY_KP_DECIMAL:
+    some(uint32('.'))
+  of KEY_KP_DIVIDE:
+    some(uint32('/'))
+  of KEY_KP_MULTIPLY:
+    some(uint32('*'))
+  of KEY_KP_SUBTRACT:
+    some(uint32('-'))
+  of KEY_KP_ADD:
+    some(uint32('+'))
+  of KEY_KP_EQUAL:
+    some(uint32('='))
   of KEY_APOSTROPHE:
     some(uint32(if shifted: '"' else: '\''))
   of KEY_COMMA:

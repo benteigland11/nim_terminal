@@ -71,20 +71,42 @@ func cursorRowHighlightRect*(
 func trimmedRow(row: string): string =
   row.strip(leading = true, trailing = true)
 
-func isCodexPromptRow(row: string): bool =
+func isCodexPromptRow*(row: string): bool =
+  ## Host-side heuristic for Codex-style user prompt rows.
+  ##
+  ## Codex draws transcript chrome in the cell grid when it can; this only
+  ## matches common prompt lead-ins so hosts can paint a soft affordance when
+  ## the child used plain text. It is not an official Codex protocol.
   let text = row.trimmedRow()
-  text.startsWith("›") or text.startsWith(">")
+  if text.len == 0:
+    return false
+  text.startsWith("›") or
+    text.startsWith(">") or
+    text.startsWith("▌") or
+    text.startsWith("│ ›") or
+    text.startsWith("| ›") or
+    text.startsWith("│ >") or
+    text.startsWith("| >")
 
 func isCodexStatusRow(row: string): bool =
   let text = row.trimmedRow()
   (text.startsWith("gpt-") or text.startsWith("o") or text.startsWith("codex-")) and
     " · " in text
 
+func isCodexAnswerLead(row: string): bool =
+  let text = row.trimmedRow()
+  text.startsWith("•") or text.startsWith("thinking") or text.startsWith("Working")
+
 func codexPromptBlockEnd(visibleRows: openArray[string], promptRow, maxRows: int): int =
+  ## Inclusive end is exclusive index: highlights [promptRow, result).
   result = min(visibleRows.len, promptRow + 1)
-  for row in promptRow + 1 ..< min(visibleRows.len, promptRow + max(1, maxRows) + 1):
-    if isCodexStatusRow(visibleRows[row]):
+  let limit = min(visibleRows.len, promptRow + max(1, maxRows) + 1)
+  for row in promptRow + 1 ..< limit:
+    if isCodexStatusRow(visibleRows[row]) or isCodexAnswerLead(visibleRows[row]) or
+        isCodexPromptRow(visibleRows[row]):
       return row
+    result = row + 1
+  result = min(visibleRows.len, result)
 
 func promptHighlightRect(
     promptRow, rowCount, cellHeight: int,
@@ -134,14 +156,16 @@ func codexPromptHighlightRects*(
     viewport: PixelRect,
     cursorVisible = true,
     style = defaultComposerHighlightStyle(),
+    requireCursorVisible = false,
   ): seq[PixelRect] =
   ## Return highlight rectangles for every visible Codex prompt block.
   ##
-  ## This is intentionally not cursor-relative: transcript prompts above the
-  ## active composer should keep the same visual treatment as the live prompt.
+  ## Transcript prompts are independent of the live cursor: hiding the cursor
+  ## during a long agent turn must not strip history affordances. Pass
+  ## `requireCursorVisible = true` only when the host wants composer-gated paint.
   if not style.enabled:
     return @[]
-  if style.onlyWhenCursorVisible and not cursorVisible:
+  if requireCursorVisible and style.onlyWhenCursorVisible and not cursorVisible:
     return @[]
   if cellHeight <= 0 or viewport.w <= 0 or viewport.h <= 0:
     return @[]

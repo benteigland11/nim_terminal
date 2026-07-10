@@ -64,6 +64,7 @@ type
     rune*: uint32
     width*: uint8          ## 0 (continuation), 1 (normal), 2 (wide)
     attrs*: Attrs
+    linkId*: uint16        ## 0 = none; indexes Screen.hyperlinkUris
 
   CursorStyle* = enum
     csBlock
@@ -137,6 +138,9 @@ type
     title*: string
     iconName*: string
     theme*: TerminalTheme
+    ## OSC 8 hyperlink table. Index 0 is unused (linkId 0 means "no link").
+    hyperlinkUris*: seq[string]
+    activeLinkId*: uint16
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -166,7 +170,7 @@ func defaultAttrs*(): Attrs =
   Attrs(fg: defaultColor(), bg: defaultColor(), flags: {}, underlineStyle: usNone)
 
 func emptyCell*(attrs: Attrs = defaultAttrs()): Cell =
-  Cell(rune: uint32(' '), width: 1, attrs: attrs)
+  Cell(rune: uint32(' '), width: 1, attrs: attrs, linkId: 0)
 
 func isContinuation*(c: Cell): bool = c.width == 0
 
@@ -221,6 +225,8 @@ func newScreen*(
     title: "",
     iconName: "",
     theme: defaultTheme(),
+    hyperlinkUris: @[""],
+    activeLinkId: 0,
   )
 
 # ---------------------------------------------------------------------------
@@ -312,6 +318,53 @@ func absoluteContentLen*(s: Screen, absRow: int): int =
   let gr = absRow - s.scrollback.len
   if gr < 0 or gr >= s.rows: return 0
   contentLen(s.grid[gr], gr < s.rowSoftWrap.len and s.rowSoftWrap[gr])
+
+proc internHyperlink(s: Screen, uri: string): uint16 =
+  if uri.len == 0:
+    return 0
+  if s.hyperlinkUris.len == 0:
+    s.hyperlinkUris = @[""]
+  for i in 1 ..< s.hyperlinkUris.len:
+    if s.hyperlinkUris[i] == uri:
+      return uint16(i)
+  if s.hyperlinkUris.len >= int(high(uint16)):
+    return 0
+  s.hyperlinkUris.add uri
+  uint16(s.hyperlinkUris.high)
+
+proc setHyperlink*(s: Screen, uri: string) =
+  ## Begin (non-empty uri) or end (empty uri) an OSC 8 hyperlink region.
+  ## Subsequent writeRune cells stamp `activeLinkId` until ended.
+  if uri.len == 0:
+    s.activeLinkId = 0
+  else:
+    s.activeLinkId = s.internHyperlink(uri)
+
+func hyperlinkUri*(s: Screen, linkId: uint16): string =
+  if linkId == 0 or int(linkId) >= s.hyperlinkUris.len:
+    return ""
+  s.hyperlinkUris[int(linkId)]
+
+func absoluteHyperlinkAt*(s: Screen, absRow, col: int): string =
+  s.hyperlinkUri(s.absoluteCellAt(absRow, col).linkId)
+
+func absoluteHyperlinkSpan*(s: Screen, absRow, col: int): tuple[startCol, endCol: int, uri: string] =
+  ## Inclusive startCol, exclusive endCol of the contiguous OSC 8 span under the
+  ## cursor, or empty uri when the cell is not linked.
+  let cell = s.absoluteCellAt(absRow, col)
+  if cell.linkId == 0:
+    return (col, col, "")
+  let uri = s.hyperlinkUri(cell.linkId)
+  if uri.len == 0:
+    return (col, col, "")
+  let row = s.absoluteRowAt(absRow)
+  var startCol = col
+  var endCol = col + 1
+  while startCol > 0 and startCol - 1 < row.len and row[startCol - 1].linkId == cell.linkId:
+    dec startCol
+  while endCol < row.len and row[endCol].linkId == cell.linkId:
+    inc endCol
+  (startCol, endCol, uri)
 
 func colOfByteIndex*(s: Screen, absRow: int, byteIdx: int): int =
   ## Maps a byte index from the UTF-8 string back to a grid column.
@@ -454,7 +507,8 @@ func sameAttrs(a, b: Attrs): bool =
     a.underlineStyle == b.underlineStyle
 
 func sameCell(a, b: Cell): bool =
-  a.rune == b.rune and a.width == b.width and sameAttrs(a.attrs, b.attrs)
+  a.rune == b.rune and a.width == b.width and sameAttrs(a.attrs, b.attrs) and
+    a.linkId == b.linkId
 
 func sameRow(a, b: seq[Cell]): bool =
   if a.len != b.len:
@@ -471,11 +525,55 @@ proc addScrollbackRowDedup(rows: var seq[seq[Cell]], wraps: var seq[bool], row: 
     return
   addScrollbackRow(rows, wraps, row, wrapped, cap)
 
-proc addArchivedRow(rows: var seq[seq[Cell]], wraps: var seq[bool], row: seq[Cell], wrapped: bool, cap: int): bool =
+func softArchiveWindow(screenRows: int): int =
+  ## How far back soft (EL/ED) archives look for already-captured rows.
+  ## Inline TUIs redraw the same conversation frame repeatedly; matching
+  ## against a couple of screenfuls prevents re-appending that history.
+  max(32, screenRows * 3)
+
+func recentScrollbackHasRow(rows: seq[seq[Cell]], row: seq[Cell], window: int): bool =
+  if rows.len == 0 or window <= 0:
+    return false
+  let start = max(0, rows.len - window)
+  for i in start ..< rows.len:
+    if sameRow(rows[i], row):
+      return true
+  false
+
+func trailingFrameOverlap(scrollback: seq[seq[Cell]], frame: openArray[seq[Cell]]): int =
+  ## Longest suffix of scrollback that equals a prefix of frame.
+  ## Full-screen TUI redraws re-archive the same visible conversation; only the
+  ## newly revealed tail of the frame should be appended.
+  if frame.len == 0 or scrollback.len == 0:
+    return 0
+  let maxOverlap = min(frame.len, scrollback.len)
+  for overlap in countdown(maxOverlap, 1):
+    var matches = true
+    let start = scrollback.len - overlap
+    for i in 0 ..< overlap:
+      if not sameRow(scrollback[start + i], frame[i]):
+        matches = false
+        break
+    if matches:
+      return overlap
+  0
+
+proc addArchivedRow(
+    rows: var seq[seq[Cell]],
+    wraps: var seq[bool],
+    row: seq[Cell],
+    wrapped: bool,
+    cap: int,
+    recentWindow: int,
+): bool =
   if not rowHasContent(row):
     return false
   if isVolatileInlineStatusRow(row):
     return false
+  if recentScrollbackHasRow(rows, row, recentWindow):
+    ## Already retained from a prior soft archive / redraw. Treat as success so
+    ## callers see the row as preserved without growing scrollback.
+    return true
   addScrollbackRowDedup(rows, wraps, row, wrapped, cap)
   true
 
@@ -490,6 +588,7 @@ proc archiveRowForHistory*(s: Screen, row: int): bool =
 
   let g = if s.usingAlt: addr s.altGrid else: addr s.grid
   let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
+  let recentWindow = softArchiveWindow(s.rows)
 
   if s.usingAlt:
     return addArchivedRow(
@@ -498,6 +597,7 @@ proc archiveRowForHistory*(s: Screen, row: int): bool =
       g[][row],
       wraps[][row],
       s.scrollbackCap,
+      recentWindow,
     )
   else:
     return addArchivedRow(
@@ -506,12 +606,14 @@ proc archiveRowForHistory*(s: Screen, row: int): bool =
       g[][row],
       wraps[][row],
       s.scrollbackCap,
+      recentWindow,
     )
 
 proc archiveVisibleRows(s: Screen): int =
   ## Preserve the current visible frame before a destructive full-screen clear.
   ## Full-screen TUIs often redraw in place, so no physical rows scroll off the
   ## top. Archiving the non-empty visible span gives the viewport real history.
+  ## Repeated redraws of the same conversation only append newly revealed rows.
   let g = if s.usingAlt: addr s.altGrid else: addr s.grid
   let wraps = if s.usingAlt: addr s.altRowSoftWrap else: addr s.rowSoftWrap
   if s.usingAlt and not s.altScrollbackEnabled:
@@ -527,43 +629,44 @@ proc archiveVisibleRows(s: Screen): int =
   if first < 0:
     return 0
 
+  var frameRows: seq[seq[Cell]] = @[]
+  var frameWraps: seq[bool] = @[]
   for r in first .. last:
-    var archived = false
-    if not rowHasContent(g[][r]):
-      if s.usingAlt:
-        addScrollbackRowDedup(
-          s.altScrollback,
-          s.altScrollbackSoftWrap,
-          g[][r],
-          wraps[][r],
-          s.scrollbackCap,
-        )
-      else:
-        addScrollbackRowDedup(
-          s.scrollback,
-          s.scrollbackSoftWrap,
-          g[][r],
-          wraps[][r],
-          s.scrollbackCap,
-        )
-      archived = true
-    elif s.usingAlt:
-      archived = addArchivedRow(
-        s.altScrollback,
-        s.altScrollbackSoftWrap,
-        g[][r],
-        wraps[][r],
-        s.scrollbackCap,
-      )
+    ## Volatile status/spinner rows are skipped entirely (same as soft row
+    ## archive). Blank non-volatile separators inside the span are kept so
+    ## multi-line frames retain structure.
+    if isVolatileInlineStatusRow(g[][r]):
+      continue
+    frameRows.add g[][r]
+    frameWraps.add wraps[][r]
+
+  if frameRows.len == 0:
+    return 0
+
+  let sb = if s.usingAlt: addr s.altScrollback else: addr s.scrollback
+  let sbWraps = if s.usingAlt: addr s.altScrollbackSoftWrap else: addr s.scrollbackSoftWrap
+  let overlap = trailingFrameOverlap(sb[], frameRows)
+  let recentWindow = softArchiveWindow(s.rows)
+
+  for i in overlap ..< frameRows.len:
+    let row = frameRows[i]
+    let wrapped = frameWraps[i]
+    let beforeLen = sb[].len
+    if not rowHasContent(row):
+      ## Blank separators inside a multi-line frame only matter when they trail
+      ## real content; skip pure leading blanks after the overlap cut.
+      if result > 0 or (sb[].len > 0 and i > overlap):
+        addScrollbackRowDedup(sb[], sbWraps[], row, wrapped, s.scrollbackCap)
     else:
-      archived = addArchivedRow(
-        s.scrollback,
-        s.scrollbackSoftWrap,
-        g[][r],
-        wraps[][r],
+      discard addArchivedRow(
+        sb[],
+        sbWraps[],
+        row,
+        wrapped,
         s.scrollbackCap,
+        recentWindow,
       )
-    if archived:
+    if sb[].len > beforeLen:
       inc result
 
 proc resizeScrollbackRows(rows: var seq[seq[Cell]], oldCols, cols: int, attrs: Attrs) =
@@ -665,6 +768,8 @@ proc reset*(s: Screen) =
   s.cursor = newCursor(); s.scrollTop = 0; s.scrollBottom = s.rows - 1
   s.tabStops = makeTabStops(s.cols, DefaultTabWidth); s.modes = {smAutoWrap}
   s.usingAlt = false; s.charset = scsAscii; s.g0Charset = scsAscii; s.g1Charset = scsAscii; s.activeCharset = 0; s.scrollback.setLen(0); s.scrollbackSoftWrap.setLen(0); s.altScrollback.setLen(0); s.altScrollbackSoftWrap.setLen(0); s.title = ""; s.iconName = ""
+  s.hyperlinkUris = @[""]
+  s.activeLinkId = 0
   s.theme = defaultTheme(); let attrs = defaultAttrs()
   for r in 0 ..< s.rows:
     s.grid[r] = makeRow(s.cols, attrs)
@@ -1091,8 +1196,10 @@ proc writeRune*(s: Screen, cp: uint32, width: int) =
   if smInsert in s.modes:
     let g = if s.usingAlt: addr s.altGrid else: addr s.grid
     for c in countdown(s.cols - 1, s.cursor.col + width): g[][s.cursor.row][c] = g[][s.cursor.row][c - width]
-  s.setCell(s.cursor.row, s.cursor.col, Cell(rune: mapped, width: uint8(width), attrs: s.cursor.attrs))
-  for i in 1 ..< width: (if s.cursor.col + i < s.cols: s.setCell(s.cursor.row, s.cursor.col + i, Cell(rune: 0, width: 0, attrs: s.cursor.attrs)))
+  s.setCell(s.cursor.row, s.cursor.col, Cell(rune: mapped, width: uint8(width), attrs: s.cursor.attrs, linkId: s.activeLinkId))
+  for i in 1 ..< width:
+    if s.cursor.col + i < s.cols:
+      s.setCell(s.cursor.row, s.cursor.col + i, Cell(rune: 0, width: 0, attrs: s.cursor.attrs, linkId: s.activeLinkId))
   if s.cursor.col + width >= s.cols:
     if smAutoWrap in s.modes: s.cursor.pendingWrap = true; s.cursor.col = s.cols - 1
     else: s.cursor.col = s.cols - 1

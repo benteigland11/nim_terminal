@@ -1,4 +1,4 @@
-import std/[os, sequtils, times, unittest]
+import std/[os, sequtils, strutils, times, unittest]
 import ../src/system_clipboard_lib
 
 suite "System Clipboard":
@@ -51,3 +51,16 @@ suite "System Clipboard":
         sleep(10)
       check readFile(marker) == "hello"
       removeFile(marker)
+
+  test "paste backend that hangs times out quickly":
+    if commandAvailable("sh"):
+      let item = backend("hanging-paste", "sh", [
+        "-c",
+        "sleep 5",
+      ])
+      let started = epochTime()
+      let result = pasteTextWith(item, timeoutMs = 100)
+      let elapsed = epochTime() - started
+      check result.status == csCommandFailed
+      check result.message.contains("timed out")
+      check elapsed < 1.0

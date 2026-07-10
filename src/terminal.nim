@@ -1,7 +1,7 @@
 ## Project glue: assemble PTY host, UTF-8 decoder, VT parser, VT command
 ## translator, and screen buffer into a single `Terminal` pipeline.
 
-import std/[options]
+import std/[options, strutils]
 import ../cg/backend_pty_host_nim/src/pty_host_lib
 import ../cg/universal_utf8_decoder_nim/src/utf8_decoder_lib
 import ../cg/data_vt_parser_nim/src/vt_parser_lib
@@ -23,6 +23,8 @@ import ../cg/data_semantic_history_nim/src/semantic_history_lib
 import ../cg/universal_link_detector_nim/src/link_detector_lib
 import ../cg/data_terminal_output_footprint_nim/src/terminal_output_footprint_lib
 import ../cg/data_terminal_sync_update_nim/src/terminal_sync_update_lib
+import ../cg/data_terminal_progress_nim/src/terminal_progress_lib
+import ../cg/data_terminal_notification_nim/src/terminal_notification_lib
 import ../cg/data_vt_diagnostics_nim/src/vt_diagnostics_lib as vt_diag
 
 # OS-Specific Backend Selection
@@ -41,7 +43,8 @@ export pty_host_lib, screen_buffer_lib, input_vt_encoding_lib,
        fifo_buffer_lib, base64_codec, color_parser_lib, viewport_lib, pty_async_lib,
        drag_controller_lib, shortcut_map_lib, utf8_decoder_lib, vt_parser_lib,
        semantic_history_lib, link_detector_lib, terminal_output_footprint_lib,
-       terminal_sync_update_lib, terminal_profile_lib
+       terminal_sync_update_lib, terminal_profile_lib, terminal_progress_lib,
+       terminal_notification_lib
 export vt_diag
 
 type
@@ -70,6 +73,8 @@ type
     activeLink*: Option[ActiveLink]
     outputFootprint*: OutputFootprint
     syncUpdate*: SyncUpdateState
+    progress*: TerminalProgress
+    notifyAsm*: NotificationAssembler
     reports*: seq[string]
     # DCS accumulation
     dcsActive: bool
@@ -83,6 +88,11 @@ type
     onIconNameChanged*: proc(name: string)
     onDcsPassthrough*: proc(cmd: VtCommand)
     onClipboardRequest*: proc(selector, text: string)
+    ## Child asked for clipboard contents via OSC 52 `?`. Return the text to
+    ## report (may be empty). Nil means queries are ignored.
+    onClipboardQuery*: proc(selector: string): string
+    ## Child posted a desktop notification (OSC 9/99/777). Host shows a toast.
+    onDesktopNotify*: proc(text: string)
 
 proc populateShortcutMap*(m: ShortcutMap; preset: ShortcutPreset) =
   case preset
@@ -130,6 +140,8 @@ proc newTerminal*(
     activeLink: none(ActiveLink),
     outputFootprint: newOutputFootprint(),
     syncUpdate: newSyncUpdateState(),
+    progress: newTerminalProgress(),
+    notifyAsm: newNotificationAssembler(),
     dcsActive: false,
   )
 
@@ -417,12 +429,29 @@ proc apply*(t: Terminal, cmd: VtCommand) =
     else: discard
   of cmdSetTitle: (t.screen.title = cmd.text; if t.onTitleChanged != nil: t.onTitleChanged(cmd.text))
   of cmdSetIconName: (t.screen.iconName = cmd.text; if t.onIconNameChanged != nil: t.onIconNameChanged(cmd.text))
-  of cmdHyperlink: discard
+  of cmdHyperlink:
+    ## OSC 8 ; params ; uri — empty uri ends the active hyperlink span.
+    t.screen.setHyperlink(cmd.uri)
+    ## Params (id=…) are accepted but not required for open/click; the uri is
+    ## stamped onto subsequently written cells until the end marker.
   of cmdClipboardRequest:
-    if t.onClipboardRequest != nil:
-      let decoded = tryDecode(cmd.base64Data)
-      if decoded.isSome:
-        t.onClipboardRequest(cmd.clipboardSelector, decoded.get())
+    ## OSC 52 ; Pc ; Pd
+    ##   Pd = base64 payload → host should store text on the system clipboard
+    ##   Pd = "?" → query; host replies with OSC 52 (see sendClipboardResponse)
+    ##   Pd empty → clear request (treated as empty write when a callback exists)
+    let payload = cmd.base64Data.strip()
+    if payload == "?":
+      if t.onClipboardQuery != nil:
+        let text = t.onClipboardQuery(cmd.clipboardSelector)
+        let encoded = encode(text)
+        discard t.sendReport(reportClipboard(cmd.clipboardSelector, encoded))
+    elif t.onClipboardRequest != nil:
+      if payload.len == 0:
+        t.onClipboardRequest(cmd.clipboardSelector, "")
+      else:
+        let decoded = tryDecode(payload)
+        if decoded.isSome:
+          t.onClipboardRequest(cmd.clipboardSelector, decoded.get())
   of cmdSetPaletteColor:
     let color = parseColor(cmd.paletteColorSpec)
     if color.isSome: (let idx = cmd.paletteIndex; if idx >= 0 and idx <= 15: (t.screen.theme.ansi[idx] = toPaletteColor(color.get); t.damage.markAll()))
@@ -455,6 +484,26 @@ proc apply*(t: Terminal, cmd: VtCommand) =
   of cmdShellCommandFinished:
     t.finishOutputFootprint(force = t.history.phase == sphOutput)
     t.history.markCommandFinished(t.absoluteCursorRow(), cmd.exitCode)
+  of cmdSetProgress:
+    discard t.progress.applyProgress(cmd.progressState, cmd.progressPercent)
+  of cmdDesktopNotify:
+    if t.onDesktopNotify == nil:
+      discard
+    elif cmd.notifySource == "osc99-raw":
+      let n = t.notifyAsm.feedOsc99(cmd.notifyBody)
+      if n.ok:
+        let text = toastText(n.note)
+        if text.len > 0:
+          t.onDesktopNotify(text)
+    else:
+      let note = DesktopNotification(
+        title: cmd.notifyTitle,
+        body: cmd.notifyBody,
+        source: cmd.notifySource,
+      )
+      let text = toastText(note)
+      if text.len > 0:
+        t.onDesktopNotify(text)
   of cmdRequestStateString:
     t.recordDiagnostic(vt_diag.vekStateQuery, "DECRQSS", cmd.stateString)
     discard t.sendReport(t.stateStringReport(cmd.stateString))
@@ -494,6 +543,26 @@ proc selectionText*(t: Terminal): string =
     var res = newSeq[CellData](row.len)
     for i, c in row: res[i] = CellData(rune: c.rune, width: int(c.width))
     res
+
+proc hitTestLink*(t: Terminal, absRow, col: int): Option[ActiveLink] =
+  ## Prefer OSC 8 hyperlinks stamped on cells; fall back to plain-text URL scan.
+  if absRow < 0 or col < 0:
+    return none(ActiveLink)
+  let span = t.screen.absoluteHyperlinkSpan(absRow, col)
+  if span.uri.len > 0:
+    return some(ActiveLink(
+      link: DetectedLink(kind: lkUrl, text: span.uri, startIdx: 0, endIdx: span.uri.len),
+      row: absRow,
+      startCol: span.startCol,
+      endCol: span.endCol,
+    ))
+  let lineStr = t.screen.absoluteLineText(absRow)
+  for l in detectLinks(lineStr):
+    let sc = t.screen.colOfByteIndex(absRow, l.startIdx)
+    let ec = t.screen.colOfByteIndex(absRow, l.endIdx)
+    if col >= sc and col < ec:
+      return some(ActiveLink(link: l, row: absRow, startCol: sc, endCol: ec))
+  none(ActiveLink)
 
 proc flush*(t: Terminal): int = t.async.flush()
 proc step*(t: Terminal, bufSize: int = 4096): int =

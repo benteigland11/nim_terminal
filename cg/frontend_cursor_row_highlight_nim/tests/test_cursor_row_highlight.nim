@@ -71,10 +71,25 @@ suite "cursor row highlight policy":
     ]
     let rects = codexPromptHighlightRects(rows, 20, PixelRect(x: 2, y: 4, w: 500, h: 180))
     check rects.len == 2
-    check rects[0] == PixelRect(x: 2, y: 4, w: 500, h: 20)
+    ## Historic prompt includes the blank spacer before the answer lead.
+    check rects[0] == PixelRect(x: 2, y: 4, w: 500, h: 40)
     check rects[1] == PixelRect(x: 2, y: 84, w: 500, h: 40)
 
-  test "codex prompt highlights respect hidden cursor policy":
+  test "transcript prompt highlights keep showing when cursor is hidden":
+    let rows = [
+      "› earlier request",
+      "",
+      "  gpt-5.5 medium · ~/project",
+    ]
+    ## Default path is for history chrome — agent turns hide the cursor.
+    check codexPromptHighlightRects(
+      rows,
+      20,
+      PixelRect(x: 0, y: 0, w: 500, h: 100),
+      cursorVisible = false,
+    ).len == 1
+
+  test "composer-gated path can still require a visible cursor":
     let rows = [
       "› earlier request",
       "",
@@ -85,4 +100,5 @@ suite "cursor row highlight policy":
       20,
       PixelRect(x: 0, y: 0, w: 500, h: 100),
       cursorVisible = false,
+      requireCursorVisible = true,
     ).len == 0

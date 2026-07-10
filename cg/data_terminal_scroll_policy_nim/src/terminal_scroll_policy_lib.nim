@@ -7,8 +7,8 @@
 type
   AltScreenScrollbackMode* = enum
     assOff      ## Do not retain alternate-screen history.
-    assPassive  ## Retain history, but prefer child-owned TUI scrolling.
-    assAlways   ## Retain history and prefer terminal viewport scrolling.
+    assPassive  ## Retain history, but prefer child-owned TUI scrolling at the live edge.
+    assAlways   ## Retain history and honor altWheelPolicy (often terminal-first).
 
   AltWheelPolicy* = enum
     awpApp       ## Prefer forwarding wheel input to the child application.
@@ -115,6 +115,20 @@ func decideWheelAction*(input: ScrollPolicyInput): ScrollAction =
 
   let canScroll = input.canScrollTerminal()
 
+  # Passive retains alternate-screen history (shift / force / already scrolled
+  # back) but prefers child-owned TUI scrolling at the live edge. Without this,
+  # archiving during prolonged TUI redraws grows history and a terminal-first
+  # wheel policy steals scroll from apps that still own the interaction.
+  if input.altScrollbackMode == assPassive:
+    if canScroll and not input.viewportAtLiveEnd:
+      return saScrollViewport
+    if childEncoding != cweNone:
+      return routeForChildEncoding(childEncoding)
+    if canScroll:
+      return saScrollViewport
+    return saIgnore
+
+  # assAlways: honor the explicit alternate-screen wheel policy.
   case input.altWheelPolicy
   of awpApp:
     if childEncoding != cweNone:

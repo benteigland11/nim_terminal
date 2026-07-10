@@ -14,8 +14,12 @@ import std/[algorithm, json, options, osproc, parsecfg, streams, strutils, times
 import terminal
 import gpu_renderer
 import ../cg/universal_glyph_atlas_nim/src/glyph_atlas_lib
-when not defined(waymarkSdl3):
-  from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import toKeyCode, toMouseButton, toPrintableRune
+when defined(waymarkSdl3):
+  import ../cg/frontend_sdl_input_nim/src/sdl_input_lib as sdl_input
+else:
+  from ../cg/frontend_glfw_input_nim/src/glfw_input_lib import
+    toKeyCode, toMouseButton, toPrintableRune, toShortcutId,
+    ShortcutId, siNone, siChar, siEnter, siEqual, siMinus, siPlus
 import ../cg/universal_perf_monitor_nim/src/perf_monitor_lib
 import ../cg/universal_shortcut_map_nim/src/shortcut_map_lib
 import ../cg/frontend_glfw_window_nim/src/glfw_window_lib
@@ -47,6 +51,27 @@ import ../cg/frontend_menu_nim/src/menu_lib as menu_lib
 import ../cg/frontend_scrollbar_nim/src/scrollbar_lib as scrollbar_lib
 import ../cg/frontend_toast_nim/src/toast_lib as toast_lib
 
+when defined(waymarkSdl3):
+  func shortcutMapKey(id: sdl_input.ShortcutId): shortcut_map_lib.KeyCode =
+    ## Convert SDL unified shortcut id into the shortcut-map KeyCode space.
+    case id.kind
+    of sdl_input.siNone: shortcut_map_lib.kNone
+    of sdl_input.siChar: shortcut_map_lib.shortcutKey(id.ch)
+    of sdl_input.siEnter: shortcut_map_lib.kEnter
+    of sdl_input.siEqual: shortcut_map_lib.kEqual
+    of sdl_input.siMinus: shortcut_map_lib.kMinus
+    of sdl_input.siPlus: shortcut_map_lib.kPlus
+else:
+  func shortcutMapKey(id: ShortcutId): shortcut_map_lib.KeyCode =
+    ## Convert GLFW unified shortcut id into the shortcut-map KeyCode space.
+    case id.kind
+    of siNone: shortcut_map_lib.kNone
+    of siChar: shortcut_map_lib.shortcutKey(id.ch)
+    of siEnter: shortcut_map_lib.kEnter
+    of siEqual: shortcut_map_lib.kEqual
+    of siMinus: shortcut_map_lib.kMinus
+    of siPlus: shortcut_map_lib.kPlus
+
 const
   DefaultWindowTitle = "Waymark - Built with Nim"
   ConfigPath = "nim_terminal.cfg"
@@ -76,6 +101,10 @@ const
   DefaultCatalogPollSec = 1.0
   PanePadXPx = 8
   PanePadYPx = 4
+  ## Keep split panes large enough for interactive CLI TUIs (Codex, Claude, …).
+  ## Measured in terminal cells after pane chrome insets.
+  MinTerminalPaneCols = 40
+  MinTerminalPaneRows = 8
   DefaultFallbackFontPaths = [
     "/usr/share/fonts/google-noto/NotoSansSymbols2-Regular.ttf",
     "/usr/share/fonts/google-noto-vf/NotoSansSymbols[wght].ttf",
@@ -161,8 +190,8 @@ var
     diagnosticsCapacity: DefaultDiagnosticsCapacity,
     glyphAtlasSize: DefaultGlyphAtlasSize,
     altScreenScrollback: assPassive,
-    altWheelPolicy: awpTerminal,
-    normalWheelPolicy: nwpTerminal,
+    altWheelPolicy: awpApp,
+    normalWheelPolicy: nwpSmart,
     meaningfulHistoryRows: DefaultMeaningfulHistoryRows,
     profileMode: pmStandard,
     shortcutPreset: spStandard,
@@ -471,8 +500,14 @@ proc chromeHeaderHeight(): int =
 proc contentHeight(): int = max(1, winHeight - chromeHeaderHeight())
 
 proc paneInnerRect(area: PaneRect): PaneRect =
-  let insetX = min(area.w div 3, PaneBorderPx + PanePadXPx)
-  let insetY = min(area.h div 3, PaneBorderPx + PanePadYPx)
+  ## Prefer full padding, but collapse chrome on tiny panes so CLI harnesses
+  ## still get as many cells as the pixel budget allows.
+  var insetX = min(area.w div 3, PaneBorderPx + PanePadXPx)
+  var insetY = min(area.h div 3, PaneBorderPx + PanePadYPx)
+  if area.w < (PaneBorderPx + PanePadXPx) * 2 + 80:
+    insetX = min(area.w div 4, PaneBorderPx)
+  if area.h < (PaneBorderPx + PanePadYPx) * 2 + 48:
+    insetY = min(area.h div 4, PaneBorderPx)
   pane_tree.rect(area.x + insetX, area.y + insetY, area.w - insetX * 2, area.h - insetY * 2)
 
 proc paneCols(area: PaneRect): int =
@@ -482,6 +517,16 @@ proc paneCols(area: PaneRect): int =
 proc paneRows(area: PaneRect): int =
   if rend == nil or rend.atlas == nil or rend.atlas.cellHeight <= 0: return 1
   max(1, paneInnerRect(area).h div rend.atlas.cellHeight)
+
+proc minPanePixelSize(): tuple[w, h: int] =
+  ## Pixel floor for a split so the resulting cell grid can host a TUI.
+  let cellW = if rend != nil and rend.atlas != nil: max(1, rend.atlas.cellWidth) else: 8
+  let cellH = if rend != nil and rend.atlas != nil: max(1, rend.atlas.cellHeight) else: 16
+  ## Include a little room for collapsed border insets.
+  (
+    MinTerminalPaneCols * cellW + 2 * PaneBorderPx,
+    MinTerminalPaneRows * cellH + 2 * PaneBorderPx,
+  )
 
 proc fullContentRect(): pane_tree.Rect =
   pane_tree.rect(0, chromeHeaderHeight(), winWidth, contentHeight())
@@ -1246,6 +1291,10 @@ proc paneBudgetAllows(workspace: TerminalWorkspace, requested = 1): bool =
   )
   decision.allowed
 
+proc installTerminalClipboardHooks(term: Terminal)
+proc drawAppToasts()
+proc pushToast(text: string)
+
 proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
   let sessionCwd = validSessionCwd(cwd)
   if screenSnapshotPath.len > 0:
@@ -1269,6 +1318,7 @@ proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
   )
   term.screen.altScrollbackEnabled = altScrollbackEnabled(config.altScreenScrollback)
   applyConfiguredTheme(term)
+  installTerminalClipboardHooks(term)
 
   var session = TerminalSession(
     id: paneId,
@@ -1314,11 +1364,20 @@ proc splitActivePane() =
   let workspace = activeWorkspace()
   if workspace == nil: return
   if not workspace[].paneBudgetAllows(): return
+  let content = contentRect()
+  let minPx = minPanePixelSize()
+  if not workspace[].panes.canSplitActiveAppend(
+      content,
+      minW = minPx.w,
+      minH = minPx.h,
+  ):
+    pushToast("Pane too small to split — enlarge the window first")
+    return
   let sourcePane = workspace[].panes.active
   let cwd = validSessionCwd(activeSessionCwd())
   let fresh = workspace[].panes.splitActiveAppend()
-  let layouts = workspace[].panes.layouts(contentRect())
-  var area = contentRect()
+  let layouts = workspace[].panes.layouts(content)
+  var area = content
   for item in layouts:
     if item.id == fresh:
       area = item.rect
@@ -1634,12 +1693,7 @@ proc drawCartographMode() =
       rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
   if catalogMenuOpen:
     rend.drawContextMenu(winWidth, winHeight, catalogMenuLayout(), catalogMenu.items, catalogMenu.highlighted)
-  block toasts:
-    let now = epochTime()
-    toast_lib.prune(appToasts, now)
-    let visible = toast_lib.visibleToasts(appToasts, now)
-    if visible.len > 0:
-      rend.drawToasts(winWidth, winHeight, visible, now)
+  drawAppToasts()
   clearCartographDirty(cartographWorkspace)
 
 proc drawActiveWorkspace() =
@@ -1668,6 +1722,7 @@ proc drawActiveWorkspace() =
   if workspaces[wi].panes.len > 1:
     for item in layouts:
       rend.drawPaneBorder(item.rect.x, item.rect.y, item.rect.w, item.rect.h, winWidth, winHeight, item.id == workspaces[wi].panes.active)
+  drawAppToasts()
 
 proc pumpTerminalSessions(): int =
   checkSearchProcess()
@@ -1966,10 +2021,61 @@ proc systemClipboardProvider(): clipboard_provider_lib.ClipboardProvider =
   )
 
 proc installClipboardProviders() =
+  ## Native (GLFW/SDL) first — non-blocking on the compositor path.
+  ## Command backends are fallback only and must never hang the UI (timeouts in
+  ## system_clipboard_lib).
   clipboardProviders = @[nativeClipboardProvider(), systemClipboardProvider()]
+  ## Keep interactive paste snappy; huge blobs still get a hard ceiling.
+  clipboardPolicy.maxReadBytes = 256_000
+  clipboardPolicy.maxWriteBytes = 1_000_000
 
 proc copyToClipboard(text: string) =
+  if text.len == 0:
+    return
   discard clipboard_provider_lib.writeText(clipboardProviders, text, clipboardPolicy)
+
+proc pasteFromClipboard(): string =
+  ## Prefer the native provider alone first so we never pay for a hung
+  ## `wl-paste` when the window toolkit already has the text.
+  let nativeOnly = clipboardProviders[0 .. min(0, clipboardProviders.high)]
+  var text = clipboard_provider_lib.readText(nativeOnly, clipboardPolicy)
+  if not clipboard_provider_lib.success(text) and clipboardProviders.len > 1:
+    text = clipboard_provider_lib.readText(clipboardProviders[1 .. ^1], clipboardPolicy)
+  if clipboard_provider_lib.success(text):
+    text.text
+  else:
+    ""
+
+proc selectionTextForCopy(term: Terminal): string =
+  if term == nil or not term.selection.isActive:
+    return ""
+  term.selection.extractText(term.screen.cols) do (r: int) -> seq[CellData]:
+    let row = term.screen.absoluteRowAt(r)
+    var res = newSeq[CellData](row.len)
+    for i, c in row: res[i] = CellData(rune: c.rune, width: int(c.width))
+    res
+
+proc installTerminalClipboardHooks(term: Terminal) =
+  ## Claude Code, Grok Build, and similar TUIs copy via OSC 52. Wire that to
+  ## the system clipboard providers; without this, highlight-to-copy is a no-op.
+  if term == nil: return
+  term.onClipboardRequest = proc(selector, text: string) =
+    discard selector
+    copyToClipboard(text)
+  term.onClipboardQuery = proc(selector: string): string =
+    discard selector
+    pasteFromClipboard()
+  term.onDesktopNotify = proc(text: string) =
+    if text.len > 0:
+      pushToast(text)
+
+proc drawAppToasts() =
+  if rend == nil: return
+  let now = epochTime()
+  toast_lib.prune(appToasts, now)
+  let visible = toast_lib.visibleToasts(appToasts, now)
+  if visible.len > 0:
+    rend.drawToasts(winWidth, winHeight, visible, now)
 
 proc pushToast(text: string) =
   appToasts.push(text, epochTime())
@@ -1987,28 +2093,17 @@ proc executeCatalogMenuAction(itemId: string) =
   else:
     discard
 
-proc pasteFromClipboard(): string =
-  let text = clipboard_provider_lib.readText(clipboardProviders, clipboardPolicy)
-  if clipboard_provider_lib.success(text):
-    text.text
-  else:
-    ""
-
 proc handleShortcutAction(term: Terminal; action: string): bool =
   result = true
   case action
   of "copy":
-    if term.selection.isActive:
-      let text = term.selection.extractText(term.screen.cols) do (r: int) -> seq[CellData]:
-        let row = term.screen.absoluteRowAt(r)
-        var res = newSeq[CellData](row.len)
-        for i, c in row: res[i] = CellData(rune: c.rune, width: int(c.width))
-        res
-      copyToClipboard(text)
+    copyToClipboard(selectionTextForCopy(term))
   of "paste":
     let text = pasteFromClipboard()
     if text.len > 0:
       discard term.sendPaste(text)
+    else:
+      pushToast("Clipboard empty")
   of "close-tab":
     if tabs.activeId.isSome:
       removeTerminalTab(tabs.activeId.get())
@@ -2038,7 +2133,13 @@ proc closeAllWorkspaces() =
 
 proc renderOnce() =
   surfaceStack.drawActive()
-  rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active, config.title)
+  let progressSnap =
+    if activeTerm() != nil: activeTerm().progress.snapshot()
+    else: ProgressSnapshot()
+  rend.drawChrome(
+    tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active,
+    config.title, progressSnap,
+  )
   render_relay_lib.endFrame(frameRelays)
   writeGpuSnapshot()
   let term = activeTerm()
@@ -2172,18 +2273,14 @@ when not defined(waymarkSdl3):
         let term = activeTerm()
         if term != nil: term.damage.markAll()
         return
+      ## Classic Linux terminal paste (in addition to Ctrl+V / Ctrl+Shift+V).
+      if terminal.modShift in m and terminal.modCtrl notin m and
+          terminal.modAlt notin m and key == KEY_INSERT:
+        if handleShortcutAction(term, "paste"):
+          return
 
-      # 1. Map GLFW key to ShortcutMap.KeyCode
-      var sk: shortcut_map_lib.KeyCode
-      case key
-      of KEY_EQUAL: sk = shortcut_map_lib.kEqual
-      of KEY_MINUS: sk = shortcut_map_lib.kMinus
-      of KEY_KP_ADD: sk = shortcut_map_lib.kPlus
-      of KEY_KP_SUBTRACT: sk = shortcut_map_lib.kMinus
-      of KEY_ENTER, KEY_KP_ENTER: sk = shortcut_map_lib.kEnter
-      else:
-        if key >= 32 and key <= 126: sk = shortcut_map_lib.shortcutKey(char(key))
-        else: sk = shortcut_map_lib.kNone
+      # 1. Map GLFW key to unified shortcut identity (row + keypad digits share one id)
+      let sk = shortcutMapKey(toShortcutId(key))
 
       # 2. Lookup high-level actions
       let actionName = term.shortcuts.lookup(sk, cast[set[shortcut_map_lib.Modifier]](m))
@@ -2290,11 +2387,15 @@ when not defined(waymarkSdl3):
           launchUri(term.activeLink.get().link.text)
           return
 
+        let wasDragging = term.drag.state != dsIdle
         term.drag.update(row, col, isDown)
         if isDown:
           let wi = activeWorkspaceIndex()
           if wi >= 0: clearSelectionsExcept(workspaces[wi], session[].id)
           term.selection.start(point(bufferRow, col))
+        elif wasDragging:
+          ## Host-owned highlight-to-copy (mouse not claimed by the child).
+          copyToClipboard(selectionTextForCopy(term))
         term.damage.markAll()
     else:
       let tmb = toMouseButton(button).int
@@ -2359,15 +2460,8 @@ when not defined(waymarkSdl3):
       let absRow = term.viewport.viewportToBuffer(row)
       if absRow < 0: return
       # Update active link hover state
-      let lineStr = term.screen.absoluteLineText(absRow)
-      let links = detectLinks(lineStr)
-      var newActive = none(ActiveLink)
-      for l in links:
-        let sc = term.screen.colOfByteIndex(absRow, l.startIdx)
-        let ec = term.screen.colOfByteIndex(absRow, l.endIdx)
-        if col >= sc and col < ec:
-          newActive = some(ActiveLink(link: l, row: absRow, startCol: sc, endCol: ec))
-          break
+      ## OSC 8 hyperlinks win; plain-text URL scan is the fallback.
+      let newActive = term.hitTestLink(absRow, col)
       if newActive != term.activeLink:
         term.activeLink = newActive
         term.damage.markAll()
@@ -2534,70 +2628,16 @@ when not defined(waymarkSdl3):
 
 when defined(waymarkSdl3):
   func toTerminalMods(mods: sdl.Keymod): set[terminal.Modifier] =
-    let raw = mods.uint32
-    if (raw and sdl.KMOD_SHIFT) != 0: result.incl terminal.modShift
-    if (raw and sdl.KMOD_CTRL) != 0: result.incl terminal.modCtrl
-    if (raw and sdl.KMOD_ALT) != 0: result.incl terminal.modAlt
-    if (raw and sdl.KMOD_GUI) != 0: result.incl terminal.modSuper
+    cast[set[terminal.Modifier]](sdl_input.toModifiers(mods.uint32))
 
   func toShortcutMods(mods: set[terminal.Modifier]): set[shortcut_map_lib.Modifier] =
     cast[set[shortcut_map_lib.Modifier]](mods)
 
   func toSdlKeyCode(scancode: sdl.Scancode): terminal.KeyCode =
-    case scancode
-    of sdl.SCANCODE_RETURN: kEnter
-    of sdl.SCANCODE_TAB: kTab
-    of sdl.SCANCODE_BACKSPACE: kBackspace
-    of sdl.SCANCODE_ESCAPE: kEscape
-    of sdl.SCANCODE_INSERT: kInsert
-    of sdl.SCANCODE_DELETE: kDelete
-    of sdl.SCANCODE_HOME: kHome
-    of sdl.SCANCODE_END: kEnd
-    of sdl.SCANCODE_PAGEUP: kPageUp
-    of sdl.SCANCODE_PAGEDOWN: kPageDown
-    of sdl.SCANCODE_UP: kArrowUp
-    of sdl.SCANCODE_DOWN: kArrowDown
-    of sdl.SCANCODE_LEFT: kArrowLeft
-    of sdl.SCANCODE_RIGHT: kArrowRight
-    of sdl.SCANCODE_F1: kF1
-    of sdl.SCANCODE_F2: kF2
-    of sdl.SCANCODE_F3: kF3
-    of sdl.SCANCODE_F4: kF4
-    of sdl.SCANCODE_F5: kF5
-    of sdl.SCANCODE_F6: kF6
-    of sdl.SCANCODE_F7: kF7
-    of sdl.SCANCODE_F8: kF8
-    of sdl.SCANCODE_F9: kF9
-    of sdl.SCANCODE_F10: kF10
-    of sdl.SCANCODE_F11: kF11
-    of sdl.SCANCODE_F12: kF12
-    of sdl.SCANCODE_KP_ENTER: kKeypadEnter
-    else: kNone
+    cast[terminal.KeyCode](sdl_input.toKeyCode(scancode.int).int)
 
   func toSdlMouseButton(button: uint8): terminal.MouseButton =
-    case button
-    of sdl.BUTTON_LEFT: mbLeft
-    of sdl.BUTTON_MIDDLE: mbMiddle
-    of sdl.BUTTON_RIGHT: mbRight
-    else: mbRelease
-
-  func printableFromSdlKey(keycode: sdl.Keycode): Option[uint32] =
-    if keycode >= 32'u32 and keycode <= 126'u32:
-      some(uint32(keycode))
-    else:
-      none(uint32)
-
-  func shortcutKeyFromSdl(keycode: sdl.Keycode): shortcut_map_lib.KeyCode =
-    case keycode
-    of sdl.SDLK_EQUALS: shortcut_map_lib.kEqual
-    of sdl.SDLK_MINUS: shortcut_map_lib.kMinus
-    of sdl.SDLK_PLUS: shortcut_map_lib.kPlus
-    of sdl.SDLK_RETURN, sdl.SDLK_KP_ENTER: shortcut_map_lib.kEnter
-    else:
-      if keycode >= 32'u32 and keycode <= 126'u32:
-        shortcut_map_lib.shortcutKey(char(keycode))
-      else:
-        shortcut_map_lib.kNone
+    cast[terminal.MouseButton](sdl_input.toMouseButton(button).int)
 
   proc handleTextInput(text: cstring) =
     if overlay_lib.overlayCapturesInput(overlayStack) and surfaceStack.active == asWorkspace: return
@@ -2637,7 +2677,7 @@ when defined(waymarkSdl3):
       of sdl.SCANCODE_RETURN, sdl.SCANCODE_KP_ENTER: discard handleSearchEditKey(sekEnter); return
       else:
         if keyTextFallback:
-          let ch = printableFromSdlKey(event.key)
+          let ch = sdl_input.toPrintableRune(event.key.uint32)
           if ch.isSome:
             searchInsertRune(Rune(ch.get().int32))
             return
@@ -2669,14 +2709,19 @@ when defined(waymarkSdl3):
       let term = activeTerm()
       if term != nil: term.damage.markAll()
       return
+    if terminal.modShift in mods and terminal.modCtrl notin mods and
+        terminal.modAlt notin mods and sc == sdl.SCANCODE_INSERT:
+      if handleShortcutAction(term, "paste"):
+        return
 
-    let actionName = term.shortcuts.lookup(shortcutKeyFromSdl(event.key), toShortcutMods(mods))
+    let actionName = term.shortcuts.lookup(
+      shortcutMapKey(sdl_input.toShortcutId(event.key.uint32)), toShortcutMods(mods))
     if actionName.isSome:
       if handleShortcutAction(term, actionName.get()):
         return
 
     if terminal.modCtrl in mods or terminal.modAlt in mods or keyTextFallback:
-      let ch = printableFromSdlKey(event.key)
+      let ch = sdl_input.toPrintableRune(event.key.uint32)
       if ch.isSome:
         discard term.sendKey(keyChar(ch.get(), mods))
         term.damage.markAll()
@@ -2757,11 +2802,14 @@ when defined(waymarkSdl3):
         if not down and term.activeLink.isSome:
           launchUri(term.activeLink.get().link.text)
           return
+        let wasDragging = term.drag.state != dsIdle
         term.drag.update(row, col, down)
         if down:
           let wi = activeWorkspaceIndex()
           if wi >= 0: clearSelectionsExcept(workspaces[wi], session[].id)
           term.selection.start(point(bufferRow, col))
+        elif wasDragging:
+          copyToClipboard(selectionTextForCopy(term))
         term.damage.markAll()
     else:
       let tmb = toSdlMouseButton(button)
@@ -2823,15 +2871,8 @@ when defined(waymarkSdl3):
     else:
       let absRow = term.viewport.viewportToBuffer(row)
       if absRow < 0: return
-      let lineStr = term.screen.absoluteLineText(absRow)
-      let links = detectLinks(lineStr)
-      var newActive = none(ActiveLink)
-      for l in links:
-        let sc = term.screen.colOfByteIndex(absRow, l.startIdx)
-        let ec = term.screen.colOfByteIndex(absRow, l.endIdx)
-        if col >= sc and col < ec:
-          newActive = some(ActiveLink(link: l, row: absRow, startCol: sc, endCol: ec))
-          break
+      ## OSC 8 hyperlinks win; plain-text URL scan is the fallback.
+      let newActive = term.hitTestLink(absRow, col)
       if newActive != term.activeLink:
         term.activeLink = newActive
         term.damage.markAll()
@@ -3106,12 +3147,19 @@ while true:
   let surfaceDirty =
     if surfaceStack.active == asPrimary: activeWorkspaceDirty() else: surfaceStack.activeNeedsRedraw()
   let overlayOpen = not overlay_lib.overlayIsEmpty(overlayStack)
-  let toastsActive = surfaceStack.active == asWorkspace and toast_lib.hasActive(appToasts, epochTime())
-  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or surfaceDirty or tabLabelsChanged or catalogChanged or overlayOpen or toastsActive) and not blockedBySyncUpdate
+  let toastsActive = toast_lib.hasActive(appToasts, epochTime())
+  let progressActive = term != nil and term.progress.isVisible
+  let changed = (resized or n > 0 or atlasWasDirty or chromeAtlasWasDirty or surfaceDirty or tabLabelsChanged or catalogChanged or overlayOpen or toastsActive or progressActive) and not blockedBySyncUpdate
   if changed:
     surfaceStack.drawActive()
     drawOverlays()
-    rend.drawChrome(tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active, config.title)
+    let progressSnap =
+      if term != nil: term.progress.snapshot()
+      else: ProgressSnapshot()
+    rend.drawChrome(
+      tabs, winWidth, winHeight, titleBarHeight, tabBarHeight, surfaceStack.active,
+      config.title, progressSnap,
+    )
     render_relay_lib.endFrame(frameRelays)
     writeGpuSnapshot()
     if term != nil:
