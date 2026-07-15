@@ -26,11 +26,15 @@ type
     phase*: SemanticPhase
     blocks*: seq[CommandBlock]
     current*: CommandBlock
+    maxBlocks*: int  ## 0 = unlimited; positive caps retained completed blocks
 
-func newSemanticHistory*(): SemanticHistory =
+const DefaultMaxSemanticBlocks* = 2048
+
+func newSemanticHistory*(maxBlocks: int = DefaultMaxSemanticBlocks): SemanticHistory =
   SemanticHistory(
     phase: sphIdle,
     blocks: @[],
+    maxBlocks: max(0, maxBlocks),
     current: CommandBlock(
       promptStartRow: -1,
       commandStartRow: -1,
@@ -40,12 +44,19 @@ func newSemanticHistory*(): SemanticHistory =
     )
   )
 
-func markPromptStart*(h: SemanticHistory, absRow: int) =
+proc trimBlocks(h: SemanticHistory) =
+  if h.maxBlocks <= 0: return
+  if h.blocks.len > h.maxBlocks:
+    let drop = h.blocks.len - h.maxBlocks
+    h.blocks = h.blocks[drop .. ^1]
+
+proc markPromptStart*(h: SemanticHistory, absRow: int) =
   ## OSC 133 ; A
   if h.phase == sphOutput or h.phase == sphIdle:
     if h.phase == sphOutput:
       h.current.outputEndRow = max(h.current.outputStartRow, absRow - 1)
       h.blocks.add(h.current)
+      h.trimBlocks()
     h.current = CommandBlock(
       promptStartRow: absRow,
       commandStartRow: -1,
@@ -55,21 +66,22 @@ func markPromptStart*(h: SemanticHistory, absRow: int) =
     )
   h.phase = sphPrompt
 
-func markCommandStart*(h: SemanticHistory, absRow: int) =
+proc markCommandStart*(h: SemanticHistory, absRow: int) =
   ## OSC 133 ; B
   h.current.commandStartRow = absRow
   h.phase = sphCommand
 
-func markCommandExecuted*(h: SemanticHistory, absRow: int) =
+proc markCommandExecuted*(h: SemanticHistory, absRow: int) =
   ## OSC 133 ; C
   h.current.outputStartRow = absRow
   h.phase = sphOutput
 
-func markCommandFinished*(h: SemanticHistory, absRow: int, exitCode: int) =
+proc markCommandFinished*(h: SemanticHistory, absRow: int, exitCode: int) =
   ## OSC 133 ; D ; <exitCode>
   h.current.outputEndRow = max(h.current.outputStartRow, absRow)
   h.current.exitCode = some(exitCode)
   h.blocks.add(h.current)
+  h.trimBlocks()
   h.phase = sphIdle
   h.current = CommandBlock(
     promptStartRow: -1,

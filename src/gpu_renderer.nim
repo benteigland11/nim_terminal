@@ -171,8 +171,10 @@ proc newGpuTerminalRenderer*(atlas: GlyphAtlas, chromeAtlas: GlyphAtlas = nil, g
   var ids: array[3, uint32]
   for i in 0 ..< ids.len:
     ids[i] = uint32Value(gpu.createTexture())
-  gpu.configureTexture(textureId(ids[0]), defaultTextureOptions(gtfLinear))
-  gpu.configureTexture(textureId(ids[1]), defaultTextureOptions(gtfLinear))
+  ## Nearest filtering on glyph atlases keeps cell text crisp; linear softens
+  ## strokes into the transparent padding and reads as dull/muddy ink.
+  gpu.configureTexture(textureId(ids[0]), defaultTextureOptions(gtfNearest))
+  gpu.configureTexture(textureId(ids[1]), defaultTextureOptions(gtfNearest))
   gpu.configureTexture(textureId(ids[2]), defaultTextureOptions(gtfNearest))
   var whitePixel: uint32 = 0xFFFFFFFF'u32
   gpu.uploadSolidRgba8Texture(textureId(ids[2]), whitePixel)
@@ -1208,6 +1210,8 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
   # --- ONE PASS FOR ALL GLYPHS ---
   r.batcher.textureId = r.atlasTexId
   r.batcher.beginBatch()
+  ## 1px NDC offset for faux-bold when the atlas has only one font weight.
+  let boldNdcX = (1.0'f32 / sw) * 2.0'f32
   for row in 0 ..< rows:
     let absRow = t.viewport.viewportToBuffer(row)
     let cells = s.absoluteRowAt(absRow)
@@ -1219,7 +1223,12 @@ proc drawInRect*(r: GpuTerminalRenderer, t: Terminal, winWidth, winHeight: int, 
         let glyph = r.atlas.getGlyph(cell.rune)
         let resolved = render_attrs.resolveRenderAttrs(toRenderAttrs(cell.attrs), defaultFg, defaultBg, tAnsi)
         let color = toRgba(resolved.foreground)
-        r.batcher.addTile(ndcX(x + col * r.atlas.cellWidth, winWidth), py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
+        let px = ndcX(x + col * r.atlas.cellWidth, winWidth)
+        r.batcher.addTile(px, py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
+        ## Faux bold: second stamp offset 1px when SGR bold is set and we only
+        ## have a single Medium weight in the atlas.
+        if render_attrs.rfBold in resolved.decorations:
+          r.batcher.addTile(px + boldNdcX, py, tw, th, glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y, color)
   r.finishBatch()
   r.gpu.flush()
   t.damage.clear()

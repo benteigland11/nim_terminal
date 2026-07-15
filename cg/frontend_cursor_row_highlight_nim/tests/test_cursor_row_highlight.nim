@@ -59,6 +59,27 @@ suite "cursor row highlight policy":
     ]
     check codexComposerHighlightRect(rows, 0, 18, PixelRect(x: 0, y: 0, w: 400, h: 80)).isNone
 
+  test "bare ASCII > shell and agent-harness prompts are not Codex chrome":
+    ## Antigravity / Gemini CLI / plain shells use `>` — must not light up.
+    check isCodexPromptRow("> /skills") == false
+    check isCodexPromptRow("> /add-dir") == false
+    check isCodexPromptRow(">") == false
+    check isCodexPromptRow("> Write a summary") == false
+    check isCodexPromptRow("  > markdown blockquote") == false
+    let rows = [
+      "### Skill Folder Structure",
+      "> /skills",
+      "  tree content under the command chrome",
+      "  more residual line",
+      "  status · Gemini 3.5 Flash (Medium)",
+    ]
+    check codexPromptHighlightRects(rows, 18, PixelRect(x: 0, y: 0, w: 500, h: 120)).len == 0
+    check codexComposerHighlightRect(rows, 1, 18, PixelRect(x: 0, y: 0, w: 500, h: 120)).isNone
+
+  test "boxed ASCII > still counts as Codex-style chrome":
+    check isCodexPromptRow("│ > draft a plan")
+    check isCodexPromptRow("| > draft a plan")
+
   test "codex prompt highlights include transcript prompts":
     let rows = [
       "› earlier request",

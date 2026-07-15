@@ -77,11 +77,16 @@ func isCodexPromptRow*(row: string): bool =
   ## Codex draws transcript chrome in the cell grid when it can; this only
   ## matches common prompt lead-ins so hosts can paint a soft affordance when
   ## the child used plain text. It is not an official Codex protocol.
+  ##
+  ## Deliberately does **not** match a bare ASCII `>` lead-in. Shell-style
+  ## agent harnesses (Antigravity, Gemini CLI, etc.) use `> /command` and
+  ## `>` prompts; treating those as Codex chrome paints full-width gray bands
+  ## over live TUI frames. Prefer the Codex `›` / `▌` markers, or a boxed
+  ## `│ >` / `| >` prefix which plain shells do not emit.
   let text = row.trimmedRow()
   if text.len == 0:
     return false
   text.startsWith("›") or
-    text.startsWith(">") or
     text.startsWith("▌") or
     text.startsWith("│ ›") or
     text.startsWith("| ›") or

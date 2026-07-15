@@ -38,6 +38,7 @@ import ../cg/universal_resource_ledger_nim/src/resource_ledger_lib
 from ../cg/universal_clipboard_provider_nim/src/clipboard_provider_lib as clipboard_provider_lib import nil
 from ../cg/backend_system_clipboard_nim/src/system_clipboard_lib as system_clipboard_lib import nil
 import ../cg/data_terminal_scroll_policy_nim/src/terminal_scroll_policy_lib
+import ../cg/data_terminal_resize_policy_nim/src/terminal_resize_policy_lib
 import ../cg/data_terminal_profile_nim/src/terminal_profile_lib
 import ../cg/frontend_app_surface_relays_nim/src/app_surface_relays_lib
 import ../cg/frontend_workspace_chrome_nim/src/workspace_chrome_lib
@@ -112,6 +113,7 @@ const
     "/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf",
     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
   ]
+  TabLabelRefreshSec = 0.35
 
 type
   PaneId = pane_tree.PaneId
@@ -141,6 +143,7 @@ type
     titleBarHeight: int
     tabBarHeight: int
     backgroundColor: string
+    foregroundColor: string
     scrollback: int
     maxPanes: int
     diagnosticsCapacity: int
@@ -169,6 +172,8 @@ var
   catalogMenuAnchorY = 0
   catalogScrollDrag: scrollbar_lib.ScrollbarDrag
   appToasts: toast_lib.ToastQueue = toast_lib.newToastQueue()
+  terminalResizeLimit = newResizeRateLimit(DefaultMinIntervalSec)
+  undersizedPaneToastArmed = true
   activeSearchProcess: Process = nil
   activeSearchQuery = ""
   catalogRootPath = DefaultCatalogRoot
@@ -185,6 +190,7 @@ var
     titleBarHeight: DefaultTitleBarHeight,
     tabBarHeight: DefaultTabBarHeight,
     backgroundColor: "#050607",
+    foregroundColor: "#f5f6f8",
     scrollback: DefaultScrollback,
     maxPanes: DefaultMaxPanes,
     diagnosticsCapacity: DefaultDiagnosticsCapacity,
@@ -235,6 +241,7 @@ var
   # per-pixel motion floods that would otherwise turn a click into a drag.
   lastMouseReportRow = -1
   lastMouseReportCol = -1
+  lastTabLabelRefresh = 0.0
 
 when defined(waymarkSdl3):
   var
@@ -328,6 +335,7 @@ proc loadTerminalConfig(path = ConfigPath): TerminalConfig =
       result.titleBarHeight = max(24, parseIntOr(dict.getSectionValue("chrome", "title_bar_height", $result.titleBarHeight), result.titleBarHeight))
       result.tabBarHeight = max(22, parseIntOr(dict.getSectionValue("chrome", "tab_bar_height", $result.tabBarHeight), result.tabBarHeight))
       result.backgroundColor = dict.getSectionValue("theme", "background", result.backgroundColor)
+      result.foregroundColor = dict.getSectionValue("theme", "foreground", result.foregroundColor)
       let requestedAtlas = max(256, parseIntOr(dict.getSectionValue("resources", "glyph_atlas_size", $result.glyphAtlasSize), result.glyphAtlasSize))
       result.glyphAtlasSize = int(recommendedCap(resourceLimit("glyph_atlas", DefaultGlyphAtlasSize, MaxGlyphAtlasSize), requestedAtlas.int64))
     except CatchableError as e:
@@ -438,8 +446,11 @@ proc pollActiveShellCwd(): string =
 proc activeWorkspaceSyncUpdateActive(): bool =
   let workspace = activeWorkspace()
   if workspace == nil: return false
+  let now = epochTime()
   for session in workspace[].sessions:
-    if session.terminal != nil and session.terminal.synchronizedUpdateActive():
+    if session.terminal == nil: continue
+    discard session.terminal.releaseStuckSyncUpdate(now)
+    if session.terminal.synchronizedUpdateActive():
       return true
   false
 
@@ -1145,7 +1156,13 @@ proc chooseInitialWindowSize() =
   winWidth = min(DefaultWindowWidth, maxWidth)
   winHeight = min(DefaultWindowHeight, maxHeight)
 
-proc refreshTabCwdLabels(): bool =
+proc refreshTabCwdLabels(force = false): bool =
+  ## Throttle /proc reads — every frame was pure syscall noise and added up
+  ## under multi-tab long sessions without showing in RSS.
+  let now = epochTime()
+  if not force and (now - lastTabLabelRefresh) < TabLabelRefreshSec:
+    return false
+  lastTabLabelRefresh = now
   for wi in 0 ..< workspaces.len:
     if refreshWorkspaceTabLabel(wi):
       result = true
@@ -1232,11 +1249,25 @@ proc shellArgsFor(cwd: string): seq[string] =
     @["-i"]
 
 proc applyConfiguredTheme(term: Terminal) =
+  var touched = false
   let background = parseColor(config.backgroundColor)
   if background.isSome:
     let c = background.get()
     term.screen.theme.background = PaletteColor(r: c.r, g: c.g, b: c.b)
+    touched = true
+  let foreground = parseColor(config.foregroundColor)
+  if foreground.isSome:
+    let c = foreground.get()
+    let ink = PaletteColor(r: c.r, g: c.g, b: c.b)
+    term.screen.theme.foreground = ink
+    ## Keep ANSI white (index 7) aligned with default ink so bold-as-bright
+    ## and plain default text share the same baseline brightness.
+    term.screen.theme.ansi[7] = ink
+    touched = true
+  if touched:
     term.damage.markAll()
+
+proc pushToast(text: string)
 
 proc captureResizeAnchors(): seq[ViewAnchor] =
   for workspace in workspaces:
@@ -1247,42 +1278,101 @@ proc captureResizeAnchors(): seq[ViewAnchor] =
       let term = workspace.sessions[idx].terminal
       result.add term.viewport.captureResizeAnchor(term.screen.absoluteCursorRow())
 
-proc resizeTerminalViewsPreservingView(anchors: seq[ViewAnchor] = @[]) =
+proc resizeTerminalViewsPreservingView(
+    anchors: seq[ViewAnchor] = @[];
+    force = false;
+    now = epochTime(),
+) =
+  ## Apply PTY/grid sizes for all panes. Skips no-ops, holds last good size when
+  ## a pane is below the TUI floor, and rate-limits SIGWINCH when `force` is false.
   if rend == nil or rend.atlas == nil: return
   var anchorIdx = 0
+  var anyUndersized = false
+  var anyApplied = false
   for workspace in workspaces.mitems:
     let layouts = workspace.panes.layouts(contentRect())
     for item in layouts:
       let idx = workspace.sessionIndex(item.id)
       if idx < 0: continue
+      let term = workspace.sessions[idx].terminal
       let anchor =
         if anchorIdx < anchors.len:
           anchors[anchorIdx]
         else:
-          workspace.sessions[idx].terminal.viewport.captureResizeAnchor(workspace.sessions[idx].terminal.screen.absoluteCursorRow())
+          term.viewport.captureResizeAnchor(term.screen.absoluteCursorRow())
       inc anchorIdx
-      let cols = paneCols(item.rect)
-      let rows = paneRows(item.rect)
-      workspace.sessions[idx].terminal.host.resize(cols, rows)
-      workspace.sessions[idx].terminal.screen.resizePreserveBottom(cols, rows, preserveCursorRowWhenShort = false)
-      workspace.sessions[idx].terminal.damage.resize(rows)
-      workspace.sessions[idx].terminal.drag.height = rows
-      workspace.sessions[idx].terminal.viewport.restoreAnchor(
-        totalRows = workspace.sessions[idx].terminal.screen.totalRows,
+      let desiredCols = paneCols(item.rect)
+      let desiredRows = paneRows(item.rect)
+      var plan =
+        if force:
+          planTerminalResize(
+            desiredCols, desiredRows,
+            term.screen.cols, term.screen.rows,
+            MinTerminalPaneCols, MinTerminalPaneRows,
+          )
+        else:
+          planWithRateLimit(
+            terminalResizeLimit, now,
+            desiredCols, desiredRows,
+            term.screen.cols, term.screen.rows,
+            MinTerminalPaneCols, MinTerminalPaneRows,
+          )
+      if plan.undersized:
+        anyUndersized = true
+      if not plan.apply:
+        continue
+      let cols = plan.cols
+      let rows = plan.rows
+      term.host.resize(cols, rows)
+      ## Alt-screen TUIs: buffer resize only (child repaints). Primary: reflow.
+      term.screen.resizePreserveBottom(cols, rows, preserveCursorRowWhenShort = false)
+      term.damage.resize(rows)
+      term.drag.height = rows
+      term.viewport.restoreAnchor(
+        totalRows = term.screen.totalRows,
         height = rows,
         anchor = anchor,
         contextRowsAbove = ZoomContextRowsAbove,
         pinBottom = false,
       )
-      if item.id == workspace.panes.active and not workspace.sessions[idx].terminal.viewport.userHeld:
-        workspace.sessions[idx].terminal.viewport.ensureVisible(
-          workspace.sessions[idx].terminal.screen.absoluteCursorRow(),
+      if item.id == workspace.panes.active and not term.viewport.userHeld:
+        term.viewport.ensureVisible(
+          term.screen.absoluteCursorRow(),
           ZoomContextRowsAbove,
         )
-      workspace.sessions[idx].terminal.damage.markAll()
+      term.damage.markAll()
+      anyApplied = true
+  if anyApplied:
+    terminalResizeLimit.markApplied(now)
+  if anyUndersized and undersizedPaneToastArmed:
+    pushToast("Pane too small — enlarge window or close a split")
+    undersizedPaneToastArmed = false
+  elif not anyUndersized:
+    undersizedPaneToastArmed = true
 
-proc resizeTerminals() =
-  resizeTerminalViewsPreservingView(captureResizeAnchors())
+proc requestTerminalResize*() =
+  ## Mark that geometry changed; the main loop flushes under rate limit.
+  terminalResizeLimit.noteResizeActivity()
+
+proc resizeTerminals(force = true) =
+  ## Immediate resize pass. `force` bypasses rate limiting (split/close/zoom).
+  requestTerminalResize()
+  let now = epochTime()
+  resizeTerminalViewsPreservingView(captureResizeAnchors(), force = force, now = now)
+  if force:
+    ## Consume pending so the main loop does not immediately re-apply.
+    terminalResizeLimit.pending = false
+    terminalResizeLimit.markApplied(now)
+
+proc flushTerminalResizeIfDue(now: float): bool =
+  ## Coalesced resize for continuous window drags (rate-limited SIGWINCH).
+  if not terminalResizeLimit.shouldRunResizePass:
+    return false
+  if not terminalResizeLimit.canApplyNow(now):
+    return false
+  discard takePending(terminalResizeLimit)
+  resizeTerminalViewsPreservingView(captureResizeAnchors(), force = false, now = now)
+  true
 
 proc paneBudgetAllows(workspace: TerminalWorkspace, requested = 1): bool =
   let decision = decide(
@@ -1293,7 +1383,6 @@ proc paneBudgetAllows(workspace: TerminalWorkspace, requested = 1): bool =
 
 proc installTerminalClipboardHooks(term: Terminal)
 proc drawAppToasts()
-proc pushToast(text: string)
 
 proc newSession(paneId: PaneId, area: PaneRect, cwd: string): TerminalSession =
   let sessionCwd = validSessionCwd(cwd)
@@ -1732,7 +1821,8 @@ proc pumpTerminalSessions(): int =
       let readCount = session.terminal.step()
       if readCount > 0:
         session.terminal.refreshViewport(stickToBottom = true)
-      n += readCount
+        n += readCount
+      ## arWouldBlock returns -1; do not fold that into the "bytes read" total.
   n
 
 proc toggleSurface() =
@@ -1827,7 +1917,7 @@ proc rebuildAtlas() =
   rend = newGpuTerminalRenderer(atlas, chromeAtlas, gpuRelays)
   rend.loadLogoTexture(config.logoPath)
   updateChromeHeights()
-  resizeTerminalViewsPreservingView(anchors)
+  resizeTerminalViewsPreservingView(anchors, force = true)
 
 proc snapshotToJson(s: ResourceSnapshot): JsonNode =
   result = %*{
@@ -2587,7 +2677,8 @@ when not defined(waymarkSdl3):
       winWidth = report.chosen.width
       winHeight = report.chosen.height
       if rend != nil and rend.atlas != nil:
-        resizeTerminals()
+        ## Request only; main loop rate-limits the PTY pass during live drag.
+        requestTerminalResize()
     render_relay_lib.setViewport(frameRelays, render_relay_lib.size2d(int(actualWidth), int(actualHeight)))
     if resizeSnapshotPath.len > 0:
       try:
@@ -3122,15 +3213,20 @@ let maxFps = block:
   try: max(1, parseInt(raw)) except CatchableError: 120
 let frameBudgetSec = 1.0 / maxFps.float
 while true:
+  ## Poll first so window-close / input is not stuck behind a heavy tick+draw.
+  pollEvents()
   if window_relay_lib.shouldClose(windowRelays): break
   let frameStart = epochTime()
   perf.beginFrame()
   let resized = syncFramebufferSize()
   if resized:
     markCartographDirty(cartographWorkspace)
+    requestTerminalResize()
     if surfaceStack.active == asWorkspace:
       clampCartographCatalogScroll(cartographWorkspace, catalogListLayout().visibleRows)
-  resizeTerminals()
+  ## Do not resize every frame — that spammed host.resize/SIGWINCH. Flush only
+  ## when geometry activity is pending and the rate limit allows it.
+  discard flushTerminalResizeIfDue(frameStart)
   let n = surfaceStack.tickActive()
   let term = activeTerm()
   if term == nil and surfaceStack.active == asPrimary:
@@ -3164,7 +3260,10 @@ while true:
     writeGpuSnapshot()
     if term != nil:
       writeScreenSnapshot(term)
-  pollEvents(); perf.endFrame()
+  ## Second poll so close/key events that arrived during draw are not deferred a full frame.
+  pollEvents()
+  perf.endFrame()
+  if window_relay_lib.shouldClose(windowRelays): break
   if perf.shouldReport(2.0):
     let s = perf.takeReport()
     echo "FPS: ", s.fps, " Latency: ", s.avgLatencyMs, " ms"
@@ -3176,6 +3275,8 @@ while true:
     os.sleep(int((frameBudgetSec - frameSec) * 1000.0))
 
 persistActiveSurface()
+## Tear down PTYs with the non-blocking wait path so shutdown cannot hang.
+closeAllWorkspaces()
 
 if rend != nil:
   rend.dispose()

@@ -21,9 +21,11 @@ func rgb*(r, g, b: uint8): RgbColor = RgbColor(r: r, g: g, b: b)
 # ---------------------------------------------------------------------------
 
 func defaultTheme*(): TerminalTheme =
+  ## Near-black background with a slightly cooler, brighter default ink so
+  ## body text stays crisp on modern dark TUIs (agent harnesses, markdown).
   TerminalTheme(
-    background: rgb(0, 0, 0),
-    foreground: rgb(229, 229, 229),
+    background: rgb(5, 6, 7),
+    foreground: rgb(245, 246, 248),
     cursor:     rgb(255, 255, 255),
     selection:  rgb(173, 214, 255),
     ansi: [
@@ -34,7 +36,7 @@ func defaultTheme*(): TerminalTheme =
       rgb(0, 0, 238),     # 4: Blue
       rgb(205, 0, 205),   # 5: Magenta
       rgb(0, 205, 205),   # 6: Cyan
-      rgb(229, 229, 229), # 7: White
+      rgb(245, 246, 248), # 7: White (match default ink)
       rgb(127, 127, 127), # 8: Bright Black
       rgb(255, 0, 0),     # 9: Bright Red
       rgb(0, 255, 0),     # 10: Bright Green

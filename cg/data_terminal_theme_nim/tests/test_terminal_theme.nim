@@ -5,7 +5,8 @@ suite "terminal theme":
 
   test "default theme has expected colors":
     let t = defaultTheme()
-    check t.background == rgb(0, 0, 0)
+    check t.background == rgb(5, 6, 7)
+    check t.foreground == rgb(245, 246, 248)
     check t.ansi[1] == rgb(205, 0, 0) # Red
 
   test "getColor with override":

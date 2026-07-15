@@ -47,3 +47,16 @@ suite "Terminal Sync Update":
     var state = newSyncUpdateState()
     check state.setActive(true).entered
     check state.setActive(false).exited
+
+  test "force end times out a stuck bracket":
+    var state = newSyncUpdateState()
+    discard state.beginUpdate()
+    state.markDirty()
+    state.noteBeginTime(1.0)
+    let early = state.forceEndIfTimedOut(1.1, maxSec = 0.25)
+    check state.active
+    check not early.changed
+    let late = state.forceEndIfTimedOut(1.5, maxSec = 0.25)
+    check not state.active
+    check late.exited
+    check late.shouldPresent

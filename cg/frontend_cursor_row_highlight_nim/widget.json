@@ -2,7 +2,7 @@
   "meta": {
     "id": "frontend-cursor-row-highlight-nim",
     "name": "Cursor Row Highlight",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "domain": "frontend",
     "tags": [
       "terminal",
@@ -25,7 +25,7 @@
   },
   "validation": {
     "engine_version": 3,
-    "validated_at": "2026-07-10T17:32:51.506752+00:00",
+    "validated_at": "2026-07-15T00:51:03.523745+00:00",
     "runtime": "nim 2.2.10"
   }
 }

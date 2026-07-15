@@ -1,7 +1,7 @@
 ## Project glue: assemble PTY host, UTF-8 decoder, VT parser, VT command
 ## translator, and screen buffer into a single `Terminal` pipeline.
 
-import std/[options, strutils]
+import std/[options, strutils, times]
 import ../cg/backend_pty_host_nim/src/pty_host_lib
 import ../cg/universal_utf8_decoder_nim/src/utf8_decoder_lib
 import ../cg/data_vt_parser_nim/src/vt_parser_lib
@@ -253,6 +253,8 @@ proc applyMode(t: Terminal, code: int, private: bool, set: bool) =
     of 2004: t.inputMode.bracketedPaste = set
     of 2026:
       let transition = t.syncUpdate.setActive(set)
+      if transition.entered:
+        t.syncUpdate.noteBeginTime(epochTime())
       if transition.exited and transition.shouldPresent:
         t.damage.markAll()
     else: discard
@@ -532,7 +534,11 @@ proc feedBytes*(t: Terminal, data: openArray[byte]) =
     of veCsiDispatch: (if not ev.ignored: t.apply(translateCsi(toDispatchParams(ev.params), ev.intermediates, ev.final)))
     of veOscDispatch: t.apply(translateOsc(ev.oscData))
     of veDcsHook: (t.dcsActive = true; t.dcsParams = ev.params; t.dcsIntermediates = ev.intermediates; t.dcsFinal = ev.final; t.dcsData = @[])
-    of veDcsPut: (if t.dcsActive: t.dcsData.add ev.byteVal)
+    of veDcsPut:
+      ## Bound DCS payload so a never-unhooked stream cannot grow without limit
+      ## (CPU on every feed, flat-looking RSS until GC pressure stalls the frame).
+      if t.dcsActive and t.dcsData.len < 1_048_576:
+        t.dcsData.add ev.byteVal
     of veDcsUnhook: (if t.dcsActive: (t.apply(translateDcs(toDispatchParams(t.dcsParams), t.dcsIntermediates, t.dcsFinal, t.dcsData)); t.dcsActive = false; t.dcsData = @[]))
   t.parser.feed(data, vtEmit)
 
@@ -580,11 +586,24 @@ proc step*(t: Terminal, bufSize: int = 4096): int =
   of arEof:
     t.host.eof = true
     t.host.close()
+    ## Reap promptly so zombies do not accumulate across long sessions.
+    ## Call host.waitExit directly — Terminal.waitExit is defined later.
+    discard t.host.waitExit()
     0
 
 proc drain*(t: Terminal, maxBytes: int = 1_000_000): int =
   var total = 0
-  while total < maxBytes: (let n = t.step(); if n == 0: break; if n < 0: continue; total += n)
+  ## Cap would-block spins so a full write queue cannot busy-loop forever.
+  var idleSpins = 0
+  while total < maxBytes:
+    let n = t.step()
+    if n == 0: break
+    if n < 0:
+      inc idleSpins
+      if idleSpins > 64: break
+      continue
+    idleSpins = 0
+    total += n
   discard t.flush(); total
 
 proc returnToLiveInput*(t: Terminal): bool =
@@ -619,6 +638,19 @@ proc sendPaste*(t: Terminal, text: string): int =
 proc sendFocus*(t: Terminal, gained: bool): int = (if not t.inputMode.focusReporting: 0 else: t.sendReport(reportFocus(gained)))
 proc sendClipboardResponse*(t: Terminal, selector, text: string): int = (let encoded = encode(text); t.sendReport(reportClipboard(selector, encoded)))
 func synchronizedUpdateActive*(t: Terminal): bool = t.syncUpdate.shouldDeferPresent()
+
+proc releaseStuckSyncUpdate*(t: Terminal, nowSec: float = epochTime(),
+    maxSec: float = DefaultSyncUpdateMaxSec): bool =
+  ## Force-present if a synchronized-update bracket never ends. Returns true when
+  ## present should resume after a timeout.
+  if t == nil: return false
+  let transition = t.syncUpdate.forceEndIfTimedOut(nowSec, maxSec)
+  if transition.exited:
+    if transition.shouldPresent:
+      t.damage.markAll()
+    return true
+  false
+
 proc refreshViewport*(t: Terminal, stickToBottom: bool = true) =
   t.viewport.updateBufferHeight(t.screen.totalRows, stickToBottom)
 proc resize*(t: Terminal, cols, rows: int) = (t.host.resize(cols, rows); t.screen.resize(cols, rows); t.damage.resize(rows); t.viewport.height = rows; t.refreshViewport())

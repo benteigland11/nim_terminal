@@ -171,6 +171,23 @@ suite "Scrolling":
       s.linefeed()
     check s.scrollbackLen == 3
 
+  test "scrollback bulk-trims when over soft slack":
+    ## Large caps amortize with slack; force enough lines to trigger bulk trim.
+    let cap = 32
+    let slack = min(ScrollbackTrimSlack, max(0, cap div 4))
+    let s = newScreen(4, 1, scrollback = cap)
+    for i in 0 ..< cap + slack + 1:
+      s.writeChar(char(ord('a') + (i mod 26)))
+      s.linefeed()
+    ## Just after crossing the soft limit we drop back to the hard cap.
+    check s.scrollbackLen == cap
+    for i in 0 ..< slack:
+      s.writeChar(char(ord('A') + (i mod 26)))
+      s.linefeed()
+    ## Between trims the buffer may sit in the soft window.
+    check s.scrollbackLen <= cap + slack
+    check s.scrollbackLen >= cap
+
   test "scroll region keeps outside lines untouched":
     let s = newScreen(4, 4)
     for r in 0 ..< 4:
@@ -493,6 +510,55 @@ suite "Erase":
     s.writeString("› prior submitted prompt")
 
     check not s.archiveRowForHistory(0)
+    check s.scrollbackLen == 0
+
+  test "line archive ignores agent-harness slash-command chrome":
+    ## Antigravity / Gemini-style sticky command UI redraws in place; archiving
+    ## it on every EL/ED stacks ghost `> /skills` rows into history.
+    let s = newScreen(80, 5, scrollback = 10)
+
+    s.writeString("> /skills")
+    check not s.archiveRowForHistory(0)
+
+    s.cursorTo(1, 0)
+    s.writeString("> /add-dir")
+    check not s.archiveRowForHistory(1)
+
+    s.cursorTo(2, 0)
+    s.writeString(">")
+    check not s.archiveRowForHistory(2)
+
+    s.cursorTo(3, 0)
+    s.writeString("esc to cancel")
+    check not s.archiveRowForHistory(3)
+
+    s.cursorTo(4, 0)
+    s.writeString("Accept-edits mode: file edits auto-approved (shift+tab to cycle)")
+    check not s.archiveRowForHistory(4)
+
+    check s.scrollbackLen == 0
+
+  test "line archive still keeps plain agent user transcript lines":
+    ## Only slash-command / empty `>` chrome is volatile — real user text after
+    ## `> ` must remain archiveable for scrollback.
+    let s = newScreen(60, 1, scrollback = 10)
+    s.writeString("> explain the skill folder structure")
+    check s.archiveRowForHistory(0)
+    check s.scrollbackLen == 1
+    check s.scrollbackText(0).strip() == "> explain the skill folder structure"
+
+  test "ED clear-all ignores agent-harness command palette frame":
+    let s = newScreen(80, 4, scrollback = 10)
+    s.writeString("> /skills")
+    s.cursorTo(1, 0)
+    s.writeString("> /add-dir")
+    s.cursorTo(2, 0)
+    s.writeString("↓ 48 more")
+    s.cursorTo(3, 0)
+    s.writeString("Accept-edits mode: file edits auto-approved (shift+tab to cycle)")
+
+    s.eraseInDisplay(emAll)
+
     check s.scrollbackLen == 0
 
   test "ED clear-all blanks the whole screen":

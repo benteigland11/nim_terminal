@@ -123,15 +123,51 @@ proc ptySignal*(b: PosixBackend, pid, signum: int) =
   if posix.kill(Pid(-pid), cint(signum)) == -1:
     discard posix.kill(Pid(pid), cint(signum))
 
-proc ptyWait*(b: PosixBackend, pid: int): int =
-  var status: cint = 0
-  let rc = waitpid(Pid(pid), status, 0)
-  if rc == -1:
-    return -1
+proc encodeWaitStatus(status: cint): int =
   if WIFEXITED(status):
     return encodeExitNormal(int(WEXITSTATUS(status)))
   if WIFSIGNALED(status):
     return encodeExitSignaled(int(WTERMSIG(status)))
+  -1
+
+proc ptyWait*(b: PosixBackend, pid: int): int =
+  ## Reap `pid` without hanging the UI forever.
+  ##
+  ## Long-lived agent CLIs and process groups sometimes ignore the first
+  ## SIGTERM. A blocking `waitpid(..., 0)` freezes the whole terminal (and
+  ## the window close path) while RSS stays flat — exactly the "FPS dies and
+  ## I cannot shut down" failure mode. Poll with WNOHANG, escalate to SIGKILL,
+  ## then give up so the main loop stays responsive.
+  if pid <= 0:
+    return -1
+  var status: cint = 0
+  const
+    pollMs = 10
+    softTimeoutMs = 400
+    hardTimeoutMs = 200
+  let softAttempts = max(1, softTimeoutMs div pollMs)
+  for _ in 0 ..< softAttempts:
+    let rc = waitpid(Pid(pid), status, WNOHANG)
+    if rc == Pid(pid):
+      return encodeWaitStatus(status)
+    if rc == -1:
+      if errno == ECHILD:
+        return -1
+      return -1
+    sleep(pollMs)
+  # Escalate: process group first (children call setsid), then the pid.
+  discard posix.kill(Pid(-pid), SIGKILL)
+  discard posix.kill(Pid(pid), SIGKILL)
+  let hardAttempts = max(1, hardTimeoutMs div pollMs)
+  for _ in 0 ..< hardAttempts:
+    let rc = waitpid(Pid(pid), status, WNOHANG)
+    if rc == Pid(pid):
+      return encodeWaitStatus(status)
+    if rc == -1:
+      if errno == ECHILD:
+        return -1
+      return -1
+    sleep(pollMs)
   -1
 
 proc ptyClose*(b: PosixBackend, handle: int) =

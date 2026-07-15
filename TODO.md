@@ -14,7 +14,7 @@ These are personal notes for possible future Waymark work, not a release roadmap
   - [x] Add a vttest-style corpus for cursor movement, scrolling, erase, insert/delete, SGR, alternate screen, OSC, DCS, and parser cancellation. (Done: Fully ported esctest coverage for core VT behaviors)
   - [ ] Add legacy 8-bit C1 profile coverage to the compliance suite. (Parser support exists behind `utf8Mode = false`; this still needs vector-level coverage separate from the default UTF-8 profile.)
   - [x] Add mouse reporting vectors, not just mode toggling. (Done: `data-input-vt-encoding-nim` covers disabled, X11, SGR, wheel, drag, modifiers, and coordinate clamping; Waymark compliance covers `1000`, `1002`, `1003`, and `1006` mode state.)
-  - [ ] Add resize/reflow validation cases for normal screen, alternate screen, and pane-sized terminals.
+  - [x] Add resize/reflow validation cases for normal screen, alternate screen, and pane-sized terminals. (Policy widget + host: skip no-op resize, hold last-good PTY size under min floor, rate-limit SIGWINCH; golden vectors still thin.)
   - [x] Add more wide-character and combining-mark edge cases around `DCH`, `ICH`, `ECH`, wrapping, and selection. (Done: Fixed emoji tearing in data-screen-buffer-nim widget)
   - [x] Add malformed/split OSC, CSI, and DCS fuzz-style cases with expected recovery behavior. (Done: Parser correctly swallows/recovers out of the box)
   - [ ] Track remaining xterm/vttest gaps explicitly as unsupported, partial, or passing.

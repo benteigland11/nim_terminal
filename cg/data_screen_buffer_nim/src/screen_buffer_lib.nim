@@ -150,14 +150,14 @@ func rgb*(r, g, b: uint8): PaletteColor = PaletteColor(r: r, g: g, b: b)
 
 func defaultTheme*(): TerminalTheme =
   TerminalTheme(
-    background: rgb(0, 0, 0),
-    foreground: rgb(229, 229, 229),
+    background: rgb(5, 6, 7),
+    foreground: rgb(245, 246, 248),
     cursor:     rgb(255, 255, 255),
     selection:  rgb(148, 113, 24),
     ansi: [
       rgb(0, 0, 0), rgb(205, 0, 0), rgb(0, 205, 0), rgb(205, 205, 0),
-      rgb(0, 0, 238), rgb(205, 0, 205), rgb(0, 205, 205), rgb(229, 229, 229),
-      rgb(127, 127, 127), rgb(255, 0, 0), rgb(0, 255, 0), rgb(255, 255, 255),
+      rgb(0, 0, 238), rgb(205, 0, 205), rgb(0, 205, 205), rgb(245, 246, 248),
+      rgb(127, 127, 127), rgb(255, 0, 0), rgb(0, 255, 0), rgb(255, 255, 0),
       rgb(92, 92, 255), rgb(255, 0, 255), rgb(0, 255, 255), rgb(255, 255, 255)
     ]
   )
@@ -428,14 +428,40 @@ proc clearGrid(grid: var seq[seq[Cell]], startRow, endRow: int, cols: int, attrs
   for r in startRow .. endRow:
     for c in 0 ..< cols: grid[r][c] = emptyCell(attrs)
 
+const
+  ## When over cap, allow slack then drop back in one bulk slice. Per-line
+  ## `delete(0)` is O(cap) and tanks frame rate once scrollback is full.
+  ScrollbackTrimSlack* = 64
+
+proc trimScrollbackToCap*(rows: var seq[seq[Cell]], wraps: var seq[bool], cap: int) =
+  ## Drop oldest rows so `rows.len <= cap` in one slice (not N×delete(0)).
+  if cap <= 0:
+    rows.setLen(0)
+    wraps.setLen(0)
+    return
+  if rows.len > cap:
+    let drop = rows.len - cap
+    rows = rows[drop .. ^1]
+  if wraps.len > rows.len:
+    ## Keep wrap flags aligned with remaining rows.
+    let drop = wraps.len - rows.len
+    wraps = wraps[drop .. ^1]
+  elif wraps.len > cap:
+    let drop = wraps.len - cap
+    wraps = wraps[drop .. ^1]
+
 proc addScrollbackRow(rows: var seq[seq[Cell]], wraps: var seq[bool], row: seq[Cell], wrapped: bool, cap: int) =
   if cap <= 0:
     return
   rows.add row
   wraps.add wrapped
-  if rows.len > cap:
-    rows.delete(0)
-    if wraps.len > 0: wraps.delete(0)
+  if rows.len <= cap:
+    return
+  ## Amortize: grow a little past the cap, then drop all excess in one slice.
+  ## Small caps (cap < 4) keep exact length because slack becomes 0.
+  let slack = min(ScrollbackTrimSlack, max(0, cap div 4))
+  if rows.len > cap + slack:
+    trimScrollbackToCap(rows, wraps, cap)
 
 func rowHasContent(row: seq[Cell]): bool =
   for cell in row:
@@ -486,6 +512,18 @@ func isVolatileInlineStatusRow(row: seq[Cell]): bool =
       text.startsWith("└ Edited "):
     return true
   if text.startsWith("› "):
+    return true
+  ## Agent-harness slash-command chrome (Antigravity / Gemini-style). These
+  ## redraw in place as sticky overlays; soft-archiving them stacks ghost
+  ## prompt/command rows into scrollback history on every palette open.
+  if text.startsWith("> /") or text == ">":
+    return true
+  if text.startsWith("esc to cancel") or text.startsWith("esc to interrupt"):
+    return true
+  if text.startsWith("Accept-edits mode") or text.startsWith("accept-edits mode") or
+      text.startsWith("Accept edits mode") or text.contains("file edits auto-approved"):
+    return true
+  if text.startsWith("↓ ") and text.contains(" more"):
     return true
   false
 
@@ -789,9 +827,7 @@ proc resize*(s: Screen, cols, rows: int) =
       for c in oldCols ..< cols: row[c] = emptyCell(attrs)
       s.scrollback.add row
       s.scrollbackSoftWrap.add s.rowSoftWrap[i]
-      if s.scrollback.len > s.scrollbackCap:
-        s.scrollback.delete(0)
-        if s.scrollbackSoftWrap.len > 0: s.scrollbackSoftWrap.delete(0)
+    trimScrollbackToCap(s.scrollback, s.scrollbackSoftWrap, s.scrollbackCap)
     for i in 0 ..< rows: s.grid[i] = s.grid[i + diff]
     for i in 0 ..< rows: s.rowSoftWrap[i] = s.rowSoftWrap[i + diff]
     s.grid.setLen(rows); s.altGrid.setLen(rows)
@@ -1075,9 +1111,7 @@ proc resizePreserveBottom*(s: Screen, cols, rows: int, preserveCursorRowWhenShor
       for c in oldCols ..< cols: row[c] = emptyCell(attrs)
       s.scrollback.add row
       s.scrollbackSoftWrap.add oldWraps[i]
-      if s.scrollback.len > s.scrollbackCap:
-        s.scrollback.delete(0)
-        if s.scrollbackSoftWrap.len > 0: s.scrollbackSoftWrap.delete(0)
+    trimScrollbackToCap(s.scrollback, s.scrollbackSoftWrap, s.scrollbackCap)
 
   s.cols = cols
   s.rows = rows
